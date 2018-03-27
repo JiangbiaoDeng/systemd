@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -24,15 +25,15 @@
 #include <sys/types.h>
 
 #include "macro.h"
+#include "label.h"
 
 bool mac_selinux_use(void);
-bool mac_selinux_have(void);
 void mac_selinux_retest(void);
 
 int mac_selinux_init(void);
 void mac_selinux_finish(void);
 
-int mac_selinux_fix(const char *path, bool ignore_enoent, bool ignore_erofs);
+int mac_selinux_fix(const char *path, LabelFixFlags flags);
 int mac_selinux_apply(const char *path, const char *label);
 
 int mac_selinux_get_create_label_from_exe(const char *exe, char **label);

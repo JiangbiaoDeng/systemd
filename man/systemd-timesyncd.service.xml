@@ -3,6 +3,8 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2014 Kay Sievers
@@ -64,6 +66,12 @@
     reboots to ensure it monotonically advances even if the system
     lacks a battery-buffered RTC chip.</para>
 
+    <para>The <filename>systemd-timesyncd</filename> service
+    specifically implements only SNTP. This minimalistic
+    service will set the system clock for large offsets or
+    slowly adjust it for smaller deltas. More complex use
+    cases are not covered by <filename>systemd-timesyncd</filename>.</para>
+
     <para>The NTP servers contacted are determined from the global
     settings in
     <citerefentry><refentrytitle>timesyncd.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
@@ -82,7 +90,7 @@
 
     <variablelist>
       <varlistentry>
-        <term><filename>/var/lib/systemd/clock</filename></term>
+        <term><filename>/var/lib/systemd/timesync/clock</filename></term>
 
         <listitem>
           <para>This file contains the timestamp of the last successful

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -109,7 +110,7 @@ static int ipv4ll_address_handler(sd_netlink *rtnl, sd_netlink_message *m, void 
 
         link->ipv4ll_address = true;
 
-        if (link->ipv4ll_route == true)
+        if (link->ipv4ll_route)
                 link_check_ready(link);
 
         return 1;
@@ -179,12 +180,22 @@ static void ipv4ll_handler(sd_ipv4ll *ll, int event, void *userdata) {
 
         switch(event) {
                 case SD_IPV4LL_EVENT_STOP:
+                        r = ipv4ll_address_lost(link);
+                        if (r < 0) {
+                                link_enter_failed(link);
+                                return;
+                        }
+                        break;
                 case SD_IPV4LL_EVENT_CONFLICT:
                         r = ipv4ll_address_lost(link);
                         if (r < 0) {
                                 link_enter_failed(link);
                                 return;
                         }
+
+                        r = sd_ipv4ll_restart(ll);
+                        if (r < 0)
+                                log_link_warning(link, "Could not acquire IPv4 link-local address");
                         break;
                 case SD_IPV4LL_EVENT_BIND:
                         r = ipv4ll_address_claimed(ll, link);

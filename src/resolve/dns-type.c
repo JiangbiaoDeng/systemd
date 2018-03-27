@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -18,6 +19,7 @@
 ***/
 
 #include <sys/socket.h>
+#include <errno.h>
 
 #include "dns-type.h"
 #include "parse-util.h"
@@ -29,7 +31,7 @@ typedef const struct {
 } dns_type;
 
 static const struct dns_type_name *
-lookup_dns_type (register const char *str, register unsigned int len);
+lookup_dns_type (register const char *str, register GPERF_LEN_TYPE len);
 
 #include "dns_type-from-name.h"
 #include "dns_type-to-name.h"

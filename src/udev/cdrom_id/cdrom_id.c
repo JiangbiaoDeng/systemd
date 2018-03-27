@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * cdrom_id - optical drive and media information prober
  *
@@ -38,6 +39,7 @@
 
 #include "libudev-private.h"
 #include "random-util.h"
+#include "udev-util.h"
 
 /* device info */
 static unsigned int cd_cd_rom;
@@ -543,7 +545,7 @@ static int cd_profiles(struct udev *udev, int fd)
         if ((err != 0)) {
                 info_scsi_cmd_err(udev, "GET CONFIGURATION", err);
                 /* handle pre-MMC2 drives which do not support GET CONFIGURATION */
-                if (SK(err) == 0x5 && (ASC(err) == 0x20 || ASC(err) == 0x24)) {
+                if (SK(err) == 0x5 && IN_SET(ASC(err), 0x20, 0x24)) {
                         log_debug("drive is pre-MMC2 and does not support 46h get configuration command");
                         log_debug("trying to work around the problem");
                         ret = cd_profiles_old_mmc(udev, fd);
@@ -564,7 +566,7 @@ static int cd_profiles(struct udev *udev, int fd)
         log_debug("GET CONFIGURATION: size of features buffer 0x%04x", len);
 
         if (len > sizeof(features)) {
-                log_debug("can not get features in a single query, truncating");
+                log_debug("cannot get features in a single query, truncating");
                 len = sizeof(features);
         } else if (len <= 8)
                 len = sizeof(features);
@@ -586,7 +588,7 @@ static int cd_profiles(struct udev *udev, int fd)
         log_debug("GET CONFIGURATION: size of features buffer 0x%04x", len);
 
         if (len > sizeof(features)) {
-                log_debug("can not get features in a single query, truncating");
+                log_debug("cannot get features in a single query, truncating");
                 len = sizeof(features);
         }
 
@@ -843,8 +845,7 @@ static int cd_media_toc(struct udev *udev, int fd)
         return 0;
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
         struct udev *udev;
         static const struct option options[] = {
                 { "lock-media", no_argument, NULL, 'l' },
@@ -862,6 +863,8 @@ int main(int argc, char *argv[])
         int cnt;
         int rc = 0;
 
+        log_set_target(LOG_TARGET_AUTO);
+        udev_parse_config();
         log_parse_environment();
         log_open();
 

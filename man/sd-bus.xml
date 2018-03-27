@@ -3,6 +3,8 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2016 Zbigniew Jędrzejewski-Szmek
@@ -62,7 +64,7 @@
     <title>Description</title>
 
     <para><filename>sd-bus.h</filename> provides an implementation of a D-Bus IPC client. See
-    <ulink url="http://www.freedesktop.org/software/dbus/" />
+    <ulink url="https://www.freedesktop.org/software/dbus/" />
     for more information about D-Bus IPC.
     </para>
 

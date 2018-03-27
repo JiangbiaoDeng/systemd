@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -50,8 +51,7 @@ _public_ int sd_network_get_operational_state(char **state) {
         if (isempty(s))
                 return -ENODATA;
 
-        *state = s;
-        s = NULL;
+        *state = TAKE_PTR(s);
 
         return 0;
 }
@@ -80,8 +80,7 @@ static int network_get_strv(const char *key, char ***ret) {
         strv_uniq(a);
         r = strv_length(a);
 
-        *ret = a;
-        a = NULL;
+        *ret = TAKE_PTR(a);
 
         return r;
 }
@@ -103,7 +102,7 @@ _public_ int sd_network_get_route_domains(char ***ret) {
 }
 
 static int network_link_get_string(int ifindex, const char *field, char **ret) {
-        char path[strlen("/run/systemd/netif/links/") + DECIMAL_STR_MAX(ifindex) + 1];
+        char path[STRLEN("/run/systemd/netif/links/") + DECIMAL_STR_MAX(ifindex) + 1];
         _cleanup_free_ char *s = NULL;
         int r;
 
@@ -120,14 +119,13 @@ static int network_link_get_string(int ifindex, const char *field, char **ret) {
         if (isempty(s))
                 return -ENODATA;
 
-        *ret = s;
-        s = NULL;
+        *ret = TAKE_PTR(s);
 
         return 0;
 }
 
 static int network_link_get_strv(int ifindex, const char *key, char ***ret) {
-        char path[strlen("/run/systemd/netif/links/") + DECIMAL_STR_MAX(ifindex) + 1];
+        char path[STRLEN("/run/systemd/netif/links/") + DECIMAL_STR_MAX(ifindex) + 1];
         _cleanup_strv_free_ char **a = NULL;
         _cleanup_free_ char *s = NULL;
         int r;
@@ -153,8 +151,7 @@ static int network_link_get_strv(int ifindex, const char *key, char ***ret) {
         strv_uniq(a);
         r = strv_length(a);
 
-        *ret = a;
-        a = NULL;
+        *ret = TAKE_PTR(a);
 
         return r;
 }
@@ -169,6 +166,21 @@ _public_ int sd_network_link_get_network_file(int ifindex, char **filename) {
 
 _public_ int sd_network_link_get_operational_state(int ifindex, char **state) {
         return network_link_get_string(ifindex, "OPER_STATE", state);
+}
+
+_public_ int sd_network_link_get_required_for_online(int ifindex) {
+        _cleanup_free_ char *s = NULL;
+        int r;
+
+        r = network_link_get_string(ifindex, "REQUIRED_FOR_ONLINE", &s);
+        if (r < 0) {
+                /* Handle -ENODATA as RequiredForOnline=yes, for compatibility */
+                if (r == -ENODATA)
+                        return true;
+                return r;
+        }
+
+        return parse_boolean(s);
 }
 
 _public_ int sd_network_link_get_llmnr(int ifindex, char **llmnr) {
@@ -208,7 +220,7 @@ _public_ int sd_network_link_get_route_domains(int ifindex, char ***ret) {
 }
 
 static int network_link_get_ifindexes(int ifindex, const char *key, int **ret) {
-        char path[strlen("/run/systemd/netif/links/") + DECIMAL_STR_MAX(ifindex) + 1];
+        char path[STRLEN("/run/systemd/netif/links/") + DECIMAL_STR_MAX(ifindex) + 1];
         _cleanup_free_ int *ifis = NULL;
         _cleanup_free_ char *s = NULL;
         size_t allocated = 0, c = 0;
@@ -245,10 +257,9 @@ static int network_link_get_ifindexes(int ifindex, const char *key, int **ret) {
         }
 
         if (ifis)
-                ifis[c] = 0; /* Let's add a 0 ifindex to the end, to be nice*/
+                ifis[c] = 0; /* Let's add a 0 ifindex to the end, to be nice */
 
-        *ret = ifis;
-        ifis = NULL;
+        *ret = TAKE_PTR(ifis);
 
         return c;
 }
@@ -342,7 +353,7 @@ _public_ int sd_network_monitor_flush(sd_network_monitor *m) {
 
         l = read(fd, &buffer, sizeof(buffer));
         if (l < 0) {
-                if (errno == EAGAIN || errno == EINTR)
+                if (IN_SET(errno, EAGAIN, EINTR))
                         return 0;
 
                 return -errno;

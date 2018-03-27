@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,6 +20,7 @@
 ***/
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <net/ethernet.h>
 #include <stdio.h>
 #include <string.h>
@@ -98,14 +100,14 @@ static void test_receive_basic_packet(sd_event *e) {
 
         static const uint8_t frame[] = {
                 /* Ethernet header */
-                0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,     /* Destination MAC*/
+                0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,     /* Destination MAC */
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,     /* Source MAC */
                 0x88, 0xcc,                             /* Ethertype */
                 /* LLDP mandatory TLVs */
                 0x02, 0x07, 0x04, 0x00, 0x01, 0x02,     /* Chassis: MAC, 00:01:02:03:04:05 */
                 0x03, 0x04, 0x05,
                 0x04, 0x04, 0x05, 0x31, 0x2f, 0x33,     /* Port: interface name, "1/3" */
-                0x06, 0x02, 0x00, 0x78,                 /* TTL: 120 seconds*/
+                0x06, 0x02, 0x00, 0x78,                 /* TTL: 120 seconds */
                 /* LLDP optional TLVs */
                 0x08, 0x04, 0x50, 0x6f, 0x72, 0x74,     /* Port Description: "Port" */
                 0x0a, 0x03, 0x53, 0x59, 0x53,           /* System Name: "SYS" */
@@ -137,7 +139,7 @@ static void test_receive_basic_packet(sd_event *e) {
         assert_se(sd_lldp_neighbor_get_port_id(neighbors[0], &type, &data, &length) == 0);
         assert_se(type == SD_LLDP_PORT_SUBTYPE_INTERFACE_NAME);
         assert_se(length == 3);
-        assert_se(strneq((char *) data, "1/3", 3));
+        assert_se(!memcmp(data, "1/3", 3));
 
         assert_se(sd_lldp_neighbor_get_port_description(neighbors[0], &str) == 0);
         assert_se(streq(str, "Port"));
@@ -162,7 +164,7 @@ static void test_receive_incomplete_packet(sd_event *e) {
         sd_lldp_neighbor **neighbors;
         uint8_t frame[] = {
                 /* Ethernet header */
-                0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,     /* Destination MAC*/
+                0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,     /* Destination MAC */
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,     /* Source MAC */
                 0x88, 0xcc,                             /* Ethertype */
                 /* LLDP mandatory TLVs */
@@ -189,14 +191,14 @@ static void test_receive_oui_packet(sd_event *e) {
         sd_lldp_neighbor **neighbors;
         uint8_t frame[] = {
                 /* Ethernet header */
-                0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,     /* Destination MAC*/
+                0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,     /* Destination MAC */
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,     /* Source MAC */
                 0x88, 0xcc,                             /* Ethertype */
                 /* LLDP mandatory TLVs */
                 0x02, 0x07, 0x04, 0x00, 0x01, 0x02,     /* Chassis: MAC, 00:01:02:03:04:05 */
                 0x03, 0x04, 0x05,
                 0x04, 0x04, 0x05, 0x31, 0x2f, 0x33,     /* Port TLV: interface name, "1/3" */
-                0x06, 0x02, 0x00, 0x78,                 /* TTL: 120 seconds*/
+                0x06, 0x02, 0x00, 0x78,                 /* TTL: 120 seconds */
                 /* LLDP optional TLVs */
                 0xfe, 0x06, 0x00, 0x80, 0xc2, 0x01,     /* Port VLAN ID: 0x1234 */
                 0x12, 0x34,

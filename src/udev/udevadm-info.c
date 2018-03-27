@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright (C) 2004-2009 Kay Sievers <kay@vrfy.org>
  *
@@ -16,7 +17,6 @@
  */
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "dirent-util.h"
 #include "fd-util.h"
 #include "string-util.h"
 #include "udev-util.h"
@@ -136,14 +137,15 @@ static void print_record(struct udev_device *device) {
 
         str = udev_device_get_devnode(device);
         if (str != NULL)
-                printf("N: %s\n", str + strlen("/dev/"));
+                printf("N: %s\n", str + STRLEN("/dev/"));
 
         i = udev_device_get_devlink_priority(device);
         if (i != 0)
                 printf("L: %i\n", i);
 
         udev_list_entry_foreach(list_entry, udev_device_get_devlinks_list_entry(device))
-                printf("S: %s\n", udev_list_entry_get_name(list_entry) + strlen("/dev/"));
+                printf("S: %s\n",
+                       udev_list_entry_get_name(list_entry) + STRLEN("/dev/"));
 
         udev_list_entry_foreach(list_entry, udev_device_get_properties_list_entry(device))
                 printf("E: %s=%s\n",
@@ -196,7 +198,7 @@ static void cleanup_dir(DIR *dir, mode_t mask, int depth) {
         if (depth <= 0)
                 return;
 
-        for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
+        FOREACH_DIRENT_ALL(dent, dir, break) {
                 struct stat stats;
 
                 if (dent->d_name[0] == '.')
@@ -249,7 +251,7 @@ static void help(void) {
         printf("%s info [OPTIONS] [DEVPATH|FILE]\n\n"
                "Query sysfs or the udev database.\n\n"
                "  -h --help                   Print this message\n"
-               "     --version                Print version of the program\n"
+               "  -V --version                Print version of the program\n"
                "  -q --query=TYPE             Query device information:\n"
                "       name                     Name of device node\n"
                "       symlink                  Pointing to node\n"
@@ -376,7 +378,7 @@ static int uinfo(struct udev *udev, int argc, char *argv[]) {
                         export_prefix = optarg;
                         break;
                 case 'V':
-                        printf("%s\n", VERSION);
+                        print_version();
                         return 0;
                 case 'h':
                         help();
@@ -411,7 +413,8 @@ static int uinfo(struct udev *udev, int argc, char *argv[]) {
                         if (root)
                                 printf("%s\n", udev_device_get_devnode(device));
                         else
-                                printf("%s\n", udev_device_get_devnode(device) + strlen("/dev/"));
+                                printf("%s\n",
+                                       udev_device_get_devnode(device) + STRLEN("/dev/"));
                         break;
                 }
                 case QUERY_SYMLINK:
@@ -420,7 +423,8 @@ static int uinfo(struct udev *udev, int argc, char *argv[]) {
                                 if (root)
                                         printf("%s", udev_list_entry_get_name(list_entry));
                                 else
-                                        printf("%s", udev_list_entry_get_name(list_entry) + strlen("/dev/"));
+                                        printf("%s",
+                                               udev_list_entry_get_name(list_entry) + STRLEN("/dev/"));
                                 list_entry = udev_list_entry_get_next(list_entry);
                                 if (list_entry != NULL)
                                         printf(" ");

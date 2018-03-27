@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -99,12 +100,12 @@ triple_timestamp* triple_timestamp_from_realtime(triple_timestamp *ts, usec_t u)
 #define TRIPLE_TIMESTAMP_HAS_CLOCK(clock)                               \
         IN_SET(clock, CLOCK_REALTIME, CLOCK_REALTIME_ALARM, CLOCK_MONOTONIC, CLOCK_BOOTTIME, CLOCK_BOOTTIME_ALARM)
 
-static inline bool dual_timestamp_is_set(dual_timestamp *ts) {
+static inline bool dual_timestamp_is_set(const dual_timestamp *ts) {
         return ((ts->realtime > 0 && ts->realtime != USEC_INFINITY) ||
                 (ts->monotonic > 0 && ts->monotonic != USEC_INFINITY));
 }
 
-static inline bool triple_timestamp_is_set(triple_timestamp *ts) {
+static inline bool triple_timestamp_is_set(const triple_timestamp *ts) {
         return ((ts->realtime > 0 && ts->realtime != USEC_INFINITY) ||
                 (ts->monotonic > 0 && ts->monotonic != USEC_INFINITY) ||
                 (ts->boottime > 0 && ts->boottime != USEC_INFINITY));
@@ -133,6 +134,7 @@ int timestamp_deserialize(const char *value, usec_t *timestamp);
 int parse_timestamp(const char *t, usec_t *usec);
 
 int parse_sec(const char *t, usec_t *usec);
+int parse_sec_fix_0(const char *t, usec_t *usec);
 int parse_time(const char *t, usec_t *usec, usec_t default_unit);
 int parse_nsec(const char *t, nsec_t *nsec);
 
@@ -145,9 +147,7 @@ bool clock_boottime_supported(void);
 bool clock_supported(clockid_t clock);
 clockid_t clock_boottime_or_monotonic(void);
 
-#define xstrftime(buf, fmt, tm) \
-        assert_message_se(strftime(buf, ELEMENTSOF(buf), fmt, tm) > 0, \
-                          "xstrftime: " #buf "[] must be big enough")
+usec_t usec_shift_clock(usec_t, clockid_t from, clockid_t to);
 
 int get_timezone(char **timezone);
 
@@ -155,6 +155,8 @@ time_t mktime_or_timegm(struct tm *tm, bool utc);
 struct tm *localtime_or_gmtime_r(const time_t *t, struct tm *tm, bool utc);
 
 unsigned long usec_to_jiffies(usec_t usec);
+
+bool in_utc_timezone(void);
 
 static inline usec_t usec_add(usec_t a, usec_t b) {
         usec_t c;
@@ -169,15 +171,30 @@ static inline usec_t usec_add(usec_t a, usec_t b) {
         return c;
 }
 
-static inline usec_t usec_sub(usec_t timestamp, int64_t delta) {
-        if (delta < 0)
-                return usec_add(timestamp, (usec_t) (-delta));
+static inline usec_t usec_sub_unsigned(usec_t timestamp, usec_t delta) {
 
         if (timestamp == USEC_INFINITY) /* Make sure infinity doesn't degrade */
                 return USEC_INFINITY;
-
-        if (timestamp < (usec_t) delta)
+        if (timestamp < delta)
                 return 0;
 
         return timestamp - delta;
 }
+
+static inline usec_t usec_sub_signed(usec_t timestamp, int64_t delta) {
+        if (delta < 0)
+                return usec_add(timestamp, (usec_t) (-delta));
+        else
+                return usec_sub_unsigned(timestamp, (usec_t) delta);
+}
+
+#if SIZEOF_TIME_T == 8
+/* The last second we can format is 31. Dec 9999, 1s before midnight, because otherwise we'd enter 5 digit year
+ * territory. However, since we want to stay away from this in all timezones we take one day off. */
+#define USEC_TIMESTAMP_FORMATTABLE_MAX ((usec_t) 253402214399000000)
+#elif SIZEOF_TIME_T == 4
+/* With a 32bit time_t we can't go beyond 2038... */
+#define USEC_TIMESTAMP_FORMATTABLE_MAX ((usec_t) 2147483647000000)
+#else
+#error "Yuck, time_t is neither 4 not 8 bytes wide?"
+#endif

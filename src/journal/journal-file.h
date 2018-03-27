@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -21,7 +22,7 @@
 
 #include <inttypes.h>
 
-#ifdef HAVE_GCRYPT
+#if HAVE_GCRYPT
 #include <gcrypt.h>
 #endif
 
@@ -75,6 +76,7 @@ typedef enum OfflineState {
 
 typedef struct JournalFile {
         int fd;
+        MMapFileDescriptor *cache_fd;
 
         mode_t mode;
 
@@ -87,8 +89,6 @@ typedef struct JournalFile {
         bool defrag_on_close:1;
         bool close_fd:1;
         bool archive:1;
-
-        bool tail_entry_monotonic_valid:1;
 
         direction_t last_direction;
         LocationType location_type;
@@ -120,12 +120,15 @@ typedef struct JournalFile {
         pthread_t offline_thread;
         volatile OfflineState offline_state;
 
-#if defined(HAVE_XZ) || defined(HAVE_LZ4)
+        unsigned last_seen_generation;
+
+        uint64_t compress_threshold_bytes;
+#if HAVE_XZ || HAVE_LZ4
         void *compress_buffer;
         size_t compress_buffer_size;
 #endif
 
-#ifdef HAVE_GCRYPT
+#if HAVE_GCRYPT
         gcry_md_hd_t hmac;
         bool hmac_running;
 
@@ -149,6 +152,7 @@ int journal_file_open(
                 int flags,
                 mode_t mode,
                 bool compress,
+                uint64_t compress_threshold_bytes,
                 bool seal,
                 JournalMetrics *metrics,
                 MMapCache *mmap_cache,
@@ -159,13 +163,13 @@ int journal_file_open(
 int journal_file_set_offline(JournalFile *f, bool wait);
 bool journal_file_is_offlining(JournalFile *f);
 JournalFile* journal_file_close(JournalFile *j);
-void journal_file_close_set(Set *s);
 
 int journal_file_open_reliably(
                 const char *fname,
                 int flags,
                 mode_t mode,
                 bool compress,
+                uint64_t compress_threshold_bytes,
                 bool seal,
                 JournalMetrics *metrics,
                 MMapCache *mmap_cache,
@@ -243,7 +247,7 @@ int journal_file_copy_entry(JournalFile *from, JournalFile *to, Object *o, uint6
 void journal_file_dump(JournalFile *f);
 void journal_file_print_header(JournalFile *f);
 
-int journal_file_rotate(JournalFile **f, bool compress, bool seal, Set *deferred_closes);
+int journal_file_rotate(JournalFile **f, bool compress, uint64_t compress_threshold_bytes, bool seal, Set *deferred_closes);
 
 void journal_file_post_change(JournalFile *f);
 int journal_file_enable_post_change_timer(JournalFile *f, sd_event *e, usec_t t);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -22,6 +23,7 @@
 
 #include "cgroup-util.h"
 #include "path-util.h"
+#include "process-util.h"
 #include "string-util.h"
 #include "util.h"
 
@@ -35,19 +37,19 @@ int main(int argc, char*argv[]) {
         assert_se(cg_create(SYSTEMD_CGROUP_CONTROLLER, "/test-b/test-c") == 0);
         assert_se(cg_create_and_attach(SYSTEMD_CGROUP_CONTROLLER, "/test-b", 0) == 0);
 
-        assert_se(cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, getpid(), &path) == 0);
+        assert_se(cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, getpid_cached(), &path) == 0);
         assert_se(streq(path, "/test-b"));
         free(path);
 
         assert_se(cg_attach(SYSTEMD_CGROUP_CONTROLLER, "/test-a", 0) == 0);
 
-        assert_se(cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, getpid(), &path) == 0);
+        assert_se(cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, getpid_cached(), &path) == 0);
         assert_se(path_equal(path, "/test-a"));
         free(path);
 
         assert_se(cg_create_and_attach(SYSTEMD_CGROUP_CONTROLLER, "/test-b/test-d", 0) == 0);
 
-        assert_se(cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, getpid(), &path) == 0);
+        assert_se(cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, getpid_cached(), &path) == 0);
         assert_se(path_equal(path, "/test-b/test-d"));
         free(path);
 

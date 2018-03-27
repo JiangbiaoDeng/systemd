@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -118,16 +119,15 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, sd_id128_t *ret) {
                         fd = open(etc_machine_id, O_RDONLY|O_CLOEXEC|O_NOCTTY);
                         if (fd < 0) {
                                 if (old_errno == EROFS && errno == ENOENT)
-                                        log_error_errno(errno,
+                                        return log_error_errno(errno,
                                                   "System cannot boot: Missing /etc/machine-id and /etc is mounted read-only.\n"
                                                   "Booting up is supported only when:\n"
                                                   "1) /etc/machine-id exists and is populated.\n"
                                                   "2) /etc/machine-id exists and is empty.\n"
                                                   "3) /etc/machine-id is missing and /etc is writable.\n");
                                 else
-                                        log_error_errno(errno, "Cannot open %s: %m", etc_machine_id);
-
-                                return -errno;
+                                        return log_error_errno(errno,
+                                                               "Cannot open %s: %m", etc_machine_id);
                         }
 
                         writable = false;
@@ -146,14 +146,18 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, sd_id128_t *ret) {
                 r = generate_machine_id(root, &machine_id);
                 if (r < 0)
                         return r;
-
-                if (lseek(fd, 0, SEEK_SET) == (off_t) -1)
-                        return log_error_errno(errno, "Failed to seek: %m");
         }
 
-        if (writable)
+        if (writable) {
+                if (lseek(fd, 0, SEEK_SET) == (off_t) -1)
+                        return log_error_errno(errno, "Failed to seek %s: %m", etc_machine_id);
+
+                if (ftruncate(fd, 0) < 0)
+                        return log_error_errno(errno, "Failed to truncate %s: %m", etc_machine_id);
+
                 if (id128_write_fd(fd, ID128_PLAIN, machine_id, true) >= 0)
                         goto finish;
+        }
 
         fd = safe_close(fd);
 
@@ -199,7 +203,7 @@ int machine_id_commit(const char *root) {
 
         etc_machine_id = prefix_roota(root, "/etc/machine-id");
 
-        r = path_is_mount_point(etc_machine_id, 0);
+        r = path_is_mount_point(etc_machine_id, NULL, 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to determine whether %s is a mount point: %m", etc_machine_id);
         if (r == 0) {

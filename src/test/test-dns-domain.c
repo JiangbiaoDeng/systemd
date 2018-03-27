@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -229,7 +230,7 @@ static void test_dns_name_between_one(const char *a, const char *b, const char *
 
         r = dns_name_between(c, b, a);
         if (ret >= 0)
-                assert_se(r == 0);
+                assert_se(r == 0 || dns_name_equal(a, c) > 0);
         else
                 assert_se(r == ret);
 }
@@ -248,7 +249,8 @@ static void test_dns_name_between(void) {
         test_dns_name_between_one("*.z.example", "\\200.z.example", "example", true);
         test_dns_name_between_one("\\200.z.example", "example", "a.example", true);
 
-        test_dns_name_between_one("example", "a.example", "example", -EINVAL);
+        test_dns_name_between_one("example", "a.example", "example", true);
+        test_dns_name_between_one("example", "example", "example", false);
         test_dns_name_between_one("example", "example", "yljkjljk.a.example", false);
         test_dns_name_between_one("example", "yljkjljk.a.example", "yljkjljk.a.example", false);
 }
@@ -373,16 +375,16 @@ static void test_dns_name_is_valid(void) {
         test_dns_name_is_valid_one("ä", 1);
         test_dns_name_is_valid_one("\n", 0);
 
-        /* 256 characters*/
+        /* 256 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345", 0);
 
-        /* 255 characters*/
+        /* 255 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a1234", 0);
 
-        /* 254 characters*/
+        /* 254 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a123", 0);
 
-        /* 253 characters*/
+        /* 253 characters */
         test_dns_name_is_valid_one("a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12345678.a12", 1);
 
         /* label of 64 chars length */
@@ -424,6 +426,30 @@ static void test_dns_srv_type_is_valid(void) {
         assert_se(!dns_srv_type_is_valid("_-800._tcp"));
         assert_se(!dns_srv_type_is_valid("_-foo._tcp"));
         assert_se(!dns_srv_type_is_valid("_piep._foo._udp"));
+}
+
+static void test_dnssd_srv_type_is_valid(void) {
+
+        assert_se(dnssd_srv_type_is_valid("_http._tcp"));
+        assert_se(dnssd_srv_type_is_valid("_foo-bar._tcp"));
+        assert_se(dnssd_srv_type_is_valid("_w._udp"));
+        assert_se(dnssd_srv_type_is_valid("_a800._tcp"));
+        assert_se(dnssd_srv_type_is_valid("_a-800._tcp"));
+
+        assert_se(!dnssd_srv_type_is_valid(NULL));
+        assert_se(!dnssd_srv_type_is_valid(""));
+        assert_se(!dnssd_srv_type_is_valid("x"));
+        assert_se(!dnssd_srv_type_is_valid("_foo"));
+        assert_se(!dnssd_srv_type_is_valid("_tcp"));
+        assert_se(!dnssd_srv_type_is_valid("_"));
+        assert_se(!dnssd_srv_type_is_valid("_foo."));
+        assert_se(!dnssd_srv_type_is_valid("_föo._tcp"));
+        assert_se(!dnssd_srv_type_is_valid("_f\no._tcp"));
+        assert_se(!dnssd_srv_type_is_valid("_800._tcp"));
+        assert_se(!dnssd_srv_type_is_valid("_-800._tcp"));
+        assert_se(!dnssd_srv_type_is_valid("_-foo._tcp"));
+        assert_se(!dnssd_srv_type_is_valid("_piep._foo._udp"));
+        assert_se(!dnssd_srv_type_is_valid("_foo._unknown"));
 }
 
 static void test_dns_service_join_one(const char *a, const char *b, const char *c, int r, const char *d) {
@@ -607,24 +633,62 @@ static void test_dns_name_common_suffix(void) {
         test_dns_name_common_suffix_one("FOO.BAR", "tEST.bAR", "BAR");
 }
 
-static void test_dns_name_apply_idna_one(const char *s, const char *result) {
-#ifdef HAVE_LIBIDN
+static void test_dns_name_apply_idna_one(const char *s, int expected, const char *result) {
         _cleanup_free_ char *buf = NULL;
-        assert_se(dns_name_apply_idna(s, &buf) >= 0);
-        assert_se(dns_name_equal(buf, result) > 0);
-#endif
+        int r;
+
+        r = dns_name_apply_idna(s, &buf);
+        log_debug("dns_name_apply_idna: \"%s\" → %d/\"%s\" (expected %d/\"%s\")",
+                  s, r, strnull(buf), expected, strnull(result));
+
+        /* Different libidn2 versions are more and less accepting
+         * of underscore-prefixed names. So let's list the lowest
+         * expected return value. */
+        assert_se(r >= expected);
+        if (expected == 1)
+                assert_se(dns_name_equal(buf, result) == 1);
 }
 
 static void test_dns_name_apply_idna(void) {
-        test_dns_name_apply_idna_one("", "");
-        test_dns_name_apply_idna_one("foo", "foo");
-        test_dns_name_apply_idna_one("foo.", "foo");
-        test_dns_name_apply_idna_one("foo.bar", "foo.bar");
-        test_dns_name_apply_idna_one("foo.bar.", "foo.bar");
-        test_dns_name_apply_idna_one("föö", "xn--f-1gaa");
-        test_dns_name_apply_idna_one("föö.", "xn--f-1gaa");
-        test_dns_name_apply_idna_one("föö.bär", "xn--f-1gaa.xn--br-via");
-        test_dns_name_apply_idna_one("föö.bär.", "xn--f-1gaa.xn--br-via");
+#if HAVE_LIBIDN2 || HAVE_LIBIDN
+        const int ret = 1;
+#else
+        const int ret = 0;
+#endif
+
+        /* IDNA2008 forbids names with hyphens in third and fourth positions
+         * (https://tools.ietf.org/html/rfc5891#section-4.2.3.1).
+         * IDNA2003 does not have this restriction
+         * (https://tools.ietf.org/html/rfc3490#section-5).
+         * This means that when using libidn we will transform and test more
+         * labels. If registrars follow IDNA2008 we'll just be performing a
+         * useless lookup.
+         */
+#if HAVE_LIBIDN
+        const int ret2 = 1;
+#else
+        const int ret2 = 0;
+#endif
+
+        test_dns_name_apply_idna_one("", ret, "");
+        test_dns_name_apply_idna_one("foo", ret, "foo");
+        test_dns_name_apply_idna_one("foo.", ret, "foo");
+        test_dns_name_apply_idna_one("foo.bar", ret, "foo.bar");
+        test_dns_name_apply_idna_one("foo.bar.", ret, "foo.bar");
+        test_dns_name_apply_idna_one("föö", ret, "xn--f-1gaa");
+        test_dns_name_apply_idna_one("föö.", ret, "xn--f-1gaa");
+        test_dns_name_apply_idna_one("föö.bär", ret, "xn--f-1gaa.xn--br-via");
+        test_dns_name_apply_idna_one("föö.bär.", ret, "xn--f-1gaa.xn--br-via");
+        test_dns_name_apply_idna_one("xn--f-1gaa.xn--br-via", ret, "xn--f-1gaa.xn--br-via");
+
+        test_dns_name_apply_idna_one("_443._tcp.fedoraproject.org", ret2,
+                                     "_443._tcp.fedoraproject.org");
+        test_dns_name_apply_idna_one("_443", ret2, "_443");
+        test_dns_name_apply_idna_one("gateway", ret, "gateway");
+        test_dns_name_apply_idna_one("_gateway", ret2, "_gateway");
+
+        test_dns_name_apply_idna_one("r3---sn-ab5l6ne7.googlevideo.com", ret2,
+                                     ret2 ? "r3---sn-ab5l6ne7.googlevideo.com" : "");
 }
 
 static void test_dns_name_is_valid_or_address(void) {
@@ -640,6 +704,9 @@ static void test_dns_name_is_valid_or_address(void) {
 }
 
 int main(int argc, char *argv[]) {
+        log_set_max_level(LOG_DEBUG);
+        log_parse_environment();
+        log_open();
 
         test_dns_label_unescape();
         test_dns_label_unescape_suffix();
@@ -657,6 +724,7 @@ int main(int argc, char *argv[]) {
         test_dns_name_to_wire_format();
         test_dns_service_name_is_valid();
         test_dns_srv_type_is_valid();
+        test_dnssd_srv_type_is_valid();
         test_dns_service_join();
         test_dns_service_split();
         test_dns_name_change_suffix();

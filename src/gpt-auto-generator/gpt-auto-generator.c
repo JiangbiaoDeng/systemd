@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,7 +18,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <blkid/blkid.h>
+#include <blkid.h>
 #include <stdlib.h>
 #include <sys/statfs.h>
 #include <unistd.h>
@@ -27,8 +28,10 @@
 
 #include "alloc-util.h"
 #include "blkid-util.h"
+#include "blockdev-util.h"
 #include "btrfs-util.h"
 #include "dirent-util.h"
+#include "dissect-image.h"
 #include "efivars.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -42,6 +45,7 @@
 #include "path-util.h"
 #include "proc-cmdline.h"
 #include "special.h"
+#include "specifier.h"
 #include "stat-util.h"
 #include "string-util.h"
 #include "udev-util.h"
@@ -54,15 +58,14 @@ static bool arg_enabled = true;
 static bool arg_root_enabled = true;
 static bool arg_root_rw = false;
 
-static int add_cryptsetup(const char *id, const char *what, bool rw, char **device) {
-        _cleanup_free_ char *e = NULL, *n = NULL, *p = NULL, *d = NULL, *to = NULL;
+static int add_cryptsetup(const char *id, const char *what, bool rw, bool require, char **device) {
+        _cleanup_free_ char *e = NULL, *n = NULL, *p = NULL, *d = NULL, *id_escaped = NULL, *what_escaped = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        char *from, *ret;
+        char *ret;
         int r;
 
         assert(id);
         assert(what);
-        assert(device);
 
         r = unit_name_from_path(what, ".device", &d);
         if (r < 0)
@@ -75,6 +78,14 @@ static int add_cryptsetup(const char *id, const char *what, bool rw, char **devi
         r = unit_name_build("systemd-cryptsetup", e, ".service", &n);
         if (r < 0)
                 return log_error_errno(r, "Failed to generate unit name: %m");
+
+        id_escaped = specifier_escape(id);
+        if (!id_escaped)
+                return log_oom();
+
+        what_escaped = specifier_escape(what);
+        if (!what_escaped)
+                return log_oom();
 
         p = strjoin(arg_dest, "/", n);
         if (!p)
@@ -99,43 +110,33 @@ static int add_cryptsetup(const char *id, const char *what, bool rw, char **devi
                 "Type=oneshot\n"
                 "RemainAfterExit=yes\n"
                 "TimeoutSec=0\n" /* the binary handles timeouts anyway */
+                "KeyringMode=shared\n" /* make sure we can share cached keys among instances */
                 "ExecStart=" SYSTEMD_CRYPTSETUP_PATH " attach '%s' '%s' '' '%s'\n"
                 "ExecStop=" SYSTEMD_CRYPTSETUP_PATH " detach '%s'\n",
                 d, d,
-                id, what, rw ? "" : "read-only",
-                id);
+                id_escaped, what_escaped, rw ? "" : "read-only",
+                id_escaped);
 
         r = fflush_and_check(f);
         if (r < 0)
                 return log_error_errno(r, "Failed to write file %s: %m", p);
 
-        from = strjoina("../", n);
+        r = generator_add_symlink(arg_dest, d, "wants", n);
+        if (r < 0)
+                return r;
 
-        to = strjoin(arg_dest, "/", d, ".wants/", n);
-        if (!to)
-                return log_oom();
+        if (require) {
+                const char *dmname;
 
-        mkdir_parents_label(to, 0755);
-        if (symlink(from, to) < 0)
-                return log_error_errno(errno, "Failed to create symlink %s: %m", to);
+                r = generator_add_symlink(arg_dest, "cryptsetup.target", "requires", n);
+                if (r < 0)
+                        return r;
 
-        free(to);
-        to = strjoin(arg_dest, "/cryptsetup.target.requires/", n);
-        if (!to)
-                return log_oom();
-
-        mkdir_parents_label(to, 0755);
-        if (symlink(from, to) < 0)
-                return log_error_errno(errno, "Failed to create symlink %s: %m", to);
-
-        free(to);
-        to = strjoin(arg_dest, "/dev-mapper-", e, ".device.requires/", n);
-        if (!to)
-                return log_oom();
-
-        mkdir_parents_label(to, 0755);
-        if (symlink(from, to) < 0)
-                return log_error_errno(errno, "Failed to create symlink %s: %m", to);
+                dmname = strjoina("dev-mapper-", e, ".device");
+                r = generator_add_symlink(arg_dest, dmname, "requires", n);
+                if (r < 0)
+                        return r;
+        }
 
         free(p);
         p = strjoin(arg_dest, "/dev-mapper-", e, ".device.d/50-job-timeout-sec-0.conf");
@@ -155,7 +156,8 @@ static int add_cryptsetup(const char *id, const char *what, bool rw, char **devi
         if (!ret)
                 return log_oom();
 
-        *device = ret;
+        if (device)
+                *device = ret;
         return 0;
 }
 
@@ -169,9 +171,13 @@ static int add_mount(
                 const char *description,
                 const char *post) {
 
-        _cleanup_free_ char *unit = NULL, *lnk = NULL, *crypto_what = NULL, *p = NULL;
+        _cleanup_free_ char *unit = NULL, *crypto_what = NULL, *p = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
+
+        /* Note that we don't apply specifier escaping on the input strings here, since we know they are not configured
+         * externally, but all originate from our own sources here, and hence we know they contain no % characters that
+         * could potentially be understood as specifiers. */
 
         assert(id);
         assert(what);
@@ -182,7 +188,7 @@ static int add_mount(
 
         if (streq_ptr(fstype, "crypto_LUKS")) {
 
-                r = add_cryptsetup(id, what, rw, &crypto_what);
+                r = add_cryptsetup(id, what, rw, true, &crypto_what);
                 if (r < 0)
                         return r;
 
@@ -235,16 +241,8 @@ static int add_mount(
         if (r < 0)
                 return log_error_errno(r, "Failed to write unit file %s: %m", p);
 
-        if (post) {
-                lnk = strjoin(arg_dest, "/", post, ".requires/", unit);
-                if (!lnk)
-                        return log_oom();
-
-                mkdir_parents_label(lnk, 0755);
-                if (symlink(p, lnk) < 0)
-                        return log_error_errno(errno, "Failed to create symlink %s: %m", lnk);
-        }
-
+        if (post)
+                return generator_add_symlink(arg_dest, post, "requires", unit);
         return 0;
 }
 
@@ -252,7 +250,7 @@ static bool path_is_busy(const char *where) {
         int r;
 
         /* already a mountpoint; generators run during reload */
-        r = path_is_mount_point(where, AT_SYMLINK_FOLLOW);
+        r = path_is_mount_point(where, NULL, AT_SYMLINK_FOLLOW);
         if (r > 0)
                 return false;
 
@@ -270,69 +268,45 @@ static bool path_is_busy(const char *where) {
         return false;
 }
 
-static int probe_and_add_mount(
+static int add_partition_mount(
+                DissectedPartition *p,
                 const char *id,
-                const char *what,
                 const char *where,
-                bool rw,
-                const char *description,
-                const char *post) {
+                const char *description) {
 
-        _cleanup_blkid_free_probe_ blkid_probe b = NULL;
-        const char *fstype = NULL;
-        int r;
-
-        assert(id);
-        assert(what);
-        assert(where);
-        assert(description);
+        assert(p);
 
         if (path_is_busy(where)) {
                 log_debug("%s already populated, ignoring.", where);
                 return 0;
         }
 
-        /* Let's check the partition type here, so that we know
-         * whether to do LUKS magic. */
-
-        errno = 0;
-        b = blkid_new_probe_from_filename(what);
-        if (!b) {
-                if (errno == 0)
-                        return log_oom();
-                return log_error_errno(errno, "Failed to allocate prober: %m");
-        }
-
-        blkid_probe_enable_superblocks(b, 1);
-        blkid_probe_set_superblocks_flags(b, BLKID_SUBLKS_TYPE);
-
-        errno = 0;
-        r = blkid_do_safeprobe(b);
-        if (r == -2 || r == 1) /* no result or uncertain */
-                return 0;
-        else if (r != 0)
-                return log_error_errno(errno ?: EIO, "Failed to probe %s: %m", what);
-
-        /* add_mount is OK with fstype being NULL. */
-        (void) blkid_probe_lookup_value(b, "TYPE", &fstype, NULL);
-
         return add_mount(
                         id,
-                        what,
+                        p->node,
                         where,
-                        fstype,
-                        rw,
+                        p->fstype,
+                        p->rw,
                         NULL,
                         description,
-                        post);
+                        SPECIAL_LOCAL_FS_TARGET);
 }
 
 static int add_swap(const char *path) {
-        _cleanup_free_ char *name = NULL, *unit = NULL, *lnk = NULL;
+        _cleanup_free_ char *name = NULL, *unit = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
 
         assert(path);
+
+        /* Disable the swap auto logic if at least one swap is defined in /etc/fstab, see #6192. */
+        r = fstab_has_fstype("swap");
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse fstab: %m");
+        if (r > 0) {
+                log_debug("swap specified in fstab, ignoring.");
+                return 0;
+        }
 
         log_debug("Adding swap: %s", path);
 
@@ -361,18 +335,10 @@ static int add_swap(const char *path) {
         if (r < 0)
                 return log_error_errno(r, "Failed to write unit file %s: %m", unit);
 
-        lnk = strjoin(arg_dest, "/" SPECIAL_SWAP_TARGET ".wants/", name);
-        if (!lnk)
-                return log_oom();
-
-        mkdir_parents_label(lnk, 0755);
-        if (symlink(unit, lnk) < 0)
-                return log_error_errno(errno, "Failed to create symlink %s: %m", lnk);
-
-        return 0;
+        return generator_add_symlink(arg_dest, SPECIAL_SWAP_TARGET, "wants", name);
 }
 
-#ifdef ENABLE_EFI
+#if ENABLE_EFI
 static int add_automount(
                 const char *id,
                 const char *what,
@@ -383,7 +349,7 @@ static int add_automount(
                 const char *description,
                 usec_t timeout) {
 
-        _cleanup_free_ char *unit = NULL, *lnk = NULL;
+        _cleanup_free_ char *unit = NULL;
         _cleanup_free_ char *opt, *p = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
@@ -438,30 +404,17 @@ static int add_automount(
         if (r < 0)
                 return log_error_errno(r, "Failed to write unit file %s: %m", p);
 
-        lnk = strjoin(arg_dest, "/" SPECIAL_LOCAL_FS_TARGET ".wants/", unit);
-        if (!lnk)
-                return log_oom();
-        mkdir_parents_label(lnk, 0755);
-
-        if (symlink(p, lnk) < 0)
-                return log_error_errno(errno, "Failed to create symlink %s: %m", lnk);
-
-        return 0;
+        return generator_add_symlink(arg_dest, SPECIAL_LOCAL_FS_TARGET, "wants", unit);
 }
 
-static int add_boot(const char *what) {
+static int add_esp(DissectedPartition *p) {
         const char *esp;
         int r;
 
-        assert(what);
+        assert(p);
 
         if (in_initrd()) {
                 log_debug("In initrd, ignoring the ESP.");
-                return 0;
-        }
-
-        if (detect_container() > 0) {
-                log_debug("In a container, ignoring the ESP.");
                 return 0;
         }
 
@@ -469,7 +422,10 @@ static int add_boot(const char *what) {
         esp = access("/efi/", F_OK) >= 0 ? "/efi" : "/boot";
 
         /* We create an .automount which is not overridden by the .mount from the fstab generator. */
-        if (fstab_is_mount_point(esp)) {
+        r = fstab_is_mount_point(esp);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse fstab: %m");
+        if (r > 0) {
                 log_debug("%s specified in fstab, ignoring.", esp);
                 return 0;
         }
@@ -480,9 +436,7 @@ static int add_boot(const char *what) {
         }
 
         if (is_efi_boot()) {
-                _cleanup_blkid_free_probe_ blkid_probe b = NULL;
-                const char *fstype = NULL, *uuid_string = NULL;
-                sd_id128_t loader_uuid, part_uuid;
+                sd_id128_t loader_uuid;
 
                 /* If this is an EFI boot, be extra careful, and only mount the ESP if it was the ESP used for booting. */
 
@@ -494,43 +448,7 @@ static int add_boot(const char *what) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to read ESP partition UUID: %m");
 
-                errno = 0;
-                b = blkid_new_probe_from_filename(what);
-                if (!b) {
-                        if (errno == 0)
-                                return log_oom();
-                        return log_error_errno(errno, "Failed to allocate prober: %m");
-                }
-
-                blkid_probe_enable_partitions(b, 1);
-                blkid_probe_set_partitions_flags(b, BLKID_PARTS_ENTRY_DETAILS);
-
-                errno = 0;
-                r = blkid_do_safeprobe(b);
-                if (r == -2 || r == 1) /* no result or uncertain */
-                        return 0;
-                else if (r != 0)
-                        return log_error_errno(errno ?: EIO, "Failed to probe %s: %m", what);
-
-                (void) blkid_probe_lookup_value(b, "TYPE", &fstype, NULL);
-                if (!streq_ptr(fstype, "vfat")) {
-                        log_debug("Partition for %s is not a FAT filesystem, ignoring.", esp);
-                        return 0;
-                }
-
-                errno = 0;
-                r = blkid_probe_lookup_value(b, "PART_ENTRY_UUID", &uuid_string, NULL);
-                if (r != 0) {
-                        log_debug_errno(errno, "Partition for %s does not have a UUID, ignoring.", esp);
-                        return 0;
-                }
-
-                if (sd_id128_from_string(uuid_string, &part_uuid) < 0) {
-                        log_debug("Partition for %s does not have a valid UUID, ignoring.", esp);
-                        return 0;
-                }
-
-                if (!sd_id128_equal(part_uuid, loader_uuid)) {
+                if (!sd_id128_equal(p->uuid, loader_uuid)) {
                         log_debug("Partition for %s does not appear to be the partition we are booted from.", esp);
                         return 0;
                 }
@@ -538,35 +456,29 @@ static int add_boot(const char *what) {
                 log_debug("Not an EFI boot, skipping ESP check.");
 
         return add_automount("boot",
-                          what,
-                          esp,
-                          "vfat",
-                          true,
-                          "umask=0077",
-                          "EFI System Partition Automount",
-                          120 * USEC_PER_SEC);
+                             p->node,
+                             esp,
+                             p->fstype,
+                             true,
+                             "umask=0077",
+                             "EFI System Partition Automount",
+                             120 * USEC_PER_SEC);
 }
 #else
-static int add_boot(const char *what) {
+static int add_esp(DissectedPartition *p) {
         return 0;
 }
 #endif
 
-static int enumerate_partitions(dev_t devnum) {
-
-        _cleanup_udev_enumerate_unref_ struct udev_enumerate *e = NULL;
+static int open_parent(dev_t devnum, int *ret) {
         _cleanup_udev_device_unref_ struct udev_device *d = NULL;
-        _cleanup_blkid_free_probe_ blkid_probe b = NULL;
         _cleanup_udev_unref_ struct udev *udev = NULL;
-        _cleanup_free_ char *boot = NULL, *home = NULL, *srv = NULL;
-        struct udev_list_entry *first, *item;
-        struct udev_device *parent = NULL;
-        const char *name, *node, *pttype, *devtype;
-        int boot_nr = -1, home_nr = -1, srv_nr = -1;
-        bool home_rw = true, srv_rw = true;
-        blkid_partlist pl;
-        int r, k;
+        const char *name, *devtype, *node;
+        struct udev_device *parent;
         dev_t pn;
+        int fd;
+
+        assert(ret);
 
         udev = udev_new();
         if (!udev)
@@ -580,228 +492,94 @@ static int enumerate_partitions(dev_t devnum) {
         if (!name)
                 name = udev_device_get_syspath(d);
         if (!name) {
-                log_debug("Device %u:%u does not have a name, ignoring.",
-                          major(devnum), minor(devnum));
-                return 0;
+                log_debug("Device %u:%u does not have a name, ignoring.", major(devnum), minor(devnum));
+                goto not_found;
         }
 
         parent = udev_device_get_parent(d);
         if (!parent) {
                 log_debug("%s: not a partitioned device, ignoring.", name);
-                return 0;
+                goto not_found;
         }
 
         /* Does it have a devtype? */
         devtype = udev_device_get_devtype(parent);
         if (!devtype) {
                 log_debug("%s: parent doesn't have a device type, ignoring.", name);
-                return 0;
+                goto not_found;
         }
 
         /* Is this a disk or a partition? We only care for disks... */
         if (!streq(devtype, "disk")) {
                 log_debug("%s: parent isn't a raw disk, ignoring.", name);
-                return 0;
+                goto not_found;
         }
 
         /* Does it have a device node? */
         node = udev_device_get_devnode(parent);
         if (!node) {
                 log_debug("%s: parent device does not have device node, ignoring.", name);
-                return 0;
+                goto not_found;
         }
 
         log_debug("%s: root device %s.", name, node);
 
         pn = udev_device_get_devnum(parent);
-        if (major(pn) == 0)
-                return 0;
-
-        errno = 0;
-        b = blkid_new_probe_from_filename(node);
-        if (!b) {
-                if (errno == 0)
-                        return log_oom();
-
-                return log_error_errno(errno, "%s: failed to allocate prober: %m", node);
+        if (major(pn) == 0) {
+                log_debug("%s: parent device is not a proper block device, ignoring.", name);
+                goto not_found;
         }
 
-        blkid_probe_enable_partitions(b, 1);
-        blkid_probe_set_partitions_flags(b, BLKID_PARTS_ENTRY_DETAILS);
+        fd = open(node, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+        if (fd < 0)
+                return log_error_errno(errno, "Failed to open %s: %m", node);
 
-        errno = 0;
-        r = blkid_do_safeprobe(b);
-        if (r == 1)
-                return 0; /* no results */
-        else if (r == -2) {
-                log_warning("%s: probe gave ambiguous results, ignoring.", node);
-                return 0;
-        } else if (r != 0)
-                return log_error_errno(errno ?: EIO, "%s: failed to probe: %m", node);
+        *ret = fd;
+        return 1;
 
-        errno = 0;
-        r = blkid_probe_lookup_value(b, "PTTYPE", &pttype, NULL);
-        if (r != 0) {
-                if (errno == 0)
-                        return 0; /* No partition table found. */
+not_found:
+        *ret = -1;
+        return 0;
+}
 
-                return log_error_errno(errno, "%s: failed to determine partition table type: %m", node);
-        }
+static int enumerate_partitions(dev_t devnum) {
 
-        /* We only do this all for GPT... */
-        if (!streq_ptr(pttype, "gpt")) {
-                log_debug("%s: not a GPT partition table, ignoring.", node);
+        _cleanup_close_ int fd = -1;
+        _cleanup_(dissected_image_unrefp) DissectedImage *m = NULL;
+        int r, k;
+
+        r = open_parent(devnum, &fd);
+        if (r <= 0)
+                return r;
+
+        r = dissect_image(fd, NULL, 0, DISSECT_IMAGE_GPT_ONLY, &m);
+        if (r == -ENOPKG) {
+                log_debug_errno(r, "No suitable partition table found, ignoring.");
                 return 0;
         }
-
-        errno = 0;
-        pl = blkid_probe_get_partitions(b);
-        if (!pl) {
-                if (errno == 0)
-                        return log_oom();
-
-                return log_error_errno(errno, "%s: failed to list partitions: %m", node);
-        }
-
-        e = udev_enumerate_new(udev);
-        if (!e)
-                return log_oom();
-
-        r = udev_enumerate_add_match_parent(e, parent);
         if (r < 0)
-                return log_oom();
+                return log_error_errno(r, "Failed to dissect: %m");
 
-        r = udev_enumerate_add_match_subsystem(e, "block");
-        if (r < 0)
-                return log_oom();
-
-        r = udev_enumerate_scan_devices(e);
-        if (r < 0)
-                return log_error_errno(r, "%s: failed to enumerate partitions: %m", node);
-
-        first = udev_enumerate_get_list_entry(e);
-        udev_list_entry_foreach(item, first) {
-                _cleanup_udev_device_unref_ struct udev_device *q;
-                unsigned long long flags;
-                const char *stype, *subnode;
-                sd_id128_t type_id;
-                blkid_partition pp;
-                dev_t qn;
-                int nr;
-
-                q = udev_device_new_from_syspath(udev, udev_list_entry_get_name(item));
-                if (!q)
-                        continue;
-
-                qn = udev_device_get_devnum(q);
-                if (major(qn) == 0)
-                        continue;
-
-                if (qn == devnum)
-                        continue;
-
-                if (qn == pn)
-                        continue;
-
-                subnode = udev_device_get_devnode(q);
-                if (!subnode)
-                        continue;
-
-                pp = blkid_partlist_devno_to_partition(pl, qn);
-                if (!pp)
-                        continue;
-
-                nr = blkid_partition_get_partno(pp);
-                if (nr < 0)
-                        continue;
-
-                stype = blkid_partition_get_type_string(pp);
-                if (!stype)
-                        continue;
-
-                if (sd_id128_from_string(stype, &type_id) < 0)
-                        continue;
-
-                flags = blkid_partition_get_flags(pp);
-
-                if (sd_id128_equal(type_id, GPT_SWAP)) {
-
-                        if (flags & GPT_FLAG_NO_AUTO)
-                                continue;
-
-                        if (flags & GPT_FLAG_READ_ONLY) {
-                                log_debug("%s marked as read-only swap partition, which is bogus. Ignoring.", subnode);
-                                continue;
-                        }
-
-                        k = add_swap(subnode);
-                        if (k < 0)
-                                r = k;
-
-                } else if (sd_id128_equal(type_id, GPT_ESP)) {
-
-                        /* We only care for the first /boot partition */
-                        if (boot && nr >= boot_nr)
-                                continue;
-
-                        /* Note that we do not honour the "no-auto"
-                         * flag for the ESP, as it is often unset, to
-                         * hide it from Windows. */
-
-                        boot_nr = nr;
-
-                        r = free_and_strdup(&boot, subnode);
-                        if (r < 0)
-                                return log_oom();
-
-                } else if (sd_id128_equal(type_id, GPT_HOME)) {
-
-                        if (flags & GPT_FLAG_NO_AUTO)
-                                continue;
-
-                        /* We only care for the first /home partition */
-                        if (home && nr >= home_nr)
-                                continue;
-
-                        home_nr = nr;
-                        home_rw = !(flags & GPT_FLAG_READ_ONLY),
-
-                        r = free_and_strdup(&home, subnode);
-                        if (r < 0)
-                                return log_oom();
-
-                } else if (sd_id128_equal(type_id, GPT_SRV)) {
-
-                        if (flags & GPT_FLAG_NO_AUTO)
-                                continue;
-
-                        /* We only care for the first /srv partition */
-                        if (srv && nr >= srv_nr)
-                                continue;
-
-                        srv_nr = nr;
-                        srv_rw = !(flags & GPT_FLAG_READ_ONLY),
-
-                        r = free_and_strdup(&srv, subnode);
-                        if (r < 0)
-                                return log_oom();
-                }
-        }
-
-        if (boot) {
-                k = add_boot(boot);
+        if (m->partitions[PARTITION_SWAP].found) {
+                k = add_swap(m->partitions[PARTITION_SWAP].node);
                 if (k < 0)
                         r = k;
         }
 
-        if (home) {
-                k = probe_and_add_mount("home", home, "/home", home_rw, "Home Partition", SPECIAL_LOCAL_FS_TARGET);
+        if (m->partitions[PARTITION_ESP].found) {
+                k = add_esp(m->partitions + PARTITION_ESP);
                 if (k < 0)
                         r = k;
         }
 
-        if (srv) {
-                k = probe_and_add_mount("srv", srv, "/srv", srv_rw, "Server Data Partition", SPECIAL_LOCAL_FS_TARGET);
+        if (m->partitions[PARTITION_HOME].found) {
+                k = add_partition_mount(m->partitions + PARTITION_HOME, "home", "/home", "Home Partition");
+                if (k < 0)
+                        r = k;
+        }
+
+        if (m->partitions[PARTITION_SRV].found) {
+                k = add_partition_mount(m->partitions + PARTITION_SRV, "srv", "/srv", "Server Data Partition");
                 if (k < 0)
                         r = k;
         }
@@ -809,123 +587,37 @@ static int enumerate_partitions(dev_t devnum) {
         return r;
 }
 
-static int get_block_device(const char *path, dev_t *dev) {
-        struct stat st;
-        struct statfs sfs;
-
-        assert(path);
-        assert(dev);
-
-        /* Get's the block device directly backing a file system. If
-         * the block device is encrypted, returns the device mapper
-         * block device. */
-
-        if (lstat(path, &st))
-                return -errno;
-
-        if (major(st.st_dev) != 0) {
-                *dev = st.st_dev;
-                return 1;
-        }
-
-        if (statfs(path, &sfs) < 0)
-                return -errno;
-
-        if (F_TYPE_EQUAL(sfs.f_type, BTRFS_SUPER_MAGIC))
-                return btrfs_get_block_device(path, dev);
-
-        return 0;
-}
-
-static int get_block_device_harder(const char *path, dev_t *dev) {
-        _cleanup_closedir_ DIR *d = NULL;
-        _cleanup_free_ char *p = NULL, *t = NULL;
-        struct dirent *de, *found = NULL;
-        const char *q;
-        unsigned maj, min;
-        dev_t dt;
-        int r;
-
-        assert(path);
-        assert(dev);
-
-        /* Gets the backing block device for a file system, and
-         * handles LUKS encrypted file systems, looking for its
-         * immediate parent, if there is one. */
-
-        r = get_block_device(path, &dt);
-        if (r <= 0)
-                return r;
-
-        if (asprintf(&p, "/sys/dev/block/%u:%u/slaves", major(dt), minor(dt)) < 0)
-                return -ENOMEM;
-
-        d = opendir(p);
-        if (!d) {
-                if (errno == ENOENT)
-                        goto fallback;
-
-                return -errno;
-        }
-
-        FOREACH_DIRENT_ALL(de, d, return -errno) {
-
-                if (STR_IN_SET(de->d_name, ".", ".."))
-                        continue;
-
-                if (!IN_SET(de->d_type, DT_LNK, DT_UNKNOWN))
-                        continue;
-
-                if (found) /* Don't try to support multiple backing block devices */
-                        goto fallback;
-
-                found = de;
-        }
-
-        if (!found)
-                goto fallback;
-
-        q = strjoina(p, "/", found->d_name, "/dev");
-
-        r = read_one_line_file(q, &t);
-        if (r == -ENOENT)
-                goto fallback;
-        if (r < 0)
-                return r;
-
-        if (sscanf(t, "%u:%u", &maj, &min) != 2)
-                return -EINVAL;
-
-        if (maj == 0)
-                goto fallback;
-
-        *dev = makedev(maj, min);
-        return 1;
-
-fallback:
-        *dev = dt;
-        return 1;
-}
-
 static int parse_proc_cmdline_item(const char *key, const char *value, void *data) {
         int r;
 
         assert(key);
 
-        if (STR_IN_SET(key, "systemd.gpt_auto", "rd.systemd.gpt_auto") && value) {
+        if (STR_IN_SET(key, "systemd.gpt_auto", "rd.systemd.gpt_auto")) {
 
-                r = parse_boolean(value);
+                r = value ? parse_boolean(value) : 1;
                 if (r < 0)
                         log_warning("Failed to parse gpt-auto switch \"%s\". Ignoring.", value);
                 else
                         arg_enabled = r;
 
-        } else if (streq(key, "root") && value) {
+        } else if (streq(key, "root")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
                 /* Disable root disk logic if there's a root= value
                  * specified (unless it happens to be "gpt-auto") */
 
                 arg_root_enabled = streq(value, "gpt-auto");
+
+        } else if (streq(key, "roothash")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                /* Disable root disk logic if there's roothash= defined (i.e. verity enabled) */
+
+                arg_root_enabled = false;
 
         } else if (streq(key, "rw") && !value)
                 arg_root_rw = true;
@@ -935,9 +627,19 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
         return 0;
 }
 
+#if ENABLE_EFI
+static int add_root_cryptsetup(void) {
+
+        /* If a device /dev/gpt-auto-root-luks appears, then make it pull in systemd-cryptsetup-root.service, which
+         * sets it up, and causes /dev/gpt-auto-root to appear which is all we are looking for. */
+
+        return add_cryptsetup("root", "/dev/gpt-auto-root-luks", true, false, NULL);
+}
+#endif
+
 static int add_root_mount(void) {
 
-#ifdef ENABLE_EFI
+#if ENABLE_EFI
         int r;
 
         if (!is_efi_boot()) {
@@ -960,6 +662,10 @@ static int add_root_mount(void) {
                 r = generator_write_initrd_root_device_deps(arg_dest, "/dev/gpt-auto-root");
                 if (r < 0)
                         return 0;
+
+                r = add_root_cryptsetup();
+                if (r < 0)
+                        return r;
         }
 
         return add_mount(
@@ -983,11 +689,11 @@ static int add_mounts(void) {
         r = get_block_device_harder("/", &devno);
         if (r < 0)
                 return log_error_errno(r, "Failed to determine block device of root file system: %m");
-        else if (r == 0) {
+        if (r == 0) {
                 r = get_block_device_harder("/usr", &devno);
                 if (r < 0)
                         return log_error_errno(r, "Failed to determine block device of /usr file system: %m");
-                else if (r == 0) {
+                if (r == 0) {
                         log_debug("Neither root nor /usr file system are on a (single) block device.");
                         return 0;
                 }
@@ -997,7 +703,7 @@ static int add_mounts(void) {
 }
 
 int main(int argc, char *argv[]) {
-        int r = 0;
+        int r, k;
 
         if (argc > 1 && argc != 4) {
                 log_error("This program takes three or no arguments.");
@@ -1007,7 +713,8 @@ int main(int argc, char *argv[]) {
         if (argc > 1)
                 arg_dest = argv[3];
 
-        log_set_target(LOG_TARGET_SAFE);
+        log_set_prohibit_ipc(true);
+        log_set_target(LOG_TARGET_AUTO);
         log_parse_environment();
         log_open();
 
@@ -1018,7 +725,7 @@ int main(int argc, char *argv[]) {
                 return EXIT_SUCCESS;
         }
 
-        r = parse_proc_cmdline(parse_proc_cmdline_item, NULL, false);
+        r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, 0);
         if (r < 0)
                 log_warning_errno(r, "Failed to parse kernel command line, ignoring: %m");
 
@@ -1029,10 +736,10 @@ int main(int argc, char *argv[]) {
 
         if (arg_root_enabled)
                 r = add_root_mount();
+        else
+                r = 0;
 
         if (!in_initrd()) {
-                int k;
-
                 k = add_mounts();
                 if (k < 0)
                         r = k;

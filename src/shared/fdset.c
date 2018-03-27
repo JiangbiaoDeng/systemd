@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -18,13 +19,14 @@
 ***/
 
 #include <alloca.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 
 #include "sd-daemon.h"
 
+#include "alloc-util.h"
+#include "dirent-util.h"
 #include "fd-util.h"
 #include "fdset.h"
 #include "log.h"
@@ -148,11 +150,8 @@ int fdset_new_fill(FDSet **_s) {
                 goto finish;
         }
 
-        while ((de = readdir(d))) {
+        FOREACH_DIRENT(de, d, return -errno) {
                 int fd = -1;
-
-                if (hidden_or_backup_file(de->d_name))
-                        continue;
 
                 r = safe_atoi(de->d_name, &fd);
                 if (r < 0)
@@ -170,8 +169,7 @@ int fdset_new_fill(FDSet **_s) {
         }
 
         r = 0;
-        *_s = s;
-        s = NULL;
+        *_s = TAKE_PTR(s);
 
 finish:
         /* We won't close the fds here! */

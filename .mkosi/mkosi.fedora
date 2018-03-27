@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-2.1+
+#
 # This file is part of systemd.
 #
 # Copyright 2016 Lennart Poettering
@@ -20,32 +22,31 @@
 
 [Distribution]
 Distribution=fedora
-Release=25
+Release=27
 
 [Output]
 Format=raw_btrfs
 Bootable=yes
 
 [Partitions]
-RootSize=2G
+RootSize=3G
 
 [Packages]
 BuildPackages=
         audit-libs-devel
-        autoconf
-        automake
         bzip2-devel
         cryptsetup-devel
         dbus-devel
+        diffutils
         docbook-style-xsl
         elfutils-devel
         gcc
+        gettext
         git
         gnu-efi
         gnu-efi-devel
         gnutls-devel
         gperf
-        intltool
         iptables-devel
         kmod-devel
         libacl-devel
@@ -53,7 +54,7 @@ BuildPackages=
         libcap-devel
         libcurl-devel
         libgcrypt-devel
-        libidn-devel
+        libidn2-devel
         libmicrohttpd-devel
         libmount-devel
         libseccomp-devel
@@ -61,11 +62,21 @@ BuildPackages=
         libtool
         libxkbcommon-devel
         libxslt
+        lz4
         lz4-devel
-        make
+        m4
+        meson
         pam-devel
+        pcre2-devel
         pkgconfig
         python3-devel
         python3-lxml
         qrencode-devel
+        tree
         xz-devel
+
+Packages=
+        libidn2
+
+BuildDirectory=mkosi.builddir
+Cache=mkosi.cache

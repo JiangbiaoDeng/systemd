@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -152,7 +153,7 @@ int extract_first_word(const char **p, char **ret, const char *separators, Extra
                         for (;; (*p)++, c = **p) {
                                 if (c == 0)
                                         goto finish_force_terminate;
-                                else if ((c == '\'' || c == '"') && (flags & EXTRACT_QUOTES)) {
+                                else if (IN_SET(c, '\'', '"') && (flags & EXTRACT_QUOTES)) {
                                         quote = c;
                                         break;
                                 } else if (c == '\\' && !(flags & EXTRACT_RETAIN_ESCAPE)) {
@@ -193,8 +194,7 @@ finish:
 
 finish_force_next:
         s[sz] = 0;
-        *ret = s;
-        s = NULL;
+        *ret = TAKE_PTR(s);
 
         return 1;
 }
@@ -227,8 +227,8 @@ int extract_first_word_and_warn(
                 *p = save;
                 r = extract_first_word(p, ret, separators, flags|EXTRACT_CUNESCAPE_RELAX);
                 if (r >= 0) {
-                        /* It worked this time, hence it must have been an invalid escape sequence we could correct. */
-                        log_syntax(unit, LOG_WARNING, filename, line, EINVAL, "Invalid escape sequences in line, correcting: \"%s\"", rvalue);
+                        /* It worked this time, hence it must have been an invalid escape sequence. */
+                        log_syntax(unit, LOG_WARNING, filename, line, EINVAL, "Ignoring unknown escape sequences: \"%s\"", *ret);
                         return r;
                 }
 
@@ -241,7 +241,12 @@ int extract_first_word_and_warn(
         return log_syntax(unit, LOG_ERR, filename, line, r, "Unable to decode word \"%s\", ignoring: %m", rvalue);
 }
 
-int extract_many_words(const char **p, const char *separators, ExtractFlags flags, ...) {
+/* We pass ExtractFlags as unsigned int (to avoid undefined behaviour when passing
+ * an object that undergoes default argument promotion as an argument to va_start).
+ * Let's make sure that ExtractFlags fits into an unsigned int. */
+assert_cc(sizeof(enum ExtractFlags) <= sizeof(unsigned));
+
+int extract_many_words(const char **p, const char *separators, unsigned flags, ...) {
         va_list ap;
         char **l;
         int n = 0, i, c, r;

@@ -1,8 +1,10 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
   Copyright 2012 Lennart Poettering
   Copyright 2013 Zbigniew Jędrzejewski-Szmek
+  Copyright 2018 Dell Inc.
 
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
@@ -24,11 +26,14 @@
 
 #include "sd-messages.h"
 
+#include "parse-util.h"
 #include "def.h"
+#include "exec-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "log.h"
 #include "sleep-config.h"
+#include "stdio-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "util.h"
@@ -65,7 +70,7 @@ static int write_state(FILE **f, char **states) {
         STRV_FOREACH(state, states) {
                 int k;
 
-                k = write_string_stream(*f, *state, true);
+                k = write_string_stream(*f, *state, 0);
                 if (k == 0)
                         return 0;
                 log_debug_errno(k, "Failed to write '%s' to /sys/power/state: %m",
@@ -90,7 +95,10 @@ static int execute(char **modes, char **states) {
                 arg_verb,
                 NULL
         };
-        static const char* const dirs[] = {SYSTEM_SLEEP_PATH, NULL};
+        static const char* const dirs[] = {
+                SYSTEM_SLEEP_PATH,
+                NULL
+        };
 
         int r;
         _cleanup_fclose_ FILE *f = NULL;
@@ -106,10 +114,10 @@ static int execute(char **modes, char **states) {
         if (r < 0)
                 return r;
 
-        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, arguments);
+        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments);
 
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_SLEEP_START),
+                   "MESSAGE_ID=" SD_MESSAGE_SLEEP_START_STR,
                    LOG_MESSAGE("Suspending system..."),
                    "SLEEP=%s", arg_verb,
                    NULL);
@@ -119,13 +127,90 @@ static int execute(char **modes, char **states) {
                 return r;
 
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_SLEEP_STOP),
+                   "MESSAGE_ID=" SD_MESSAGE_SLEEP_STOP_STR,
                    LOG_MESSAGE("System resumed."),
                    "SLEEP=%s", arg_verb,
                    NULL);
 
         arguments[1] = (char*) "post";
-        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, arguments);
+        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments);
+
+        return r;
+}
+
+static int read_wakealarm(uint64_t *result) {
+        _cleanup_free_ char *t = NULL;
+
+        if (read_one_line_file("/sys/class/rtc/rtc0/since_epoch", &t) >= 0)
+                return safe_atou64(t, result);
+        return -EBADF;
+}
+
+static int write_wakealarm(const char *str) {
+
+        _cleanup_fclose_ FILE *f = NULL;
+        int r;
+
+        f = fopen("/sys/class/rtc/rtc0/wakealarm", "we");
+        if (!f)
+                return log_error_errno(errno, "Failed to open /sys/class/rtc/rtc0/wakealarm: %m");
+
+        r = write_string_stream(f, str, 0);
+        if (r < 0)
+                return log_error_errno(r, "Failed to write '%s' to /sys/class/rtc/rtc0/wakealarm: %m", str);
+
+        return 0;
+}
+
+static int execute_s2h(usec_t hibernate_delay_sec) {
+
+        _cleanup_strv_free_ char **hibernate_modes = NULL, **hibernate_states = NULL,
+                                 **suspend_modes = NULL, **suspend_states = NULL;
+        usec_t orig_time, cmp_time;
+        char time_str[DECIMAL_STR_MAX(uint64_t)];
+        int r;
+
+        r = parse_sleep_config("suspend", &suspend_modes, &suspend_states,
+                               NULL);
+        if (r < 0)
+                return r;
+
+        r = parse_sleep_config("hibernate", &hibernate_modes,
+                               &hibernate_states, NULL);
+        if (r < 0)
+                return r;
+
+        r = read_wakealarm(&orig_time);
+        if (r < 0)
+                return log_error_errno(errno, "Failed to read time: %d", r);
+
+        orig_time += hibernate_delay_sec / USEC_PER_SEC;
+        xsprintf(time_str, "%" PRIu64, orig_time);
+
+        r = write_wakealarm(time_str);
+        if (r < 0)
+                return r;
+
+        log_debug("Set RTC wake alarm for %s", time_str);
+
+        r = execute(suspend_modes, suspend_states);
+        if (r < 0)
+                return r;
+
+        r = read_wakealarm(&cmp_time);
+        if (r < 0)
+                return log_error_errno(errno, "Failed to read time: %d", r);
+
+        /* reset RTC */
+        r = write_wakealarm("0");
+        if (r < 0)
+                return r;
+
+        log_debug("Woke up at %"PRIu64, cmp_time);
+
+        /* if woken up after alarm time, hibernate */
+        if (cmp_time >= orig_time)
+                r = execute(hibernate_modes, hibernate_states);
 
         return r;
 }
@@ -139,6 +224,8 @@ static void help(void) {
                "  suspend              Suspend the system\n"
                "  hibernate            Hibernate the system\n"
                "  hybrid-sleep         Both hibernate and suspend the system\n"
+               "  suspend-to-hibernate Initially suspend and then hibernate\n"
+               "                       the system after a fixed period of time\n"
                , program_invocation_short_name);
 }
 
@@ -184,7 +271,8 @@ static int parse_argv(int argc, char *argv[]) {
 
         if (!streq(arg_verb, "suspend") &&
             !streq(arg_verb, "hibernate") &&
-            !streq(arg_verb, "hybrid-sleep")) {
+            !streq(arg_verb, "hybrid-sleep") &&
+            !streq(arg_verb, "suspend-to-hibernate")) {
                 log_error("Unknown command '%s'.", arg_verb);
                 return -EINVAL;
         }
@@ -194,6 +282,7 @@ static int parse_argv(int argc, char *argv[]) {
 
 int main(int argc, char *argv[]) {
         _cleanup_strv_free_ char **modes = NULL, **states = NULL;
+        usec_t delay = 0;
         int r;
 
         log_set_target(LOG_TARGET_AUTO);
@@ -204,12 +293,14 @@ int main(int argc, char *argv[]) {
         if (r <= 0)
                 goto finish;
 
-        r = parse_sleep_config(arg_verb, &modes, &states);
+        r = parse_sleep_config(arg_verb, &modes, &states, &delay);
         if (r < 0)
                 goto finish;
 
-        r = execute(modes, states);
-
+        if (streq(arg_verb, "suspend-to-hibernate"))
+                r = execute_s2h(delay);
+        else
+                r = execute(modes, states);
 finish:
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

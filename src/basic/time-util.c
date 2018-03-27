@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -21,6 +22,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/timerfd.h>
@@ -36,6 +38,7 @@
 #include "macro.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "process-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "time-util.h"
@@ -107,7 +110,7 @@ dual_timestamp* dual_timestamp_from_realtime(dual_timestamp *ts, usec_t u) {
         ts->realtime = u;
 
         delta = (int64_t) now(CLOCK_REALTIME) - (int64_t) u;
-        ts->monotonic = usec_sub(now(CLOCK_MONOTONIC), delta);
+        ts->monotonic = usec_sub_signed(now(CLOCK_MONOTONIC), delta);
 
         return ts;
 }
@@ -124,8 +127,8 @@ triple_timestamp* triple_timestamp_from_realtime(triple_timestamp *ts, usec_t u)
 
         ts->realtime = u;
         delta = (int64_t) now(CLOCK_REALTIME) - (int64_t) u;
-        ts->monotonic = usec_sub(now(CLOCK_MONOTONIC), delta);
-        ts->boottime = clock_boottime_supported() ? usec_sub(now(CLOCK_BOOTTIME), delta) : USEC_INFINITY;
+        ts->monotonic = usec_sub_signed(now(CLOCK_MONOTONIC), delta);
+        ts->boottime = clock_boottime_supported() ? usec_sub_signed(now(CLOCK_BOOTTIME), delta) : USEC_INFINITY;
 
         return ts;
 }
@@ -141,7 +144,7 @@ dual_timestamp* dual_timestamp_from_monotonic(dual_timestamp *ts, usec_t u) {
 
         ts->monotonic = u;
         delta = (int64_t) now(CLOCK_MONOTONIC) - (int64_t) u;
-        ts->realtime = usec_sub(now(CLOCK_REALTIME), delta);
+        ts->realtime = usec_sub_signed(now(CLOCK_REALTIME), delta);
 
         return ts;
 }
@@ -156,8 +159,8 @@ dual_timestamp* dual_timestamp_from_boottime_or_monotonic(dual_timestamp *ts, us
 
         dual_timestamp_get(ts);
         delta = (int64_t) now(clock_boottime_or_monotonic()) - (int64_t) u;
-        ts->realtime = usec_sub(ts->realtime, delta);
-        ts->monotonic = usec_sub(ts->monotonic, delta);
+        ts->realtime = usec_sub_signed(ts->realtime, delta);
+        ts->monotonic = usec_sub_signed(ts->monotonic, delta);
 
         return ts;
 }
@@ -185,7 +188,7 @@ usec_t triple_timestamp_by_clock(triple_timestamp *ts, clockid_t clock) {
 usec_t timespec_load(const struct timespec *ts) {
         assert(ts);
 
-        if (ts->tv_sec == (time_t) -1 && ts->tv_nsec == (long) -1)
+        if (ts->tv_sec < 0 || ts->tv_nsec < 0)
                 return USEC_INFINITY;
 
         if ((usec_t) ts->tv_sec > (UINT64_MAX - (ts->tv_nsec / NSEC_PER_USEC)) / USEC_PER_SEC)
@@ -199,7 +202,7 @@ usec_t timespec_load(const struct timespec *ts) {
 nsec_t timespec_load_nsec(const struct timespec *ts) {
         assert(ts);
 
-        if (ts->tv_sec == (time_t) -1 && ts->tv_nsec == (long) -1)
+        if (ts->tv_sec < 0 || ts->tv_nsec < 0)
                 return NSEC_INFINITY;
 
         if ((nsec_t) ts->tv_sec >= (UINT64_MAX - ts->tv_nsec) / NSEC_PER_SEC)
@@ -211,7 +214,8 @@ nsec_t timespec_load_nsec(const struct timespec *ts) {
 struct timespec *timespec_store(struct timespec *ts, usec_t u)  {
         assert(ts);
 
-        if (u == USEC_INFINITY) {
+        if (u == USEC_INFINITY ||
+            u / USEC_PER_SEC >= TIME_T_MAX) {
                 ts->tv_sec = (time_t) -1;
                 ts->tv_nsec = (long) -1;
                 return ts;
@@ -226,8 +230,7 @@ struct timespec *timespec_store(struct timespec *ts, usec_t u)  {
 usec_t timeval_load(const struct timeval *tv) {
         assert(tv);
 
-        if (tv->tv_sec == (time_t) -1 &&
-            tv->tv_usec == (suseconds_t) -1)
+        if (tv->tv_sec < 0 || tv->tv_usec < 0)
                 return USEC_INFINITY;
 
         if ((usec_t) tv->tv_sec > (UINT64_MAX - tv->tv_usec) / USEC_PER_SEC)
@@ -241,7 +244,8 @@ usec_t timeval_load(const struct timeval *tv) {
 struct timeval *timeval_store(struct timeval *tv, usec_t u) {
         assert(tv);
 
-        if (u == USEC_INFINITY) {
+        if (u == USEC_INFINITY ||
+            u / USEC_PER_SEC > TIME_T_MAX) {
                 tv->tv_sec = (time_t) -1;
                 tv->tv_usec = (suseconds_t) -1;
         } else {
@@ -288,9 +292,11 @@ static char *format_timestamp_internal(
         if (t <= 0 || t == USEC_INFINITY)
                 return NULL; /* Timestamp is unset */
 
+        /* Let's not format times with years > 9999 */
+        if (t > USEC_TIMESTAMP_FORMATTABLE_MAX)
+                return NULL;
+
         sec = (time_t) (t / USEC_PER_SEC); /* Round down */
-        if ((usec_t) sec != (t / USEC_PER_SEC))
-                return NULL; /* overflow? */
 
         if (!localtime_or_gmtime_r(&sec, &tm, utc))
                 return NULL;
@@ -551,15 +557,29 @@ void dual_timestamp_serialize(FILE *f, const char *name, dual_timestamp *t) {
 }
 
 int dual_timestamp_deserialize(const char *value, dual_timestamp *t) {
-        unsigned long long a, b;
+        uint64_t a, b;
+        int r, pos;
 
         assert(value);
         assert(t);
 
-        if (sscanf(value, "%llu %llu", &a, &b) != 2) {
-                log_debug("Failed to parse dual timestamp value \"%s\": %m", value);
+        pos = strspn(value, WHITESPACE);
+        if (value[pos] == '-')
+                return -EINVAL;
+        pos += strspn(value + pos, DIGITS);
+        pos += strspn(value + pos, WHITESPACE);
+        if (value[pos] == '-')
+                return -EINVAL;
+
+        r = sscanf(value, "%" PRIu64 "%" PRIu64 "%n", &a, &b, &pos);
+        if (r != 2) {
+                log_debug("Failed to parse dual timestamp value \"%s\".", value);
                 return -EINVAL;
         }
+
+        if (value[pos] != '\0')
+                /* trailing garbage */
+                return -EINVAL;
 
         t->realtime = a;
         t->monotonic = b;
@@ -579,7 +599,7 @@ int timestamp_deserialize(const char *value, usec_t *timestamp) {
         return r;
 }
 
-int parse_timestamp(const char *t, usec_t *usec) {
+static int parse_timestamp_impl(const char *t, usec_t *usec, bool with_tz) {
         static const struct {
                 const char *name;
                 const int nr;
@@ -600,7 +620,7 @@ int parse_timestamp(const char *t, usec_t *usec) {
                 { "Sat",       6 },
         };
 
-        const char *k, *utc, *tzn = NULL;
+        const char *k, *utc = NULL, *tzn = NULL;
         struct tm tm, copy;
         time_t x;
         usec_t x_usec, plus = 0, minus = 0, ret;
@@ -628,84 +648,86 @@ int parse_timestamp(const char *t, usec_t *usec) {
         assert(t);
         assert(usec);
 
-        if (t[0] == '@')
+        if (t[0] == '@' && !with_tz)
                 return parse_sec(t + 1, usec);
 
         ret = now(CLOCK_REALTIME);
 
-        if (streq(t, "now"))
-                goto finish;
+        if (!with_tz) {
+                if (streq(t, "now"))
+                        goto finish;
 
-        else if (t[0] == '+') {
-                r = parse_sec(t+1, &plus);
-                if (r < 0)
-                        return r;
+                else if (t[0] == '+') {
+                        r = parse_sec(t+1, &plus);
+                        if (r < 0)
+                                return r;
 
-                goto finish;
+                        goto finish;
 
-        } else if (t[0] == '-') {
-                r = parse_sec(t+1, &minus);
-                if (r < 0)
-                        return r;
+                } else if (t[0] == '-') {
+                        r = parse_sec(t+1, &minus);
+                        if (r < 0)
+                                return r;
 
-                goto finish;
+                        goto finish;
 
-        } else if ((k = endswith(t, " ago"))) {
-                t = strndupa(t, k - t);
+                } else if ((k = endswith(t, " ago"))) {
+                        t = strndupa(t, k - t);
 
-                r = parse_sec(t, &minus);
-                if (r < 0)
-                        return r;
+                        r = parse_sec(t, &minus);
+                        if (r < 0)
+                                return r;
 
-                goto finish;
+                        goto finish;
 
-        } else if ((k = endswith(t, " left"))) {
-                t = strndupa(t, k - t);
+                } else if ((k = endswith(t, " left"))) {
+                        t = strndupa(t, k - t);
 
-                r = parse_sec(t, &plus);
-                if (r < 0)
-                        return r;
+                        r = parse_sec(t, &plus);
+                        if (r < 0)
+                                return r;
 
-                goto finish;
-        }
-
-        /* See if the timestamp is suffixed with UTC */
-        utc = endswith_no_case(t, " UTC");
-        if (utc)
-                t = strndupa(t, utc - t);
-        else {
-                const char *e = NULL;
-                int j;
-
-                tzset();
-
-                /* See if the timestamp is suffixed by either the DST or non-DST local timezone. Note that we only
-                 * support the local timezones here, nothing else. Not because we wouldn't want to, but simply because
-                 * there are no nice APIs available to cover this. By accepting the local time zone strings, we make
-                 * sure that all timestamps written by format_timestamp() can be parsed correctly, even though we don't
-                 * support arbitrary timezone specifications.  */
-
-                for (j = 0; j <= 1; j++) {
-
-                        if (isempty(tzname[j]))
-                                continue;
-
-                        e = endswith_no_case(t, tzname[j]);
-                        if (!e)
-                                continue;
-                        if (e == t)
-                                continue;
-                        if (e[-1] != ' ')
-                                continue;
-
-                        break;
+                        goto finish;
                 }
 
-                if (IN_SET(j, 0, 1)) {
-                        /* Found one of the two timezones specified. */
-                        t = strndupa(t, e - t - 1);
-                        dst = j;
-                        tzn = tzname[j];
+                /* See if the timestamp is suffixed with UTC */
+                utc = endswith_no_case(t, " UTC");
+                if (utc)
+                        t = strndupa(t, utc - t);
+                else {
+                        const char *e = NULL;
+                        int j;
+
+                        tzset();
+
+                        /* See if the timestamp is suffixed by either the DST or non-DST local timezone. Note that we only
+                        * support the local timezones here, nothing else. Not because we wouldn't want to, but simply because
+                        * there are no nice APIs available to cover this. By accepting the local time zone strings, we make
+                        * sure that all timestamps written by format_timestamp() can be parsed correctly, even though we don't
+                        * support arbitrary timezone specifications.  */
+
+                        for (j = 0; j <= 1; j++) {
+
+                                if (isempty(tzname[j]))
+                                        continue;
+
+                                e = endswith_no_case(t, tzname[j]);
+                                if (!e)
+                                        continue;
+                                if (e == t)
+                                        continue;
+                                if (e[-1] != ' ')
+                                        continue;
+
+                                break;
+                        }
+
+                        if (IN_SET(j, 0, 1)) {
+                                /* Found one of the two timezones specified. */
+                                t = strndupa(t, e - t - 1);
+                                dst = j;
+                                tzn = tzname[j];
+                        }
                 }
         }
 
@@ -716,7 +738,7 @@ int parse_timestamp(const char *t, usec_t *usec) {
                 return -EINVAL;
 
         tm.tm_isdst = dst;
-        if (tzn)
+        if (!with_tz && tzn)
                 tm.tm_zone = tzn;
 
         if (streq(t, "today")) {
@@ -829,25 +851,91 @@ parse_usec:
         }
 
 from_tm:
-        x = mktime_or_timegm(&tm, utc);
-        if (x == (time_t) -1)
-                return -EINVAL;
-
         if (weekday >= 0 && tm.tm_wday != weekday)
                 return -EINVAL;
 
+        x = mktime_or_timegm(&tm, utc);
+        if (x < 0)
+                return -EINVAL;
+
         ret = (usec_t) x * USEC_PER_SEC + x_usec;
+        if (ret > USEC_TIMESTAMP_FORMATTABLE_MAX)
+                return -EINVAL;
 
 finish:
+        if (ret + plus < ret) /* overflow? */
+                return -EINVAL;
         ret += plus;
-        if (ret > minus)
+        if (ret > USEC_TIMESTAMP_FORMATTABLE_MAX)
+                return -EINVAL;
+
+        if (ret >= minus)
                 ret -= minus;
         else
-                ret = 0;
+                return -EINVAL;
 
         *usec = ret;
 
         return 0;
+}
+
+typedef struct ParseTimestampResult {
+        usec_t usec;
+        int return_value;
+} ParseTimestampResult;
+
+int parse_timestamp(const char *t, usec_t *usec) {
+        char *last_space, *tz = NULL;
+        ParseTimestampResult *shared, tmp;
+        int r;
+
+        last_space = strrchr(t, ' ');
+        if (last_space != NULL && timezone_is_valid(last_space + 1))
+                tz = last_space + 1;
+
+        if (!tz || endswith_no_case(t, " UTC"))
+                return parse_timestamp_impl(t, usec, false);
+
+        shared = mmap(NULL, sizeof *shared, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        if (shared == MAP_FAILED)
+                return negative_errno();
+
+        r = safe_fork("(sd-timestamp)", FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG|FORK_WAIT, NULL);
+        if (r < 0) {
+                (void) munmap(shared, sizeof *shared);
+                return r;
+        }
+        if (r == 0) {
+                bool with_tz = true;
+
+                if (setenv("TZ", tz, 1) != 0) {
+                        shared->return_value = negative_errno();
+                        _exit(EXIT_FAILURE);
+                }
+
+                tzset();
+
+                /* If there is a timezone that matches the tzname fields, leave the parsing to the implementation.
+                 * Otherwise just cut it off */
+                with_tz = !STR_IN_SET(tz, tzname[0], tzname[1]);
+
+                /*cut off the timezone if we dont need it*/
+                if (with_tz)
+                        t = strndupa(t, last_space - t);
+
+                shared->return_value = parse_timestamp_impl(t, &shared->usec, with_tz);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        tmp = *shared;
+        if (munmap(shared, sizeof *shared) != 0)
+                return negative_errno();
+
+        if (tmp.return_value == 0)
+                *usec = tmp.usec;
+
+        return tmp.return_value;
 }
 
 static char* extract_multiplier(char *p, usec_t *multiplier) {
@@ -883,6 +971,7 @@ static char* extract_multiplier(char *p, usec_t *multiplier) {
                 { "y",       USEC_PER_YEAR   },
                 { "usec",    1ULL            },
                 { "us",      1ULL            },
+                { "µs",      1ULL            },
         };
         unsigned i;
 
@@ -984,6 +1073,20 @@ int parse_sec(const char *t, usec_t *usec) {
         return parse_time(t, usec, USEC_PER_SEC);
 }
 
+int parse_sec_fix_0(const char *t, usec_t *usec) {
+        assert(t);
+        assert(usec);
+
+        t += strspn(t, WHITESPACE);
+
+        if (streq(t, "0")) {
+                *usec = USEC_INFINITY;
+                return 0;
+        }
+
+        return parse_sec(t, usec);
+}
+
 int parse_nsec(const char *t, nsec_t *nsec) {
         static const struct {
                 const char *suffix;
@@ -1016,6 +1119,7 @@ int parse_nsec(const char *t, nsec_t *nsec) {
                 { "y", NSEC_PER_YEAR },
                 { "usec", NSEC_PER_USEC },
                 { "us", NSEC_PER_USEC },
+                { "µs", NSEC_PER_USEC },
                 { "nsec", 1ULL },
                 { "ns", 1ULL },
                 { "", 1ULL }, /* default is nsec */
@@ -1200,7 +1304,7 @@ bool timezone_is_valid(const char *name) {
                 if (!(*p >= '0' && *p <= '9') &&
                     !(*p >= 'a' && *p <= 'z') &&
                     !(*p >= 'A' && *p <= 'Z') &&
-                    !(*p == '-' || *p == '_' || *p == '+' || *p == '/'))
+                    !IN_SET(*p, '-', '_', '+', '/'))
                         return false;
 
                 if (*p == '/') {
@@ -1269,8 +1373,7 @@ bool clock_supported(clockid_t clock) {
                 if (!clock_boottime_supported())
                         return false;
 
-                /* fall through, after checking the cached value for CLOCK_BOOTTIME. */
-
+                _fallthrough_;
         default:
                 /* For everything else, check properly */
                 return clock_gettime(clock, &ts) >= 0;
@@ -1324,4 +1427,29 @@ unsigned long usec_to_jiffies(usec_t u) {
         }
 
         return DIV_ROUND_UP(u , USEC_PER_SEC / hz);
+}
+
+usec_t usec_shift_clock(usec_t x, clockid_t from, clockid_t to) {
+        usec_t a, b;
+
+        if (x == USEC_INFINITY)
+                return USEC_INFINITY;
+        if (map_clock_id(from) == map_clock_id(to))
+                return x;
+
+        a = now(from);
+        b = now(to);
+
+        if (x > a)
+                /* x lies in the future */
+                return usec_add(b, usec_sub_unsigned(x, a));
+        else
+                /* x lies in the past */
+                return usec_sub_unsigned(b, usec_sub_unsigned(a, x));
+}
+
+bool in_utc_timezone(void) {
+        tzset();
+
+        return timezone == 0 && daylight == 0;
 }

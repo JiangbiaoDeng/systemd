@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -117,6 +118,7 @@ struct Manager {
         HandleAction handle_suspend_key;
         HandleAction handle_hibernate_key;
         HandleAction handle_lid_switch;
+        HandleAction handle_lid_switch_ep;
         HandleAction handle_lid_switch_docked;
 
         bool power_key_ignore_inhibited;
@@ -159,6 +161,8 @@ int manager_get_user_by_pid(Manager *m, pid_t pid, User **user);
 int manager_get_session_by_pid(Manager *m, pid_t pid, Session **session);
 
 bool manager_is_docked_or_external_displays(Manager *m);
+bool manager_is_on_external_power(void);
+bool manager_all_buttons_ignored(Manager *m);
 
 extern const sd_bus_vtable manager_vtable[];
 
@@ -182,10 +186,11 @@ int manager_unit_is_active(Manager *manager, const char *unit);
 int manager_job_is_active(Manager *manager, const char *path);
 
 /* gperf lookup function */
-const struct ConfigPerfItem* logind_gperf_lookup(const char *key, unsigned length);
+const struct ConfigPerfItem* logind_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
 
 int manager_set_lid_switch_ignore(Manager *m, usec_t until);
 
+int config_parse_n_autovts(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_tmpfs_size(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_user_tasks_max(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 

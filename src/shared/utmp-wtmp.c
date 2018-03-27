@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -234,7 +235,7 @@ int utmp_put_init_process(const char *id, pid_t pid, pid_t sid, const char *line
         if (r < 0)
                 return r;
 
-        if (ut_type == LOGIN_PROCESS || ut_type == USER_PROCESS) {
+        if (IN_SET(ut_type, LOGIN_PROCESS, USER_PROCESS)) {
                 store.ut_type = LOGIN_PROCESS;
                 r = write_entry_both(&store);
                 if (r < 0)
@@ -329,7 +330,7 @@ static int write_to_terminal(const char *tty, const char *message) {
         assert(tty);
         assert(message);
 
-        fd = open(tty, O_WRONLY|O_NDELAY|O_NOCTTY|O_CLOEXEC);
+        fd = open(tty, O_WRONLY|O_NONBLOCK|O_NOCTTY|O_CLOEXEC);
         if (fd < 0 || !isatty(fd))
                 return -errno;
 
@@ -424,7 +425,7 @@ int utmp_wall(
                 if (u->ut_type != USER_PROCESS || u->ut_user[0] == 0)
                         continue;
 
-                /* this access is fine, because strlen("/dev/") << 32 (UT_LINESIZE) */
+                /* this access is fine, because STRLEN("/dev/") << 32 (UT_LINESIZE) */
                 if (path_startswith(u->ut_line, "/dev/"))
                         path = u->ut_line;
                 else {

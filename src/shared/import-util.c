@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -152,8 +153,7 @@ int raw_strip_suffixes(const char *p, char **ret) {
                         break;
         }
 
-        *ret = q;
-        q = NULL;
+        *ret = TAKE_PTR(q);
 
         return 0;
 }

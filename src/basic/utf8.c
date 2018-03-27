@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -73,7 +74,7 @@ static bool unichar_is_control(char32_t ch) {
           '\t' is in C0 range, but more or less harmless and commonly used.
         */
 
-        return (ch < ' ' && ch != '\t' && ch != '\n') ||
+        return (ch < ' ' && !IN_SET(ch, '\t', '\n')) ||
                 (0x7F <= ch && ch <= 0x9F);
 }
 
@@ -406,4 +407,23 @@ int utf8_encoded_valid_unichar(const char *str) {
                 return -EINVAL;
 
         return len;
+}
+
+size_t utf8_n_codepoints(const char *str) {
+        size_t n = 0;
+
+        /* Returns the number of UTF-8 codepoints in this string, or (size_t) -1 if the string is not valid UTF-8. */
+
+        while (*str != 0) {
+                int k;
+
+                k = utf8_encoded_valid_unichar(str);
+                if (k < 0)
+                        return (size_t) -1;
+
+                str += k;
+                n++;
+        }
+
+        return n;
 }

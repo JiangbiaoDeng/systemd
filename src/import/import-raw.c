@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -206,13 +207,10 @@ static int raw_import_maybe_convert_qcow2(RawImport *i) {
         }
 
         (void) unlink(i->temp_path);
-        free(i->temp_path);
-        i->temp_path = t;
-        t = NULL;
+        free_and_replace(i->temp_path, t);
 
         safe_close(i->output_fd);
-        i->output_fd = converted_fd;
-        converted_fd = -1;
+        i->output_fd = TAKE_FD(converted_fd);
 
         return 1;
 }
@@ -355,7 +353,7 @@ static int raw_import_process(RawImport *i) {
         }
         if (l == 0) {
                 if (i->compress.type == IMPORT_COMPRESS_UNKNOWN) {
-                        log_error("Premature end of file: %m");
+                        log_error("Premature end of file.");
                         r = -EIO;
                         goto finish;
                 }
@@ -369,7 +367,7 @@ static int raw_import_process(RawImport *i) {
         if (i->compress.type == IMPORT_COMPRESS_UNKNOWN) {
                 r = import_uncompress_detect(&i->compress, i->buffer, i->buffer_size);
                 if (r < 0) {
-                        log_error("Failed to detect file compression: %m");
+                        log_error_errno(r, "Failed to detect file compression: %m");
                         goto finish;
                 }
                 if (r == 0) /* Need more data */

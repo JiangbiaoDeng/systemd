@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -22,7 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef HAVE_GNUTLS
+#if HAVE_GNUTLS
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #endif
@@ -103,7 +104,10 @@ int mhd_respondf(struct MHD_Connection *connection,
         errno = -error;
         fmt = strjoina(format, "\n");
         va_start(ap, format);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
         r = vasprintf(&m, fmt, ap);
+#pragma GCC diagnostic pop
         va_end(ap);
 
         if (r < 0)
@@ -112,7 +116,7 @@ int mhd_respondf(struct MHD_Connection *connection,
         return mhd_respond_internal(connection, code, m, r, MHD_RESPMEM_MUST_FREE);
 }
 
-#ifdef HAVE_GNUTLS
+#if HAVE_GNUTLS
 
 static struct {
         const char *const names[4];

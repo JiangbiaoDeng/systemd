@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -33,6 +34,7 @@
 #include "strbuf.h"
 #include "string-util.h"
 #include "udev.h"
+#include "udevadm-util.h"
 #include "util.h"
 
 /*
@@ -92,7 +94,7 @@ static int node_add_child(struct trie *trie, struct trie_node *node, struct trie
         struct trie_child_entry *child;
 
         /* extend array, add new entry, sort for bisection */
-        child = realloc(node->children, (node->children_count + 1) * sizeof(struct trie_child_entry));
+        child = reallocarray(node->children, node->children_count + 1, sizeof(struct trie_child_entry));
         if (!child)
                 return -ENOMEM;
 
@@ -164,7 +166,7 @@ static int trie_node_add_value(struct trie *trie, struct trie_node *node,
         }
 
         /* extend array, add new entry, sort for bisection */
-        val = realloc(node->values, (node->values_count + 1) * sizeof(struct trie_value_entry));
+        val = reallocarray(node->values, node->values_count + 1, sizeof(struct trie_value_entry));
         if (!val)
                 return -ENOMEM;
         trie->values_count++;
@@ -352,7 +354,7 @@ static int trie_store(struct trie *trie, const char *filename) {
         int64_t size;
         struct trie_header_f h = {
                 .signature = HWDB_SIG,
-                .tool_version = htole64(atoi(VERSION)),
+                .tool_version = htole64(atoi(PACKAGE_VERSION)),
                 .header_size = htole64(sizeof(struct trie_header_f)),
                 .node_size = htole64(sizeof(struct trie_node_f)),
                 .child_entry_size = htole64(sizeof(struct trie_child_entry_f)),
@@ -364,18 +366,14 @@ static int trie_store(struct trie *trie, const char *filename) {
         t.strings_off = sizeof(struct trie_header_f);
         trie_store_nodes_size(&t, trie->root);
 
-        err = fopen_temporary(filename , &t.f, &filename_tmp);
+        err = fopen_temporary(filename, &t.f, &filename_tmp);
         if (err < 0)
                 return err;
         fchmod(fileno(t.f), 0444);
 
         /* write nodes */
-        err = fseeko(t.f, sizeof(struct trie_header_f), SEEK_SET);
-        if (err < 0) {
-                fclose(t.f);
-                unlink_noerrno(filename_tmp);
-                return -errno;
-        }
+        if (fseeko(t.f, sizeof(struct trie_header_f), SEEK_SET) < 0)
+                goto error_fclose;
         root_off = trie_store_nodes(&t, trie->root);
         h.nodes_root_off = htole64(root_off);
         pos = ftello(t.f);
@@ -388,21 +386,21 @@ static int trie_store(struct trie *trie, const char *filename) {
         /* write header */
         size = ftello(t.f);
         h.file_size = htole64(size);
-        err = fseeko(t.f, 0, SEEK_SET);
-        if (err < 0) {
-                fclose(t.f);
-                unlink_noerrno(filename_tmp);
-                return -errno;
-        }
+        if (fseeko(t.f, 0, SEEK_SET < 0))
+                goto error_fclose;
         fwrite(&h, sizeof(struct trie_header_f), 1, t.f);
-        err = ferror(t.f);
-        if (err)
-                err = -errno;
+
+        if (ferror(t.f))
+                goto error_fclose;
+        if (fflush(t.f) < 0)
+                goto error_fclose;
+        if (fsync(fileno(t.f)) < 0)
+                goto error_fclose;
+        if (rename(filename_tmp, filename) < 0)
+                goto error_fclose;
+
+        /* write succeeded */
         fclose(t.f);
-        if (err < 0 || rename(filename_tmp, filename) < 0) {
-                unlink_noerrno(filename_tmp);
-                return err < 0 ? err : -errno;
-        }
 
         log_debug("=== trie on-disk ===");
         log_debug("size:             %8"PRIi64" bytes", size);
@@ -417,6 +415,12 @@ static int trie_store(struct trie *trie, const char *filename) {
         log_debug("strings start:    %8"PRIu64, t.strings_off);
 
         return 0;
+
+ error_fclose:
+        err = -errno;
+        fclose(t.f);
+        unlink(filename_tmp);
+        return err;
 }
 
 static int insert_data(struct trie *trie, struct udev_list *match_list,
@@ -543,12 +547,17 @@ static int import_file(struct udev *udev, struct trie *trie, const char *filenam
 }
 
 static void help(void) {
-        printf("Usage: udevadm hwdb OPTIONS\n"
-               "  -u,--update          update the hardware database\n"
-               "  --usr                generate in " UDEVLIBEXECDIR " instead of /etc/udev\n"
-               "  -t,--test=MODALIAS   query database and print result\n"
-               "  -r,--root=PATH       alternative root path in the filesystem\n"
-               "  -h,--help\n\n");
+        printf("%s hwdb [OPTIONS]\n\n"
+               "  -h --help            Print this message\n"
+               "  -V --version         Print version of the program\n"
+               "  -u --update          Update the hardware database\n"
+               "     --usr             Generate in " UDEVLIBEXECDIR " instead of /etc/udev\n"
+               "  -t --test=MODALIAS   Query database and print result\n"
+               "  -r --root=PATH       Alternative root path in the filesystem\n\n"
+               "NOTE:\n"
+               "The sub-command 'hwdb' is deprecated, and is left for backwards compatibility.\n"
+               "Please use systemd-hwdb instead.\n"
+               , program_invocation_short_name);
 }
 
 static int adm_hwdb(struct udev *udev, int argc, char *argv[]) {
@@ -557,11 +566,12 @@ static int adm_hwdb(struct udev *udev, int argc, char *argv[]) {
         };
 
         static const struct option options[] = {
-                { "update", no_argument,       NULL, 'u' },
-                { "usr",    no_argument,       NULL, ARG_USR },
-                { "test",   required_argument, NULL, 't' },
-                { "root",   required_argument, NULL, 'r' },
-                { "help",   no_argument,       NULL, 'h' },
+                { "update",  no_argument,       NULL, 'u'     },
+                { "usr",     no_argument,       NULL, ARG_USR },
+                { "test",    required_argument, NULL, 't'     },
+                { "root",    required_argument, NULL, 'r'     },
+                { "version", no_argument,       NULL, 'V'     },
+                { "help",    no_argument,       NULL, 'h'     },
                 {}
         };
         const char *test = NULL;
@@ -572,7 +582,7 @@ static int adm_hwdb(struct udev *udev, int argc, char *argv[]) {
         int err, c;
         int rc = EXIT_SUCCESS;
 
-        while ((c = getopt_long(argc, argv, "ut:r:h", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "ut:r:Vh", options, NULL)) >= 0)
                 switch(c) {
                 case 'u':
                         update = true;
@@ -586,6 +596,9 @@ static int adm_hwdb(struct udev *udev, int argc, char *argv[]) {
                 case 'r':
                         root = optarg;
                         break;
+                case 'V':
+                        print_version();
+                        return EXIT_SUCCESS;
                 case 'h':
                         help();
                         return EXIT_SUCCESS;
@@ -625,7 +638,7 @@ static int adm_hwdb(struct udev *udev, int argc, char *argv[]) {
                 }
                 trie->nodes_count++;
 
-                err = conf_files_list_strv(&files, ".hwdb", root, conf_file_dirs);
+                err = conf_files_list_strv(&files, ".hwdb", root, 0, conf_file_dirs);
                 if (err < 0) {
                         log_error_errno(err, "failed to enumerate hwdb files: %m");
                         rc = EXIT_FAILURE;
@@ -667,7 +680,7 @@ static int adm_hwdb(struct udev *udev, int argc, char *argv[]) {
                         rc = EXIT_FAILURE;
                 }
 
-                label_fix(hwdb_bin, false, false);
+                (void) label_fix(hwdb_bin, 0);
         }
 
         if (test) {

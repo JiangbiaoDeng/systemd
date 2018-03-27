@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -29,6 +30,8 @@
 #include "cgroup-util.h"
 #include "fd-util.h"
 #include "logind.h"
+#include "parse-util.h"
+#include "process-util.h"
 #include "strv.h"
 #include "terminal-util.h"
 #include "udev-util.h"
@@ -269,56 +272,73 @@ int manager_process_button_device(Manager *m, struct udev_device *d) {
                         sn = "seat0";
 
                 button_set_seat(b, sn);
-                button_open(b);
+
+                r = button_open(b);
+                if (r < 0) /* event device doesn't have any keys or switches relevant to us? (or any other error
+                            * opening the device?) let's close the button again. */
+                        button_free(b);
         }
 
         return 0;
 }
 
-int manager_get_session_by_pid(Manager *m, pid_t pid, Session **session) {
+int manager_get_session_by_pid(Manager *m, pid_t pid, Session **ret) {
         _cleanup_free_ char *unit = NULL;
         Session *s;
         int r;
 
         assert(m);
 
-        if (pid < 1)
+        if (!pid_is_valid(pid))
                 return -EINVAL;
 
         r = cg_pid_get_unit(pid, &unit);
         if (r < 0)
-                return 0;
+                goto not_found;
 
         s = hashmap_get(m->session_units, unit);
         if (!s)
-                return 0;
+                goto not_found;
 
-        if (session)
-                *session = s;
+        if (ret)
+                *ret = s;
+
         return 1;
+
+not_found:
+        if (ret)
+                *ret = NULL;
+        return 0;
 }
 
-int manager_get_user_by_pid(Manager *m, pid_t pid, User **user) {
+int manager_get_user_by_pid(Manager *m, pid_t pid, User **ret) {
         _cleanup_free_ char *unit = NULL;
         User *u;
         int r;
 
         assert(m);
-        assert(user);
 
-        if (pid < 1)
+        if (!pid_is_valid(pid))
                 return -EINVAL;
 
         r = cg_pid_get_slice(pid, &unit);
         if (r < 0)
-                return 0;
+                goto not_found;
 
         u = hashmap_get(m->user_units, unit);
         if (!u)
-                return 0;
+                goto not_found;
 
-        *user = u;
+        if (ret)
+                *ret = u;
+
         return 1;
+
+not_found:
+        if (ret)
+                *ret = NULL;
+
+        return 0;
 }
 
 int manager_get_idle_hint(Manager *m, dual_timestamp *t) {
@@ -376,12 +396,51 @@ bool manager_shall_kill(Manager *m, const char *user) {
         return m->kill_user_processes;
 }
 
+int config_parse_n_autovts(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        unsigned *n = data;
+        unsigned o;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        r = safe_atou(rvalue, &o);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse number of autovts, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        if (o > 15) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "A maximum of 15 autovts are supported, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        *n = o;
+        return 0;
+}
+
 static int vt_is_busy(unsigned int vtnr) {
         struct vt_stat vt_stat;
         int r = 0;
         _cleanup_close_ int fd;
 
         assert(vtnr >= 1);
+
+        /* VT_GETSTATE "cannot return state for more than 16 VTs, since v_state is short" */
+        assert(vtnr <= 15);
 
         /* We explicitly open /dev/tty1 here instead of /dev/tty0. If
          * we'd open the latter we'd open the foreground tty which
@@ -555,4 +614,38 @@ bool manager_is_docked_or_external_displays(Manager *m) {
         }
 
         return false;
+}
+
+bool manager_is_on_external_power(void) {
+        int r;
+
+        /* For now we only check for AC power, but 'external power' can apply
+         * to anything that isn't an internal battery */
+        r = on_ac_power();
+        if (r < 0)
+                log_warning_errno(r, "Failed to read AC power status: %m");
+        else if (r > 0)
+                return true;
+
+        return false;
+}
+
+bool manager_all_buttons_ignored(Manager *m) {
+        assert(m);
+
+        if (m->handle_power_key != HANDLE_IGNORE)
+                return false;
+        if (m->handle_suspend_key != HANDLE_IGNORE)
+                return false;
+        if (m->handle_hibernate_key != HANDLE_IGNORE)
+                return false;
+        if (m->handle_lid_switch != HANDLE_IGNORE)
+                return false;
+        if (m->handle_lid_switch_ep != _HANDLE_ACTION_INVALID &&
+            m->handle_lid_switch_ep != HANDLE_IGNORE)
+                return false;
+        if (m->handle_lid_switch_docked != HANDLE_IGNORE)
+                return false;
+
+        return true;
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * probe disks for filesystems and partitions
  *
@@ -18,7 +19,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <blkid/blkid.h>
+#include <blkid.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -30,9 +31,11 @@
 #include "sd-id128.h"
 
 #include "alloc-util.h"
+#include "blkid-util.h"
 #include "efivars.h"
 #include "fd-util.h"
 #include "gpt.h"
+#include "parse-util.h"
 #include "string-util.h"
 #include "udev.h"
 
@@ -106,7 +109,7 @@ static void print_property(struct udev_device *dev, bool test, const char *name,
 
 static int find_gpt_root(struct udev_device *dev, blkid_probe pr, bool test) {
 
-#if defined(GPT_ROOT_NATIVE) && defined(ENABLE_EFI)
+#if defined(GPT_ROOT_NATIVE) && ENABLE_EFI
 
         _cleanup_free_ char *root_id = NULL;
         bool found_esp = false;
@@ -122,7 +125,7 @@ static int find_gpt_root(struct udev_device *dev, blkid_probe pr, bool test) {
         errno = 0;
         pl = blkid_probe_get_partitions(pr);
         if (!pl)
-                return errno > 0 ? -errno : -ENOMEM;
+                return -errno ?: -ENOMEM;
 
         nvals = blkid_partlist_numof_partitions(pl);
         for (i = 0; i < nvals; i++) {
@@ -193,7 +196,7 @@ static int probe_superblocks(blkid_probe pr) {
         int rc;
 
         if (fstat(blkid_probe_get_fd(pr), &st))
-                return -1;
+                return -errno;
 
         blkid_probe_enable_partitions(pr, 1);
 
@@ -225,17 +228,16 @@ static int builtin_blkid(struct udev_device *dev, int argc, char *argv[], bool t
         int64_t offset = 0;
         bool noraid = false;
         _cleanup_close_ int fd = -1;
-        blkid_probe pr;
+        _cleanup_blkid_free_probe_ blkid_probe pr = NULL;
         const char *data;
         const char *name;
-        const char *prtype = NULL;
         int nvals;
         int i;
         int err = 0;
         bool is_gpt = false;
 
         static const struct option options[] = {
-                { "offset", optional_argument, NULL, 'o' },
+                { "offset", required_argument, NULL, 'o' },
                 { "noraid", no_argument, NULL, 'R' },
                 {}
         };
@@ -243,13 +245,19 @@ static int builtin_blkid(struct udev_device *dev, int argc, char *argv[], bool t
         for (;;) {
                 int option;
 
-                option = getopt_long(argc, argv, "oR", options, NULL);
+                option = getopt_long(argc, argv, "o:R", options, NULL);
                 if (option == -1)
                         break;
 
                 switch (option) {
                 case 'o':
-                        offset = strtoull(optarg, NULL, 0);
+                        err = safe_atoi64(optarg, &offset);
+                        if (err < 0)
+                                goto out;
+                        if (offset < 0) {
+                                err = -ERANGE;
+                                goto out;
+                        }
                         break;
                 case 'R':
                         noraid = true;
@@ -264,8 +272,7 @@ static int builtin_blkid(struct udev_device *dev, int argc, char *argv[], bool t
         blkid_probe_set_superblocks_flags(pr,
                 BLKID_SUBLKS_LABEL | BLKID_SUBLKS_UUID |
                 BLKID_SUBLKS_TYPE | BLKID_SUBLKS_SECTYPE |
-                BLKID_SUBLKS_USAGE | BLKID_SUBLKS_VERSION |
-                BLKID_SUBLKS_BADCSUM);
+                BLKID_SUBLKS_USAGE | BLKID_SUBLKS_VERSION);
 
         if (noraid)
                 blkid_probe_filter_superblocks_usage(pr, BLKID_FLTR_NOTIN, BLKID_USAGE_RAID);
@@ -287,15 +294,6 @@ static int builtin_blkid(struct udev_device *dev, int argc, char *argv[], bool t
         err = probe_superblocks(pr);
         if (err < 0)
                 goto out;
-        if (blkid_probe_has_value(pr, "SBBADCSUM")) {
-                if (!blkid_probe_lookup_value(pr, "TYPE", &prtype, NULL))
-                        log_warning("incorrect %s checksum on %s",
-                                    prtype, udev_device_get_devnode(dev));
-                else
-                        log_warning("incorrect checksum on %s",
-                                    udev_device_get_devnode(dev));
-                goto out;
-        }
 
         /* If we are a partition then our parent passed on the root
          * partition UUID to us */
@@ -321,7 +319,6 @@ static int builtin_blkid(struct udev_device *dev, int argc, char *argv[], bool t
         if (is_gpt)
                 find_gpt_root(dev, pr, test);
 
-        blkid_free_probe(pr);
 out:
         if (err < 0)
                 return EXIT_FAILURE;

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -23,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdio_ext.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,7 +38,7 @@
 #include "string-util.h"
 #include "util.h"
 
-#ifdef HAVE_SMACK
+#if ENABLE_SMACK
 
 static int write_access2_rules(const char* srcdir) {
         _cleanup_close_ int load2_fd = -1, change_fd = -1;
@@ -102,7 +104,7 @@ static int write_access2_rules(const char* srcdir) {
 
                         _cleanup_free_ char *sbj = NULL, *obj = NULL, *acc1 = NULL, *acc2 = NULL;
 
-                        if (isempty(truncate_nl(buf)))
+                        if (isempty(truncate_nl(buf)) || strchr(COMMENTS, *buf))
                                 continue;
 
                         /* if 3 args -> load rule   : subject object access1 */
@@ -179,7 +181,7 @@ static int write_cipso2_rules(const char* srcdir) {
                              log_error_errno(errno, "Failed to read line from '%s': %m",
                                              entry->d_name)) {
 
-                        if (isempty(truncate_nl(buf)))
+                        if (isempty(truncate_nl(buf)) || strchr(COMMENTS, *buf))
                                 continue;
 
                         if (write(cipso2_fd, buf, strlen(buf)) < 0) {
@@ -242,20 +244,25 @@ static int write_netlabel_rules(const char* srcdir) {
                         continue;
                 }
 
+                (void) __fsetlocking(policy, FSETLOCKING_BYCALLER);
+
                 /* load2 write rules in the kernel require a line buffered stream */
                 FOREACH_LINE(buf, policy,
-                             log_error_errno(errno, "Failed to read line from %s: %m",
-                                       entry->d_name)) {
+                             log_error_errno(errno, "Failed to read line from %s: %m", entry->d_name)) {
+
+                        int q;
+
                         if (!fputs(buf, dst)) {
                                 if (r == 0)
                                         r = -EINVAL;
                                 log_error_errno(errno, "Failed to write line to /sys/fs/smackfs/netlabel");
                                 break;
                         }
-                        if (fflush(dst)) {
+                        q = fflush_and_check(dst);
+                        if (q < 0) {
                                 if (r == 0)
-                                        r = -errno;
-                                log_error_errno(errno, "Failed to flush writes to /sys/fs/smackfs/netlabel: %m");
+                                        r = q;
+                                log_error_errno(q, "Failed to flush writes to /sys/fs/smackfs/netlabel: %m");
                                 break;
                         }
                 }
@@ -264,11 +271,59 @@ static int write_netlabel_rules(const char* srcdir) {
         return r;
 }
 
+static int write_onlycap_list(void) {
+        _cleanup_close_ int onlycap_fd = -1;
+        _cleanup_free_ char *list = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+        size_t len = 0, allocated = 0;
+        char buf[LINE_MAX];
+        int r;
+
+        f = fopen("/etc/smack/onlycap", "re");
+        if (!f) {
+                if (errno != ENOENT)
+                        log_warning_errno(errno, "Failed to read '/etc/smack/onlycap'");
+                return errno == ENOENT ? ENOENT : -errno;
+        }
+
+        FOREACH_LINE(buf, f, return -errno) {
+                size_t l;
+
+                if (isempty(truncate_nl(buf)) || strchr(COMMENTS, *buf))
+                        continue;
+
+                l = strlen(buf);
+                if (!GREEDY_REALLOC(list, allocated, len + l + 1))
+                        return log_oom();
+
+                stpcpy(list + len, buf)[0] = ' ';
+                len += l + 1;
+        }
+
+        if (!len)
+                return 0;
+
+        list[len - 1] = 0;
+
+        onlycap_fd = open("/sys/fs/smackfs/onlycap", O_WRONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
+        if (onlycap_fd < 0) {
+                if (errno != ENOENT)
+                        log_warning_errno(errno, "Failed to open '/sys/fs/smackfs/onlycap'");
+                return -errno; /* negative error */
+        }
+
+        r = write(onlycap_fd, list, len);
+        if (r < 0)
+                return log_error_errno(errno, "Failed to write onlycap list(%s) to '/sys/fs/smackfs/onlycap'", list);
+
+        return 0;
+}
+
 #endif
 
 int mac_smack_setup(bool *loaded_policy) {
 
-#ifdef HAVE_SMACK
+#if ENABLE_SMACK
 
         int r;
 
@@ -336,6 +391,22 @@ int mac_smack_setup(bool *loaded_policy) {
         default:
                 log_warning_errno(r, "Failed to load Smack network host rules: %m, ignoring.");
                 break;
+        }
+
+        r = write_onlycap_list();
+        switch(r) {
+        case -ENOENT:
+                log_debug("Smack is not enabled in the kernel.");
+                break;
+        case ENOENT:
+                log_debug("Smack onlycap list file '/etc/smack/onlycap' not found");
+                break;
+        case 0:
+                log_info("Successfully wrote Smack onlycap list.");
+                break;
+        default:
+                log_emergency_errno(r, "Failed to write Smack onlycap list.");
+                return r;
         }
 
         *loaded_policy = true;

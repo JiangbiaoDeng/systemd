@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,25 +18,33 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include <netinet/in.h>
 #include <stdint.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
-#include <linux/can/netlink.h>
-#include <linux/in6.h>
-#include <linux/veth.h>
-#include <linux/if_bridge.h>
-#include <linux/if_addr.h>
-#include <linux/if.h>
+#include <linux/genetlink.h>
 #include <linux/ip.h>
+#include <linux/if.h>
+#include <linux/can/netlink.h>
+#include <linux/fib_rules.h>
+#include <linux/if_addr.h>
+#include <linux/if_addrlabel.h>
+#include <linux/if_bridge.h>
 #include <linux/if_link.h>
 #include <linux/if_tunnel.h>
+#include <linux/veth.h>
+#if HAVE_VXCAN_INFO_PEER
+#include <linux/can/vxcan.h>
+#endif
 
 #include "macro.h"
 #include "missing.h"
 #include "netlink-types.h"
+#include "sd-netlink.h"
 #include "string-table.h"
 #include "util.h"
+#include "wireguard-netlink.h"
 
 /* Maximum ARP IP target defined in kernel */
 #define BOND_MAX_ARP_TARGETS    16
@@ -86,8 +95,13 @@ static const NLType rtnl_link_info_data_veth_types[] = {
         [VETH_INFO_PEER]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
 };
 
+static const NLType rtnl_link_info_data_vxcan_types[] = {
+        [VXCAN_INFO_PEER]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
+};
+
 static const NLType rtnl_link_info_data_ipvlan_types[] = {
         [IFLA_IPVLAN_MODE]  = { .type = NETLINK_TYPE_U16 },
+        [IFLA_IPVLAN_FLAGS]  = { .type = NETLINK_TYPE_U16 },
 };
 
 static const NLType rtnl_link_info_data_macvlan_types[] = {
@@ -149,7 +163,7 @@ static const NLType rtnl_link_info_data_vxlan_types[] = {
         [IFLA_VXLAN_ID]                = { .type = NETLINK_TYPE_U32 },
         [IFLA_VXLAN_GROUP]             = { .type = NETLINK_TYPE_IN_ADDR },
         [IFLA_VXLAN_LINK]              = { .type = NETLINK_TYPE_U32 },
-        [IFLA_VXLAN_LOCAL]             = { .type = NETLINK_TYPE_U32},
+        [IFLA_VXLAN_LOCAL]             = { .type = NETLINK_TYPE_IN_ADDR },
         [IFLA_VXLAN_TTL]               = { .type = NETLINK_TYPE_U8 },
         [IFLA_VXLAN_TOS]               = { .type = NETLINK_TYPE_U8 },
         [IFLA_VXLAN_LEARNING]          = { .type = NETLINK_TYPE_U8 },
@@ -170,6 +184,9 @@ static const NLType rtnl_link_info_data_vxlan_types[] = {
         [IFLA_VXLAN_REMCSUM_RX]        = { .type = NETLINK_TYPE_U8 },
         [IFLA_VXLAN_GBP]               = { .type = NETLINK_TYPE_FLAG },
         [IFLA_VXLAN_REMCSUM_NOPARTIAL] = { .type = NETLINK_TYPE_FLAG },
+        [IFLA_VXLAN_COLLECT_METADATA]  = { .type = NETLINK_TYPE_U8 },
+        [IFLA_VXLAN_LABEL]             = { .type = NETLINK_TYPE_U32 },
+        [IFLA_VXLAN_GPE]               = { .type = NETLINK_TYPE_FLAG },
 };
 
 static const NLType rtnl_bond_arp_target_types[] = {
@@ -283,6 +300,19 @@ static const NLType rtnl_link_info_data_vrf_types[] = {
         [IFLA_VRF_TABLE]                 = { .type = NETLINK_TYPE_U32 },
 };
 
+static const NLType rtnl_link_info_data_geneve_types[] = {
+        [IFLA_GENEVE_ID]                = { .type = NETLINK_TYPE_U32 },
+        [IFLA_GENEVE_TTL]               = { .type = NETLINK_TYPE_U8 },
+        [IFLA_GENEVE_TOS]               = { .type = NETLINK_TYPE_U8 },
+        [IFLA_GENEVE_PORT]              = { .type = NETLINK_TYPE_U16 },
+        [IFLA_GENEVE_REMOTE]            = { .type = NETLINK_TYPE_IN_ADDR },
+        [IFLA_GENEVE_REMOTE6]           = { .type = NETLINK_TYPE_IN_ADDR },
+        [IFLA_GENEVE_UDP_CSUM]          = { .type = NETLINK_TYPE_U8 },
+        [IFLA_GENEVE_UDP_ZERO_CSUM6_TX] = { .type = NETLINK_TYPE_U8 },
+        [IFLA_GENEVE_UDP_ZERO_CSUM6_RX] = { .type = NETLINK_TYPE_U8 },
+        [IFLA_GENEVE_LABEL]             = { .type = NETLINK_TYPE_U32 },
+};
+
 /* these strings must match the .kind entries in the kernel */
 static const char* const nl_union_link_info_data_table[] = {
         [NL_UNION_LINK_INFO_DATA_BOND] = "bond",
@@ -305,6 +335,9 @@ static const char* const nl_union_link_info_data_table[] = {
         [NL_UNION_LINK_INFO_DATA_IP6TNL_TUNNEL] = "ip6tnl",
         [NL_UNION_LINK_INFO_DATA_VRF] = "vrf",
         [NL_UNION_LINK_INFO_DATA_VCAN] = "vcan",
+        [NL_UNION_LINK_INFO_DATA_GENEVE] = "geneve",
+        [NL_UNION_LINK_INFO_DATA_VXCAN] = "vxcan",
+        [NL_UNION_LINK_INFO_DATA_WIREGUARD] = "wireguard",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(nl_union_link_info_data, NLUnionLinkInfoData);
@@ -346,6 +379,10 @@ static const NLTypeSystem rtnl_link_info_data_type_systems[] = {
                                                        .types = rtnl_link_info_data_ip6tnl_types },
         [NL_UNION_LINK_INFO_DATA_VRF] =              { .count = ELEMENTSOF(rtnl_link_info_data_vrf_types),
                                                        .types = rtnl_link_info_data_vrf_types },
+        [NL_UNION_LINK_INFO_DATA_GENEVE] =           { .count = ELEMENTSOF(rtnl_link_info_data_geneve_types),
+                                                       .types = rtnl_link_info_data_geneve_types },
+        [NL_UNION_LINK_INFO_DATA_VXCAN] =            { .count = ELEMENTSOF(rtnl_link_info_data_vxcan_types),
+                                                       .types = rtnl_link_info_data_vxcan_types },
 };
 
 static const NLTypeSystemUnion rtnl_link_info_data_type_system_union = {
@@ -515,6 +552,8 @@ static const NLType rtnl_route_metrics_types[] = {
         [RTAX_INITCWND]          = { .type = NETLINK_TYPE_U32 },
         [RTAX_FEATURES]          = { .type = NETLINK_TYPE_U32 },
         [RTAX_RTO_MIN]           = { .type = NETLINK_TYPE_U32 },
+        [RTAX_INITRWND]          = { .type = NETLINK_TYPE_U32 },
+        [RTAX_QUICKACK]          = { .type = NETLINK_TYPE_U32 },
 };
 
 static const NLTypeSystem rtnl_route_metrics_type_system = {
@@ -543,7 +582,11 @@ static const NLType rtnl_route_types[] = {
         RTA_NEWDST,
 */
         [RTA_PREF]              = { .type = NETLINK_TYPE_U8 },
-
+/*
+        RTA_ENCAP_TYPE,
+        RTA_ENCAP,
+ */
+        [RTA_EXPIRES]           = { .type = NETLINK_TYPE_U32 },
 };
 
 static const NLTypeSystem rtnl_route_type_system = {
@@ -567,27 +610,155 @@ static const NLTypeSystem rtnl_neigh_type_system = {
         .types = rtnl_neigh_types,
 };
 
-static const NLType rtnl_types[] = {
-        [NLMSG_DONE]   = { .type = NETLINK_TYPE_NESTED, .type_system = &empty_type_system, .size = 0 },
-        [NLMSG_ERROR]  = { .type = NETLINK_TYPE_NESTED, .type_system = &empty_type_system, .size = sizeof(struct nlmsgerr) },
-        [RTM_NEWLINK]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
-        [RTM_DELLINK]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
-        [RTM_GETLINK]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
-        [RTM_SETLINK]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
-        [RTM_NEWADDR]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_address_type_system, .size = sizeof(struct ifaddrmsg) },
-        [RTM_DELADDR]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_address_type_system, .size = sizeof(struct ifaddrmsg) },
-        [RTM_GETADDR]  = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_address_type_system, .size = sizeof(struct ifaddrmsg) },
-        [RTM_NEWROUTE] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_route_type_system, .size = sizeof(struct rtmsg) },
-        [RTM_DELROUTE] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_route_type_system, .size = sizeof(struct rtmsg) },
-        [RTM_GETROUTE] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_route_type_system, .size = sizeof(struct rtmsg) },
-        [RTM_NEWNEIGH] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_neigh_type_system, .size = sizeof(struct ndmsg) },
-        [RTM_DELNEIGH] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_neigh_type_system, .size = sizeof(struct ndmsg) },
-        [RTM_GETNEIGH] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_neigh_type_system, .size = sizeof(struct ndmsg) },
+static const NLType rtnl_addrlabel_types[] = {
+        [IFAL_ADDRESS]         = { .type = NETLINK_TYPE_IN_ADDR, .size = sizeof(struct in6_addr) },
+        [IFAL_LABEL]           = { .type = NETLINK_TYPE_U32 },
 };
 
-const NLTypeSystem type_system_root = {
+static const NLTypeSystem rtnl_addrlabel_type_system = {
+        .count = ELEMENTSOF(rtnl_addrlabel_types),
+        .types = rtnl_addrlabel_types,
+};
+
+static const NLType rtnl_routing_policy_rule_types[] = {
+        [FRA_DST]                 = { .type = NETLINK_TYPE_IN_ADDR },
+        [FRA_SRC]                 = { .type = NETLINK_TYPE_IN_ADDR },
+        [FRA_IIFNAME]             = { .type = NETLINK_TYPE_STRING },
+        [RTA_OIF]                 = { .type = NETLINK_TYPE_U32 },
+        [RTA_GATEWAY]             = { .type = NETLINK_TYPE_IN_ADDR },
+        [FRA_PRIORITY]            = { .type = NETLINK_TYPE_U32 },
+        [FRA_FWMARK]              = { .type = NETLINK_TYPE_U32 },
+        [FRA_FLOW]                = { .type = NETLINK_TYPE_U32 },
+        [FRA_TUN_ID]              = { .type = NETLINK_TYPE_U32 },
+        [FRA_SUPPRESS_IFGROUP]    = { .type = NETLINK_TYPE_U32 },
+        [FRA_SUPPRESS_PREFIXLEN]  = { .type = NETLINK_TYPE_U32 },
+        [FRA_TABLE]               = { .type = NETLINK_TYPE_U32 },
+        [FRA_FWMASK]              = { .type = NETLINK_TYPE_U32 },
+        [FRA_OIFNAME]             = { .type = NETLINK_TYPE_STRING },
+        [FRA_PAD]                 = { .type = NETLINK_TYPE_U32 },
+        [FRA_L3MDEV]              = { .type = NETLINK_TYPE_U64 },
+        [FRA_UID_RANGE]           = { .size = sizeof(struct fib_rule_uid_range) },
+};
+
+static const NLTypeSystem rtnl_routing_policy_rule_type_system = {
+        .count = ELEMENTSOF(rtnl_routing_policy_rule_types),
+        .types = rtnl_routing_policy_rule_types,
+};
+
+static const NLType rtnl_types[] = {
+        [NLMSG_DONE]       = { .type = NETLINK_TYPE_NESTED, .type_system = &empty_type_system, .size = 0 },
+        [NLMSG_ERROR]      = { .type = NETLINK_TYPE_NESTED, .type_system = &empty_type_system, .size = sizeof(struct nlmsgerr) },
+        [RTM_NEWLINK]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
+        [RTM_DELLINK]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
+        [RTM_GETLINK]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
+        [RTM_SETLINK]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
+        [RTM_NEWADDR]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_address_type_system, .size = sizeof(struct ifaddrmsg) },
+        [RTM_DELADDR]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_address_type_system, .size = sizeof(struct ifaddrmsg) },
+        [RTM_GETADDR]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_address_type_system, .size = sizeof(struct ifaddrmsg) },
+        [RTM_NEWROUTE]     = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_route_type_system, .size = sizeof(struct rtmsg) },
+        [RTM_DELROUTE]     = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_route_type_system, .size = sizeof(struct rtmsg) },
+        [RTM_GETROUTE]     = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_route_type_system, .size = sizeof(struct rtmsg) },
+        [RTM_NEWNEIGH]     = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_neigh_type_system, .size = sizeof(struct ndmsg) },
+        [RTM_DELNEIGH]     = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_neigh_type_system, .size = sizeof(struct ndmsg) },
+        [RTM_GETNEIGH]     = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_neigh_type_system, .size = sizeof(struct ndmsg) },
+        [RTM_NEWADDRLABEL] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_addrlabel_type_system, .size = sizeof(struct ifaddrlblmsg) },
+        [RTM_DELADDRLABEL] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_addrlabel_type_system, .size = sizeof(struct ifaddrlblmsg) },
+        [RTM_GETADDRLABEL] = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_addrlabel_type_system, .size = sizeof(struct ifaddrlblmsg) },
+        [RTM_NEWRULE]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_routing_policy_rule_type_system, .size = sizeof(struct rtmsg) },
+        [RTM_DELRULE]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_routing_policy_rule_type_system, .size = sizeof(struct rtmsg) },
+        [RTM_GETRULE]      = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_routing_policy_rule_type_system, .size = sizeof(struct rtmsg) },
+};
+
+const NLTypeSystem rtnl_type_system_root = {
         .count = ELEMENTSOF(rtnl_types),
         .types = rtnl_types,
+};
+
+static const NLType genl_wireguard_allowedip_types[] = {
+        [WGALLOWEDIP_A_FAMILY] = { .type = NETLINK_TYPE_U16 },
+        [WGALLOWEDIP_A_IPADDR] = { .type = NETLINK_TYPE_IN_ADDR },
+        [WGALLOWEDIP_A_CIDR_MASK] = { .type = NETLINK_TYPE_U8 },
+};
+
+static const NLTypeSystem genl_wireguard_allowedip_type_system = {
+        .count = ELEMENTSOF(genl_wireguard_allowedip_types),
+        .types = genl_wireguard_allowedip_types,
+};
+
+static const NLType genl_wireguard_peer_types[] = {
+        [WGPEER_A_PUBLIC_KEY] = { .size = WG_KEY_LEN  },
+        [WGPEER_A_FLAGS] = { .type = NETLINK_TYPE_U32 },
+        [WGPEER_A_PRESHARED_KEY] = { .size = WG_KEY_LEN },
+        [WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL] = { .type = NETLINK_TYPE_U32 },
+        [WGPEER_A_ENDPOINT] = { /* either size of sockaddr_in or sockaddr_in6 depending on address family */ },
+        [WGPEER_A_ALLOWEDIPS] = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_wireguard_allowedip_type_system },
+};
+
+static const NLTypeSystem genl_wireguard_peer_type_system = {
+        .count = ELEMENTSOF(genl_wireguard_peer_types),
+        .types = genl_wireguard_peer_types,
+};
+
+static const NLType genl_wireguard_set_device_types[] = {
+        [WGDEVICE_A_IFINDEX] = { .type = NETLINK_TYPE_U32 },
+        [WGDEVICE_A_IFNAME] = { .type = NETLINK_TYPE_STRING },
+        [WGDEVICE_A_FLAGS] = { .type = NETLINK_TYPE_U32 },
+        [WGDEVICE_A_PRIVATE_KEY] = { .size = WG_KEY_LEN },
+        [WGDEVICE_A_LISTEN_PORT] = { .type = NETLINK_TYPE_U16 },
+        [WGDEVICE_A_FWMARK] = { .type = NETLINK_TYPE_U32 },
+        [WGDEVICE_A_PEERS] = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_wireguard_peer_type_system },
+};
+
+static const NLTypeSystem genl_wireguard_set_device_type_system = {
+        .count = ELEMENTSOF(genl_wireguard_set_device_types),
+        .types = genl_wireguard_set_device_types,
+};
+
+static const NLType genl_wireguard_cmds[] = {
+        [WG_CMD_SET_DEVICE] = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_wireguard_set_device_type_system },
+};
+
+static const NLTypeSystem genl_wireguard_type_system = {
+        .count = ELEMENTSOF(genl_wireguard_cmds),
+        .types = genl_wireguard_cmds,
+};
+
+static const NLType genl_get_family_types[] = {
+        [CTRL_ATTR_FAMILY_NAME] = { .type = NETLINK_TYPE_STRING },
+        [CTRL_ATTR_FAMILY_ID] = { .type = NETLINK_TYPE_U16 },
+};
+
+static const NLTypeSystem genl_get_family_type_system = {
+        .count = ELEMENTSOF(genl_get_family_types),
+        .types = genl_get_family_types,
+};
+
+static const NLType genl_ctrl_id_ctrl_cmds[] = {
+        [CTRL_CMD_GETFAMILY] = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_get_family_type_system },
+};
+
+static const NLTypeSystem genl_ctrl_id_ctrl_type_system = {
+        .count = ELEMENTSOF(genl_ctrl_id_ctrl_cmds),
+        .types = genl_ctrl_id_ctrl_cmds,
+};
+
+static const NLType genl_families[] = {
+        [SD_GENL_ID_CTRL]  = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_ctrl_id_ctrl_type_system },
+        [SD_GENL_WIREGUARD] = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_wireguard_type_system },
+};
+
+const NLTypeSystem genl_family_type_system_root = {
+        .count = ELEMENTSOF(genl_families),
+        .types = genl_families,
+};
+
+static const NLType genl_types[] = {
+        [GENL_ID_CTRL] = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_get_family_type_system, .size = sizeof(struct genlmsghdr) },
+};
+
+const NLTypeSystem genl_type_system_root = {
+        .count = ELEMENTSOF(genl_types),
+        .types = genl_types,
 };
 
 uint16_t type_get_type(const NLType *type) {
@@ -621,6 +792,15 @@ void type_get_type_system_union(const NLType *nl_type, const NLTypeSystemUnion *
 uint16_t type_system_get_count(const NLTypeSystem *type_system) {
         assert(type_system);
         return type_system->count;
+}
+
+const NLTypeSystem *type_system_get_root(int protocol) {
+        switch (protocol) {
+                case NETLINK_GENERIC:
+                        return &genl_type_system_root;
+                default: /* NETLINK_ROUTE: */
+                        return &rtnl_type_system_root;
+        }
 }
 
 int type_system_get_type(const NLTypeSystem *type_system, const NLType **ret, uint16_t type) {

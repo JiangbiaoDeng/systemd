@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,6 +18,9 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#if defined(__i386__) || defined(__x86_64__)
+#include <cpuid.h>
+#endif
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -25,6 +29,7 @@
 
 #include "alloc-util.h"
 #include "dirent-util.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "macro.h"
@@ -33,7 +38,6 @@
 #include "string-table.h"
 #include "string-util.h"
 #include "virt.h"
-#include "env-util.h"
 
 static int detect_vm_cpuid(void) {
 
@@ -46,38 +50,24 @@ static int detect_vm_cpuid(void) {
         } cpuid_vendor_table[] = {
                 { "XenVMMXenVMM", VIRTUALIZATION_XEN       },
                 { "KVMKVMKVM",    VIRTUALIZATION_KVM       },
+                { "TCGTCGTCGTCG", VIRTUALIZATION_QEMU      },
                 /* http://kb.vmware.com/selfservice/microsites/search.do?language=en_US&cmd=displayKC&externalId=1009458 */
                 { "VMwareVMware", VIRTUALIZATION_VMWARE    },
-                /* http://msdn.microsoft.com/en-us/library/ff542428.aspx */
+                /* https://docs.microsoft.com/en-us/virtualization/hyper-v-on-windows/reference/tlfs */
                 { "Microsoft Hv", VIRTUALIZATION_MICROSOFT },
                 /* https://wiki.freebsd.org/bhyve */
                 { "bhyve bhyve ", VIRTUALIZATION_BHYVE     },
+                { "QNXQVMBSQG",   VIRTUALIZATION_QNX       },
         };
 
-        uint32_t eax, ecx;
+        uint32_t eax, ebx, ecx, edx;
         bool hypervisor;
 
         /* http://lwn.net/Articles/301888/ */
 
-#if defined (__i386__)
-#define REG_a "eax"
-#define REG_b "ebx"
-#elif defined (__amd64__)
-#define REG_a "rax"
-#define REG_b "rbx"
-#endif
-
         /* First detect whether there is a hypervisor */
-        eax = 1;
-        __asm__ __volatile__ (
-                /* ebx/rbx is being used for PIC! */
-                "  push %%"REG_b"         \n\t"
-                "  cpuid                  \n\t"
-                "  pop %%"REG_b"          \n\t"
-
-                : "=a" (eax), "=c" (ecx)
-                : "0" (eax)
-        );
+        if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0)
+                return VIRTUALIZATION_NONE;
 
         hypervisor = !!(ecx & 0x80000000U);
 
@@ -89,17 +79,11 @@ static int detect_vm_cpuid(void) {
                 unsigned j;
 
                 /* There is a hypervisor, see what it is */
-                eax = 0x40000000U;
-                __asm__ __volatile__ (
-                        /* ebx/rbx is being used for PIC! */
-                        "  push %%"REG_b"         \n\t"
-                        "  cpuid                  \n\t"
-                        "  mov %%ebx, %1          \n\t"
-                        "  pop %%"REG_b"          \n\t"
+                __cpuid(0x40000000U, eax, ebx, ecx, edx);
 
-                        : "=a" (eax), "=r" (sig.sig32[0]), "=c" (sig.sig32[1]), "=d" (sig.sig32[2])
-                        : "0" (eax)
-                );
+                sig.sig32[0] = ebx;
+                sig.sig32[1] = ecx;
+                sig.sig32[2] = edx;
 
                 log_debug("Virtualization found, CPUID=%s", sig.text);
 
@@ -199,8 +183,6 @@ static int detect_vm_dmi(void) {
                         return r;
                 }
 
-
-
                 for (j = 0; j < ELEMENTSOF(dmi_vendor_table); j++)
                         if (startswith(s, dmi_vendor_table[j].vendor)) {
                                 log_debug("Virtualization %s found in DMI (%s)", s, dmi_vendors[i]);
@@ -215,27 +197,50 @@ static int detect_vm_dmi(void) {
 }
 
 static int detect_vm_xen(void) {
+
         /* Check for Dom0 will be executed later in detect_vm_xen_dom0
-           Thats why we dont check the content of /proc/xen/capabilities here. */
-        if (access("/proc/xen/capabilities", F_OK) < 0) {
-                log_debug("Virtualization XEN not found, /proc/xen/capabilities does not exist");
+           The presence of /proc/xen indicates some form of a Xen domain */
+        if (access("/proc/xen", F_OK) < 0) {
+                log_debug("Virtualization XEN not found, /proc/xen does not exist");
                 return VIRTUALIZATION_NONE;
         }
 
-        log_debug("Virtualization XEN found (/proc/xen/capabilities exists)");
-        return  VIRTUALIZATION_XEN;
-
+        log_debug("Virtualization XEN found (/proc/xen exists)");
+        return VIRTUALIZATION_XEN;
 }
 
-static bool detect_vm_xen_dom0(void) {
+#define XENFEAT_dom0 11 /* xen/include/public/features.h */
+#define PATH_FEATURES "/sys/hypervisor/properties/features"
+/* Returns -errno, or 0 for domU, or 1 for dom0 */
+static int detect_vm_xen_dom0(void) {
         _cleanup_free_ char *domcap = NULL;
         char *cap, *i;
         int r;
 
+        r = read_one_line_file(PATH_FEATURES, &domcap);
+        if (r < 0 && r != -ENOENT)
+                return r;
+        if (r == 0) {
+                unsigned long features;
+
+                /* Here, we need to use sscanf() instead of safe_atoul()
+                 * as the string lacks the leading "0x". */
+                r = sscanf(domcap, "%lx", &features);
+                if (r == 1) {
+                        r = !!(features & (1U << XENFEAT_dom0));
+                        log_debug("Virtualization XEN, found %s with value %08lx, "
+                                  "XENFEAT_dom0 (indicating the 'hardware domain') is%s set.",
+                                  PATH_FEATURES, features, r ? "" : " not");
+                        return r;
+                }
+                log_debug("Virtualization XEN, found %s, unhandled content '%s'",
+                          PATH_FEATURES, domcap);
+        }
+
         r = read_one_line_file("/proc/xen/capabilities", &domcap);
         if (r == -ENOENT) {
-                log_debug("Virtualization XEN not found, /proc/xen/capabilities does not exist");
-                return false;
+                log_debug("Virtualization XEN because /proc/xen/capabilities does not exist");
+                return 0;
         }
         if (r < 0)
                 return r;
@@ -246,11 +251,11 @@ static bool detect_vm_xen_dom0(void) {
                         break;
         if (!cap) {
                 log_debug("Virtualization XEN DomU found (/proc/xen/capabilites)");
-                return false;
+                return 0;
         }
 
         log_debug("Virtualization XEN Dom0 ignored (/proc/xen/capabilities)");
-        return true;
+        return 1;
 }
 
 static int detect_vm_hypervisor(void) {
@@ -277,6 +282,10 @@ static int detect_vm_uml(void) {
 
         /* Detect User-Mode Linux by reading /proc/cpuinfo */
         r = read_full_file("/proc/cpuinfo", &cpuinfo_contents, NULL);
+        if (r == -ENOENT) {
+                log_debug("/proc/cpuinfo not found, assuming no UML virtualization.");
+                return VIRTUALIZATION_NONE;
+        }
         if (r < 0)
                 return r;
 
@@ -285,7 +294,7 @@ static int detect_vm_uml(void) {
                 return VIRTUALIZATION_UML;
         }
 
-        log_debug("No virtualization found in /proc/cpuinfo.");
+        log_debug("UML virtualization not found in /proc/cpuinfo.");
         return VIRTUALIZATION_NONE;
 }
 
@@ -315,60 +324,90 @@ static int detect_vm_zvm(void) {
 /* Returns a short identifier for the various VM implementations */
 int detect_vm(void) {
         static thread_local int cached_found = _VIRTUALIZATION_INVALID;
-        int r;
+        int r, dmi;
+        bool other = false;
 
         if (cached_found >= 0)
                 return cached_found;
 
         /* We have to use the correct order here:
-         * Some virtualization technologies do use KVM hypervisor but are
-         * expected to be detected as something else. So detect DMI first.
          *
-         * An example is Virtualbox since version 5.0, which uses KVM backend.
-         * Detection via DMI works corretly, the CPU ID would find KVM
-         * only. */
-        r = detect_vm_dmi();
-        if (r < 0)
-                return r;
-        if (r != VIRTUALIZATION_NONE)
+         * -> First try to detect Oracle Virtualbox, even if it uses KVM.
+         * -> Second try to detect from cpuid, this will report KVM for
+         *    whatever software is used even if info in dmi is overwritten.
+         * -> Third try to detect from dmi. */
+
+        dmi = detect_vm_dmi();
+        if (dmi == VIRTUALIZATION_ORACLE) {
+                r = dmi;
                 goto finish;
+        }
 
         r = detect_vm_cpuid();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE)
-                goto finish;
+        if (r != VIRTUALIZATION_NONE) {
+                if (r == VIRTUALIZATION_VM_OTHER)
+                        other = true;
+                else
+                        goto finish;
+        }
+
+        r = dmi;
+        if (r < 0)
+                return r;
+        if (r != VIRTUALIZATION_NONE) {
+                if (r == VIRTUALIZATION_VM_OTHER)
+                        other = true;
+                else
+                        goto finish;
+        }
 
         /* x86 xen will most likely be detected by cpuid. If not (most likely
-         * because we're not an x86 guest), then we should try the xen capabilities
-         * file next. If that's not found, then we check for the high-level
-         * hypervisor sysfs file:
-         *
-         * https://bugs.freedesktop.org/show_bug.cgi?id=77271 */
+         * because we're not an x86 guest), then we should try the /proc/xen
+         * directory next. If that's not found, then we check for the high-level
+         * hypervisor sysfs file.
+         */
 
         r = detect_vm_xen();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE)
-                goto finish;
+        if (r != VIRTUALIZATION_NONE) {
+                if (r == VIRTUALIZATION_VM_OTHER)
+                        other = true;
+                else
+                        goto finish;
+        }
 
         r = detect_vm_hypervisor();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE)
-                goto finish;
+        if (r != VIRTUALIZATION_NONE) {
+                if (r == VIRTUALIZATION_VM_OTHER)
+                        other = true;
+                else
+                        goto finish;
+        }
 
         r = detect_vm_device_tree();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE)
-                goto finish;
+        if (r != VIRTUALIZATION_NONE) {
+                if (r == VIRTUALIZATION_VM_OTHER)
+                        other = true;
+                else
+                        goto finish;
+        }
 
         r = detect_vm_uml();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE)
-                goto finish;
+        if (r != VIRTUALIZATION_NONE) {
+                if (r == VIRTUALIZATION_VM_OTHER)
+                        other = true;
+                else
+                        goto finish;
+        }
 
         r = detect_vm_zvm();
         if (r < 0)
@@ -378,8 +417,14 @@ finish:
         /* x86 xen Dom0 is detected as XEN in hypervisor and maybe others.
          * In order to detect the Dom0 as not virtualization we need to
          * double-check it */
-        if (r == VIRTUALIZATION_XEN && detect_vm_xen_dom0())
-                r = VIRTUALIZATION_NONE;
+        if (r == VIRTUALIZATION_XEN) {
+                int ret = detect_vm_xen_dom0();
+                if (ret < 0)
+                        return ret;
+                if (ret > 0)
+                        r = VIRTUALIZATION_NONE;
+        } else if (r == VIRTUALIZATION_NONE && other)
+                r = VIRTUALIZATION_VM_OTHER;
 
         cached_found = r;
         log_debug("Found VM virtualization %s", virtualization_to_string(r));
@@ -408,59 +453,66 @@ int detect_container(void) {
         if (cached_found >= 0)
                 return cached_found;
 
-        /* /proc/vz exists in container and outside of the container,
-         * /proc/bc only outside of the container. */
+        /* /proc/vz exists in container and outside of the container, /proc/bc only outside of the container. */
         if (access("/proc/vz", F_OK) >= 0 &&
             access("/proc/bc", F_OK) < 0) {
                 r = VIRTUALIZATION_OPENVZ;
                 goto finish;
         }
 
-        if (getpid() == 1) {
-                /* If we are PID 1 we can just check our own
-                 * environment variable */
+        if (getpid_cached() == 1) {
+                /* If we are PID 1 we can just check our own environment variable, and that's authoritative. */
 
                 e = getenv("container");
                 if (isempty(e)) {
                         r = VIRTUALIZATION_NONE;
                         goto finish;
                 }
-        } else {
 
-                /* Otherwise, PID 1 dropped this information into a
-                 * file in /run. This is better than accessing
-                 * /proc/1/environ, since we don't need CAP_SYS_PTRACE
-                 * for that. */
-
-                r = read_one_line_file("/run/systemd/container", &m);
-                if (r == -ENOENT) {
-
-                        /* Fallback for cases where PID 1 was not
-                         * systemd (for example, cases where
-                         * init=/bin/sh is used. */
-
-                        r = getenv_for_pid(1, "container", &m);
-                        if (r <= 0) {
-
-                                /* If that didn't work, give up,
-                                 * assume no container manager.
-                                 *
-                                 * Note: This means we still cannot
-                                 * detect containers if init=/bin/sh
-                                 * is passed but privileges dropped,
-                                 * as /proc/1/environ is only readable
-                                 * with privileges. */
-
-                                r = VIRTUALIZATION_NONE;
-                                goto finish;
-                        }
-                }
-                if (r < 0)
-                        return r;
-
-                e = m;
+                goto translate_name;
         }
 
+        /* Otherwise, PID 1 might have dropped this information into a file in /run. This is better than accessing
+         * /proc/1/environ, since we don't need CAP_SYS_PTRACE for that. */
+        r = read_one_line_file("/run/systemd/container", &m);
+        if (r >= 0) {
+                e = m;
+                goto translate_name;
+        }
+        if (r != -ENOENT)
+                return log_debug_errno(r, "Failed to read /run/systemd/container: %m");
+
+        /* Fallback for cases where PID 1 was not systemd (for example, cases where init=/bin/sh is used. */
+        r = getenv_for_pid(1, "container", &m);
+        if (r > 0) {
+                e = m;
+                goto translate_name;
+        }
+        if (r < 0) /* This only works if we have CAP_SYS_PTRACE, hence let's better ignore failures here */
+                log_debug_errno(r, "Failed to read $container of PID 1, ignoring: %m");
+
+        /* Interestingly /proc/1/sched actually shows the host's PID for what we see as PID 1. Hence, if the PID shown
+         * there is not 1, we know we are in a PID namespace. and hence a container. */
+        r = read_one_line_file("/proc/1/sched", &m);
+        if (r >= 0) {
+                const char *t;
+
+                t = strrchr(m, '(');
+                if (!t)
+                        return -EIO;
+
+                if (!startswith(t, "(1,")) {
+                        r = VIRTUALIZATION_CONTAINER_OTHER;
+                        goto finish;
+                }
+        } else if (r != -ENOENT)
+                return r;
+
+        /* If that didn't work, give up, assume no container manager. */
+        r = VIRTUALIZATION_NONE;
+        goto finish;
+
+translate_name:
         for (j = 0; j < ELEMENTSOF(value_table); j++)
                 if (streq(e, value_table[j].value)) {
                         r = value_table[j].id;
@@ -470,7 +522,7 @@ int detect_container(void) {
         r = VIRTUALIZATION_CONTAINER_OTHER;
 
 finish:
-        log_debug("Found container virtualization %s", virtualization_to_string(r));
+        log_debug("Found container virtualization %s.", virtualization_to_string(r));
         cached_found = r;
         return r;
 }
@@ -556,16 +608,16 @@ int running_in_userns(void) {
 }
 
 int running_in_chroot(void) {
-        int ret;
+        int r;
 
         if (getenv_bool("SYSTEMD_IGNORE_CHROOT") > 0)
                 return 0;
 
-        ret = files_same("/proc/1/root", "/");
-        if (ret < 0)
-                return ret;
+        r = files_same("/proc/1/root", "/", 0);
+        if (r < 0)
+                return r;
 
-        return ret == 0;
+        return r == 0;
 }
 
 static const char *const virtualization_table[_VIRTUALIZATION_MAX] = {
@@ -581,6 +633,7 @@ static const char *const virtualization_table[_VIRTUALIZATION_MAX] = {
         [VIRTUALIZATION_ZVM] = "zvm",
         [VIRTUALIZATION_PARALLELS] = "parallels",
         [VIRTUALIZATION_BHYVE] = "bhyve",
+        [VIRTUALIZATION_QNX] = "qnx",
         [VIRTUALIZATION_VM_OTHER] = "vm-other",
 
         [VIRTUALIZATION_SYSTEMD_NSPAWN] = "systemd-nspawn",

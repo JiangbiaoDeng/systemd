@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # udev test
 #
@@ -333,6 +333,30 @@ SUBSYSTEMS=="scsi", PROGRAM=="/bin/echo -n 'foo3 foo4'   'foo5   foo6   foo7 foo
 EOF
         },
         {
+                desc            => "program arguments combined with escaped double quotes, part 1",
+                devpath         => "/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda5",
+                exp_name        => "foo2" ,
+                rules           => <<EOF
+SUBSYSTEMS=="scsi", PROGRAM=="/bin/sh -c 'printf %%s \\\"foo1 foo2\\\" | grep \\\"foo1 foo2\\\"'", KERNEL=="sda5", SYMLINK+="%c{2}"
+EOF
+        },
+        {
+                desc            => "program arguments combined with escaped double quotes, part 2",
+                devpath         => "/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda5",
+                exp_name        => "foo2" ,
+                rules           => <<EOF
+SUBSYSTEMS=="scsi", PROGRAM=="/bin/sh -c \\\"printf %%s 'foo1 foo2' | grep 'foo1 foo2'\\\"", KERNEL=="sda5", SYMLINK+="%c{2}"
+EOF
+        },
+        {
+                desc            => "program arguments combined with escaped double quotes, part 3",
+                devpath         => "/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda5",
+                exp_name        => "foo2" ,
+                rules           => <<EOF
+SUBSYSTEMS=="scsi", PROGRAM=="/bin/sh -c 'printf \\\"%%s %%s\\\" \\\"foo1 foo2\\\" \\\"foo3\\\"| grep \\\"foo1 foo2\\\"'", KERNEL=="sda5", SYMLINK+="%c{2}"
+EOF
+        },
+        {
                 desc            => "characters before the %c{N} substitution",
                 devpath         => "/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda5",
                 exp_name        => "my-foo9" ,
@@ -582,9 +606,9 @@ EOF
                 desc            => "textual user id",
                 devpath         => "/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda",
                 exp_name        => "node",
-                exp_perms       => "nobody::0600",
+                exp_perms       => "daemon::0600",
                 rules           => <<EOF
-SUBSYSTEMS=="scsi", KERNEL=="sda", SYMLINK+="node", OWNER="nobody"
+SUBSYSTEMS=="scsi", KERNEL=="sda", SYMLINK+="node", OWNER="daemon"
 EOF
         },
         {
@@ -738,6 +762,86 @@ EOF
                 not_exp_name        => " ",
                 rules           => <<EOF
 KERNEL=="ttyACM[0-9]*", SYMLINK="  one     two        "
+EOF
+        },
+        {
+                desc            => "symlink with spaces in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="one two three"
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with leading space in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one two three"
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with trailing space in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="one two three   "
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with lots of space in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one two three   "
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with multiple spaces in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with space and var with space, part 1",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "first",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="  first  name-\$env{WITH_WS}-end another_symlink a b c "
+EOF
+        },
+        {
+                desc            => "symlink with space and var with space, part 2",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="  first  name-\$env{WITH_WS}-end another_symlink a b c "
+EOF
+        },
+        {
+                desc            => "symlink with space and var with space, part 3",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "another_symlink",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="  first  name-\$env{WITH_WS}-end another_symlink a b c "
 EOF
         },
         {

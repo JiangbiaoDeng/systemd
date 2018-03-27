@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -31,12 +32,12 @@
 #include "util.h"
 
 int hostname_setup(void) {
-        int r;
         _cleanup_free_ char *b = NULL;
-        const char *hn;
         bool enoent = false;
+        const char *hn;
+        int r;
 
-        r = read_hostname_config("/etc/hostname", &b);
+        r = read_etc_hostname(NULL, &b);
         if (r < 0) {
                 if (r == -ENOENT)
                         enoent = true;
@@ -56,7 +57,7 @@ int hostname_setup(void) {
                 if (enoent)
                         log_info("No hostname configured.");
 
-                hn = "localhost";
+                hn = FALLBACK_HOSTNAME;
         }
 
         r = sethostname_idempotent(hn);

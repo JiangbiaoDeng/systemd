@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,13 +20,13 @@
 
 #include <errno.h>
 #include <sys/prctl.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
 #include "architecture.h"
 #include "build.h"
 #include "bus-common-errors.h"
-#include "clock-util.h"
 #include "dbus-execute.h"
 #include "dbus-job.h"
 #include "dbus-manager.h"
@@ -35,8 +36,10 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
+#include "fs-util.h"
 #include "install.h"
 #include "log.h"
+#include "parse-util.h"
 #include "path-util.h"
 #include "selinux-access.h"
 #include "stat-util.h"
@@ -46,6 +49,10 @@
 #include "user-util.h"
 #include "virt.h"
 #include "watchdog.h"
+
+/* Require 16MiB free in /run/systemd for reloading/reexecing. After all we need to serialize our state there, and if
+ * we can't we'll fail badly. */
+#define RELOAD_DISK_SPACE_MIN (UINT64_C(16) * UINT64_C(1024) * UINT64_C(1024))
 
 static UnitFileFlags unit_file_bools_to_flags(bool runtime, bool force) {
         return (runtime ? UNIT_FILE_RUNTIME : 0) |
@@ -132,27 +139,18 @@ static int property_get_tainted(
                 void *userdata,
                 sd_bus_error *error) {
 
-        char buf[sizeof("split-usr:cgroups-missing:local-hwclock:")] = "", *e = buf;
+        _cleanup_free_ char *s = NULL;
         Manager *m = userdata;
 
         assert(bus);
         assert(reply);
         assert(m);
 
-        if (m->taint_usr)
-                e = stpcpy(e, "split-usr:");
+        s = manager_taint_string(m);
+        if (!s)
+                return log_oom();
 
-        if (access("/proc/cgroups", F_OK) < 0)
-                e = stpcpy(e, "cgroups-missing:");
-
-        if (clock_is_localtime(NULL) > 0)
-                e = stpcpy(e, "local-hwclock:");
-
-        /* remove the last ':' */
-        if (e != buf)
-                e[-1] = 0;
-
-        return sd_bus_message_append(reply, "s", buf);
+        return sd_bus_message_append(reply, "s", s);
 }
 
 static int property_get_log_target(
@@ -309,7 +307,7 @@ static int property_get_progress(
         assert(reply);
         assert(m);
 
-        if (dual_timestamp_is_set(&m->finish_timestamp))
+        if (MANAGER_IS_FINISHED(m))
                 d = 1.0;
         else
                 d = 1.0 - ((double) hashmap_size(m->jobs) / (double) m->n_installed_jobs);
@@ -374,21 +372,16 @@ static int property_get_timer_slack_nsec(
         return sd_bus_message_append(reply, "t", (uint64_t) prctl(PR_GET_TIMERSLACK));
 }
 
-static int method_get_unit(sd_bus_message *message, void *userdata, sd_bus_error *error) {
-        _cleanup_free_ char *path = NULL;
-        Manager *m = userdata;
-        const char *name;
+static int bus_get_unit_by_name(Manager *m, sd_bus_message *message, const char *name, Unit **ret_unit, sd_bus_error *error) {
         Unit *u;
         int r;
 
-        assert(message);
         assert(m);
+        assert(message);
+        assert(ret_unit);
 
-        /* Anyone can call this method */
-
-        r = sd_bus_message_read(message, "s", &name);
-        if (r < 0)
-                return r;
+        /* More or less a wrapper around manager_get_unit() that generates nice errors and has one trick up its sleeve:
+         * if the name is specified empty we use the client's unit. */
 
         if (isempty(name)) {
                 _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
@@ -410,6 +403,43 @@ static int method_get_unit(sd_bus_message *message, void *userdata, sd_bus_error
                 if (!u)
                         return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit %s not loaded.", name);
         }
+
+        *ret_unit = u;
+        return 0;
+}
+
+static int bus_load_unit_by_name(Manager *m, sd_bus_message *message, const char *name, Unit **ret_unit, sd_bus_error *error) {
+        assert(m);
+        assert(message);
+        assert(ret_unit);
+
+        /* Pretty much the same as bus_get_unit_by_name(), but we also load the unit if necessary. */
+
+        if (isempty(name))
+                return bus_get_unit_by_name(m, message, name, ret_unit, error);
+
+        return manager_load_unit(m, name, NULL, error, ret_unit);
+}
+
+static int method_get_unit(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_free_ char *path = NULL;
+        Manager *m = userdata;
+        const char *name;
+        Unit *u;
+        int r;
+
+        assert(message);
+        assert(m);
+
+        /* Anyone can call this method */
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         r = mac_selinux_unit_access_check(u, message, "status", error);
         if (r < 0)
@@ -543,26 +573,9 @@ static int method_load_unit(sd_bus_message *message, void *userdata, sd_bus_erro
         if (r < 0)
                 return r;
 
-        if (isempty(name)) {
-                _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
-                pid_t pid;
-
-                r = sd_bus_query_sender_creds(message, SD_BUS_CREDS_PID, &creds);
-                if (r < 0)
-                        return r;
-
-                r = sd_bus_creds_get_pid(creds, &pid);
-                if (r < 0)
-                        return r;
-
-                u = manager_get_unit_by_pid(m, pid);
-                if (!u)
-                        return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Client not member of any unit.");
-        } else {
-                r = manager_load_unit(m, name, NULL, error, &u);
-                if (r < 0)
-                        return r;
-        }
+        r = bus_load_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         r = mac_selinux_unit_access_check(u, message, "status", error);
         if (r < 0)
@@ -635,8 +648,10 @@ static int method_start_unit_replace(sd_bus_message *message, void *userdata, sd
         if (r < 0)
                 return r;
 
-        u = manager_get_unit(m, old_name);
-        if (!u || !u->job || u->job->type != JOB_START)
+        r = bus_get_unit_by_name(m, message, old_name, &u, error);
+        if (r < 0)
+                return r;
+        if (!u->job || u->job->type != JOB_START)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_JOB, "No job queued for unit %s", old_name);
 
         return method_start_unit_generic(message, m, JOB_START, false, error);
@@ -655,9 +670,9 @@ static int method_kill_unit(sd_bus_message *message, void *userdata, sd_bus_erro
         if (r < 0)
                 return r;
 
-        u = manager_get_unit(m, name);
-        if (!u)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit %s is not loaded.", name);
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         return bus_unit_method_kill(message, u, error);
 }
@@ -675,9 +690,9 @@ static int method_reset_failed_unit(sd_bus_message *message, void *userdata, sd_
         if (r < 0)
                 return r;
 
-        u = manager_get_unit(m, name);
-        if (!u)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit %s is not loaded.", name);
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         return bus_unit_method_reset_failed(message, u, error);
 }
@@ -695,7 +710,7 @@ static int method_set_unit_properties(sd_bus_message *message, void *userdata, s
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(m, name, NULL, error, &u);
+        r = bus_load_unit_by_name(m, message, name, &u, error);
         if (r < 0)
                 return r;
 
@@ -719,7 +734,7 @@ static int method_ref_unit(sd_bus_message *message, void *userdata, sd_bus_error
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(m, name, NULL, error, &u);
+        r = bus_load_unit_by_name(m, message, name, &u, error);
         if (r < 0)
                 return r;
 
@@ -743,7 +758,7 @@ static int method_unref_unit(sd_bus_message *message, void *userdata, sd_bus_err
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(m, name, NULL, error, &u);
+        r = bus_load_unit_by_name(m, message, name, &u, error);
         if (r < 0)
                 return r;
 
@@ -812,7 +827,7 @@ static int method_list_units_by_names(sd_bus_message *message, void *userdata, s
                 if (!unit_name_is_valid(*unit, UNIT_NAME_ANY))
                         continue;
 
-                r = manager_load_unit(m, *unit, NULL, error, &u);
+                r = bus_load_unit_by_name(m, message, *unit, &u, error);
                 if (r < 0)
                         return r;
 
@@ -841,15 +856,31 @@ static int method_get_unit_processes(sd_bus_message *message, void *userdata, sd
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(m, name, NULL, error, &u);
-        if (r < 0)
-                return r;
-
-        r = bus_unit_check_load_state(u, error);
+        r = bus_get_unit_by_name(m, message, name, &u, error);
         if (r < 0)
                 return r;
 
         return bus_unit_method_get_processes(message, u, error);
+}
+
+static int method_attach_processes_to_unit(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        const char *name;
+        Unit *u;
+        int r;
+
+        assert(message);
+        assert(m);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
+
+        return bus_unit_method_attach_processes(message, u, error);
 }
 
 static int transient_unit_from_message(
@@ -1279,9 +1310,7 @@ static int method_unsubscribe(sd_bus_message *message, void *userdata, sd_bus_er
 
 static int method_dump(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         _cleanup_free_ char *dump = NULL;
-        _cleanup_fclose_ FILE *f = NULL;
         Manager *m = userdata;
-        size_t size;
         int r;
 
         assert(message);
@@ -1293,14 +1322,7 @@ static int method_dump(sd_bus_message *message, void *userdata, sd_bus_error *er
         if (r < 0)
                 return r;
 
-        f = open_memstream(&dump, &size);
-        if (!f)
-                return -ENOMEM;
-
-        manager_dump_units(m, f, NULL);
-        manager_dump_jobs(m, f, NULL);
-
-        r = fflush_and_check(f);
+        r = manager_get_dump_string(m, &dump);
         if (r < 0)
                 return r;
 
@@ -1311,12 +1333,50 @@ static int method_refuse_snapshot(sd_bus_message *message, void *userdata, sd_bu
         return sd_bus_error_setf(error, SD_BUS_ERROR_NOT_SUPPORTED, "Support for snapshots has been removed.");
 }
 
+static int verify_run_space(const char *message, sd_bus_error *error) {
+        struct statvfs svfs;
+        uint64_t available;
+
+        if (statvfs("/run/systemd", &svfs) < 0)
+                return sd_bus_error_set_errnof(error, errno, "Failed to statvfs(/run/systemd): %m");
+
+        available = (uint64_t) svfs.f_bfree * (uint64_t) svfs.f_bsize;
+
+        if (available < RELOAD_DISK_SPACE_MIN) {
+                char fb_available[FORMAT_BYTES_MAX], fb_need[FORMAT_BYTES_MAX];
+                return sd_bus_error_setf(error,
+                                         BUS_ERROR_DISK_FULL,
+                                         "%s, not enough space available on /run/systemd. "
+                                         "Currently, %s are free, but a safety buffer of %s is enforced.",
+                                         message,
+                                         format_bytes(fb_available, sizeof(fb_available), available),
+                                         format_bytes(fb_need, sizeof(fb_need), RELOAD_DISK_SPACE_MIN));
+        }
+
+        return 0;
+}
+
+int verify_run_space_and_log(const char *message) {
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+        int r;
+
+        r = verify_run_space(message, &error);
+        if (r < 0)
+                log_error_errno(r, "%s", bus_error_message(&error, r));
+
+        return r;
+}
+
 static int method_reload(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         Manager *m = userdata;
         int r;
 
         assert(message);
         assert(m);
+
+        r = verify_run_space("Refusing to reload", error);
+        if (r < 0)
+                return r;
 
         r = mac_selinux_access_check(message, "reload", error);
         if (r < 0)
@@ -1349,6 +1409,10 @@ static int method_reexecute(sd_bus_message *message, void *userdata, sd_bus_erro
 
         assert(message);
         assert(m);
+
+        r = verify_run_space("Refusing to reexecute", error);
+        if (r < 0)
+                return r;
 
         r = mac_selinux_access_check(message, "reload", error);
         if (r < 0)
@@ -1468,10 +1532,25 @@ static int method_switch_root(sd_bus_message *message, void *userdata, sd_bus_er
         char *ri = NULL, *rt = NULL;
         const char *root, *init;
         Manager *m = userdata;
+        struct statvfs svfs;
+        uint64_t available;
         int r;
 
         assert(message);
         assert(m);
+
+        if (statvfs("/run/systemd", &svfs) < 0)
+                return sd_bus_error_set_errnof(error, errno, "Failed to statvfs(/run/systemd): %m");
+
+        available = (uint64_t) svfs.f_bfree * (uint64_t) svfs.f_bsize;
+
+        if (available < RELOAD_DISK_SPACE_MIN) {
+                char fb_available[FORMAT_BYTES_MAX], fb_need[FORMAT_BYTES_MAX];
+                log_warning("Dangerously low amount of free space on /run/systemd, root switching operation might not complete successfuly. "
+                            "Currently, %s are free, but %s are suggested. Proceeding anyway.",
+                            format_bytes(fb_available, sizeof(fb_available), available),
+                            format_bytes(fb_need, sizeof(fb_need), RELOAD_DISK_SPACE_MIN));
+        }
 
         r = mac_selinux_access_check(message, "reboot", error);
         if (r < 0)
@@ -1484,25 +1563,36 @@ static int method_switch_root(sd_bus_message *message, void *userdata, sd_bus_er
         if (r < 0)
                 return r;
 
-        if (path_equal(root, "/") || !path_is_absolute(root))
-                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid switch root path %s", root);
+        if (isempty(root))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "New root directory may not be the empty string.");
+        if (!path_is_absolute(root))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "New root path '%s' is not absolute.", root);
+        if (path_equal(root, "/"))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "New root directory cannot be the old root directory.");
 
         /* Safety check */
         if (isempty(init)) {
-                if (!path_is_os_tree(root))
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Specified switch root path %s does not seem to be an OS tree. os-release file is missing.", root);
+                r = path_is_os_tree(root);
+                if (r < 0)
+                        return sd_bus_error_set_errnof(error, r, "Failed to determine whether root path '%s' contains an OS tree: %m", root);
+                if (r == 0)
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Specified switch root path '%s' does not seem to be an OS tree. os-release file is missing.", root);
         } else {
-                _cleanup_free_ char *p = NULL;
+                _cleanup_free_ char *chased = NULL;
 
                 if (!path_is_absolute(init))
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid init path %s", init);
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Path to init binary '%s' not absolute.", init);
 
-                p = strappend(root, init);
-                if (!p)
-                        return -ENOMEM;
+                r = chase_symlinks(init, root, CHASE_PREFIX_ROOT|CHASE_TRAIL_SLASH, &chased);
+                if (r < 0)
+                        return sd_bus_error_set_errnof(error, r, "Could not resolve init executable %s: %m", init);
 
-                if (access(p, X_OK) < 0)
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Specified init binary %s does not exist.", p);
+                if (laccess(chased, X_OK) < 0) {
+                        if (errno == EACCES)
+                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Init binary %s is not executable.", init);
+
+                        return sd_bus_error_set_errnof(error, r, "Could not check whether init binary %s is executable: %m", init);
+                }
         }
 
         rt = strdup(root);
@@ -1708,6 +1798,50 @@ static int method_lookup_dynamic_user_by_uid(sd_bus_message *message, void *user
         return sd_bus_reply_method_return(message, "s", name);
 }
 
+static int method_get_dynamic_users(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        Manager *m = userdata;
+        DynamicUser *d;
+        Iterator i;
+        int r;
+
+        assert(message);
+        assert(m);
+
+        assert_cc(sizeof(uid_t) == sizeof(uint32_t));
+
+        if (!MANAGER_IS_SYSTEM(m))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_NOT_SUPPORTED, "Dynamic users are only supported in the system instance.");
+
+        r = sd_bus_message_new_method_return(message, &reply);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_open_container(reply, 'a', "(us)");
+        if (r < 0)
+                return r;
+
+        HASHMAP_FOREACH(d, m->dynamic_users, i) {
+                uid_t uid;
+
+                r = dynamic_user_current(d, &uid);
+                if (r == -EAGAIN) /* not realized yet? */
+                        continue;
+                if (r < 0)
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_FAILED, "Failed to lookup a dynamic user.");
+
+                r = sd_bus_message_append(reply, "(us)", uid, d->name);
+                if (r < 0)
+                        return r;
+        }
+
+        r = sd_bus_message_close_container(reply);
+        if (r < 0)
+                return r;
+
+        return sd_bus_send(NULL, reply, NULL);
+}
+
 static int list_unit_files_by_patterns(sd_bus_message *message, void *userdata, sd_bus_error *error, char **states, char **patterns) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         Manager *m = userdata;
@@ -1841,14 +1975,79 @@ static int send_unit_files_changed(sd_bus *bus, void *userdata) {
         return sd_bus_send(bus, message, NULL);
 }
 
+/* Create an error reply, using the error information from changes[]
+ * if possible, and fall back to generating an error from error code c.
+ * The error message only describes the first error.
+ *
+ * Coordinate with unit_file_dump_changes() in install.c.
+ */
+static int install_error(
+                sd_bus_error *error,
+                int c,
+                UnitFileChange *changes,
+                unsigned n_changes) {
+        int r;
+        unsigned i;
+
+        for (i = 0; i < n_changes; i++)
+
+                switch(changes[i].type) {
+
+                case 0 ... INT_MAX:
+                        continue;
+
+                case -EEXIST:
+                        if (changes[i].source)
+                                r = sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS,
+                                                      "File %s already exists and is a symlink to %s.",
+                                                      changes[i].path, changes[i].source);
+                        else
+                                r = sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS,
+                                                      "File %s already exists.",
+                                                      changes[i].path);
+                        goto found;
+
+                case -ERFKILL:
+                        r = sd_bus_error_setf(error, BUS_ERROR_UNIT_MASKED,
+                                              "Unit file %s is masked.", changes[i].path);
+                        goto found;
+
+                case -EADDRNOTAVAIL:
+                        r = sd_bus_error_setf(error, BUS_ERROR_UNIT_GENERATED,
+                                              "Unit %s is transient or generated.", changes[i].path);
+                        goto found;
+
+                case -ELOOP:
+                        r = sd_bus_error_setf(error, BUS_ERROR_UNIT_LINKED,
+                                              "Refusing to operate on linked unit file %s", changes[i].path);
+                        goto found;
+
+                case -ENOENT:
+                        r = sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit file %s does not exist.", changes[i].path);
+                        goto found;
+
+                default:
+                        r = sd_bus_error_set_errnof(error, changes[i].type, "File %s: %m", changes[i].path);
+                        goto found;
+                }
+
+        r = c < 0 ? c : -EINVAL;
+
+ found:
+        unit_file_changes_free(changes, n_changes);
+        return r;
+}
+
 static int reply_unit_file_changes_and_free(
                 Manager *m,
                 sd_bus_message *message,
                 int carries_install_info,
                 UnitFileChange *changes,
-                unsigned n_changes) {
+                unsigned n_changes,
+                sd_bus_error *error) {
 
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        bool bad = false, good = false;
         unsigned i;
         int r;
 
@@ -1872,19 +2071,28 @@ static int reply_unit_file_changes_and_free(
         if (r < 0)
                 goto fail;
 
-        for (i = 0; i < n_changes; i++)
-                if (changes[i].type >= 0) {
-                        const char *change = unit_file_change_type_to_string(changes[i].type);
-                        assert(change != NULL);
+        for (i = 0; i < n_changes; i++) {
 
-                        r = sd_bus_message_append(
-                                        reply, "(sss)",
-                                        change,
-                                        changes[i].path,
-                                        changes[i].source);
-                        if (r < 0)
-                                goto fail;
+                if (changes[i].type < 0) {
+                        bad = true;
+                        continue;
                 }
+
+                r = sd_bus_message_append(
+                                reply, "(sss)",
+                                unit_file_change_type_to_string(changes[i].type),
+                                changes[i].path,
+                                changes[i].source);
+                if (r < 0)
+                        goto fail;
+
+                good = true;
+        }
+
+        /* If there was a failed change, and no successful change, then return the first failure as proper method call
+         * error. */
+        if (bad && !good)
+                return install_error(error, 0, changes, n_changes);
 
         r = sd_bus_message_close_container(reply);
         if (r < 0)
@@ -1894,58 +2102,6 @@ static int reply_unit_file_changes_and_free(
         return sd_bus_send(NULL, reply, NULL);
 
 fail:
-        unit_file_changes_free(changes, n_changes);
-        return r;
-}
-
-/* Create an error reply, using the error information from changes[]
- * if possible, and fall back to generating an error from error code c.
- * The error message only describes the first error.
- *
- * Coordinate with unit_file_dump_changes() in install.c.
- */
-static int install_error(
-                sd_bus_error *error,
-                int c,
-                UnitFileChange *changes,
-                unsigned n_changes) {
-        int r;
-        unsigned i;
-        assert(c < 0);
-
-        for (i = 0; i < n_changes; i++)
-                switch(changes[i].type) {
-                case 0 ... INT_MAX:
-                        continue;
-                case -EEXIST:
-                        if (changes[i].source)
-                                r = sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS,
-                                                      "File %s already exists and is a symlink to %s.",
-                                                      changes[i].path, changes[i].source);
-                        else
-                                r = sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS,
-                                                      "File %s already exists.",
-                                                      changes[i].path);
-                        goto found;
-                case -ERFKILL:
-                        r = sd_bus_error_setf(error, BUS_ERROR_UNIT_MASKED,
-                                              "Unit file %s is masked.", changes[i].path);
-                        goto found;
-                case -EADDRNOTAVAIL:
-                        r = sd_bus_error_setf(error, BUS_ERROR_UNIT_GENERATED,
-                                              "Unit %s is transient or generated.", changes[i].path);
-                        goto found;
-                case -ELOOP:
-                        r = sd_bus_error_setf(error, BUS_ERROR_UNIT_LINKED,
-                                              "Refusing to operate on linked unit file %s", changes[i].path);
-                        goto found;
-                default:
-                        r = sd_bus_error_set_errnof(error, changes[i].type, "File %s: %m", changes[i].path);
-                        goto found;
-                }
-
-        r = c;
- found:
         unit_file_changes_free(changes, n_changes);
         return r;
 }
@@ -1986,7 +2142,7 @@ static int method_enable_unit_files_generic(
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
-        return reply_unit_file_changes_and_free(m, message, carries_install_info ? r : -1, changes, n_changes);
+        return reply_unit_file_changes_and_free(m, message, carries_install_info ? r : -1, changes, n_changes, error);
 }
 
 static int method_enable_unit_files(sd_bus_message *message, void *userdata, sd_bus_error *error) {
@@ -2055,7 +2211,7 @@ static int method_preset_unit_files_with_mode(sd_bus_message *message, void *use
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
-        return reply_unit_file_changes_and_free(m, message, r, changes, n_changes);
+        return reply_unit_file_changes_and_free(m, message, r, changes, n_changes, error);
 }
 
 static int method_disable_unit_files_generic(
@@ -2090,7 +2246,7 @@ static int method_disable_unit_files_generic(
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
-        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes);
+        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes, error);
 }
 
 static int method_disable_unit_files(sd_bus_message *message, void *userdata, sd_bus_error *error) {
@@ -2125,7 +2281,7 @@ static int method_revert_unit_files(sd_bus_message *message, void *userdata, sd_
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
-        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes);
+        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes, error);
 }
 
 static int method_set_default_target(sd_bus_message *message, void *userdata, sd_bus_error *error) {
@@ -2156,7 +2312,7 @@ static int method_set_default_target(sd_bus_message *message, void *userdata, sd
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
-        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes);
+        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes, error);
 }
 
 static int method_preset_all_unit_files(sd_bus_message *message, void *userdata, sd_bus_error *error) {
@@ -2199,7 +2355,7 @@ static int method_preset_all_unit_files(sd_bus_message *message, void *userdata,
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
-        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes);
+        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes, error);
 }
 
 static int method_add_dependency_unit_files(sd_bus_message *message, void *userdata, sd_bus_error *error) {
@@ -2239,7 +2395,7 @@ static int method_add_dependency_unit_files(sd_bus_message *message, void *userd
         if (r < 0)
                 return install_error(error, r, changes, n_changes);
 
-        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes);
+        return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes, error);
 }
 
 static int method_get_unit_file_links(sd_bus_message *message, void *userdata, sd_bus_error *error) {
@@ -2313,18 +2469,18 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_PROPERTY("Virtualization", "s", property_get_virtualization, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Architecture", "s", property_get_architecture, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Tainted", "s", property_get_tainted, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("FirmwareTimestamp", offsetof(Manager, firmware_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("LoaderTimestamp", offsetof(Manager, loader_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("KernelTimestamp", offsetof(Manager, kernel_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("InitRDTimestamp", offsetof(Manager, initrd_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("UserspaceTimestamp", offsetof(Manager, userspace_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("FinishTimestamp", offsetof(Manager, finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityStartTimestamp", offsetof(Manager, security_start_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityFinishTimestamp", offsetof(Manager, security_finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsStartTimestamp", offsetof(Manager, generators_start_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsFinishTimestamp", offsetof(Manager, generators_finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadStartTimestamp", offsetof(Manager, units_load_start_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadFinishTimestamp", offsetof(Manager, units_load_finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("FirmwareTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_FIRMWARE]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("LoaderTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_LOADER]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("KernelTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_KERNEL]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("InitRDTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_INITRD]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("UserspaceTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_USERSPACE]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("FinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityStartTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_SECURITY_START]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityFinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_SECURITY_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsStartTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_GENERATORS_START]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsFinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_GENERATORS_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadStartTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_UNITS_LOAD_START]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadFinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_UNITS_LOAD_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_WRITABLE_PROPERTY("LogLevel", "s", property_get_log_level, property_set_log_level, 0, 0),
         SD_BUS_WRITABLE_PROPERTY("LogTarget", "s", property_get_log_target, property_set_log_target, 0, 0),
         SD_BUS_PROPERTY("NNames", "u", property_get_n_names, 0, 0),
@@ -2341,6 +2497,7 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_PROPERTY("DefaultStandardError", "s", bus_property_get_exec_output, offsetof(Manager, default_std_output), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_WRITABLE_PROPERTY("RuntimeWatchdogUSec", "t", bus_property_get_usec, property_set_runtime_watchdog, offsetof(Manager, runtime_watchdog), 0),
         SD_BUS_WRITABLE_PROPERTY("ShutdownWatchdogUSec", "t", bus_property_get_usec, bus_property_set_usec, offsetof(Manager, shutdown_watchdog), 0),
+        SD_BUS_WRITABLE_PROPERTY("ServiceWatchdogs", "b", bus_property_get_bool, bus_property_set_bool, offsetof(Manager, service_watchdogs), 0),
         SD_BUS_PROPERTY("ControlGroup", "s", NULL, offsetof(Manager, cgroup_root), 0),
         SD_BUS_PROPERTY("SystemState", "s", property_get_system_state, 0, 0),
         SD_BUS_PROPERTY("ExitCode", "y", bus_property_get_unsigned, offsetof(Manager, return_value), 0),
@@ -2348,8 +2505,10 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_PROPERTY("DefaultTimeoutStartUSec", "t", bus_property_get_usec, offsetof(Manager, default_timeout_start_usec), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultTimeoutStopUSec", "t", bus_property_get_usec, offsetof(Manager, default_timeout_stop_usec), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultRestartUSec", "t", bus_property_get_usec, offsetof(Manager, default_restart_usec), SD_BUS_VTABLE_PROPERTY_CONST),
-        SD_BUS_PROPERTY("DefaultStartLimitIntervalSec", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST),
-        SD_BUS_PROPERTY("DefaultStartLimitInterval", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN), /* obsolete alias name */
+        SD_BUS_PROPERTY("DefaultStartLimitIntervalUSec", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST),
+        /* The following two items are obsolete alias */
+        SD_BUS_PROPERTY("DefaultStartLimitIntervalSec", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN),
+        SD_BUS_PROPERTY("DefaultStartLimitInterval", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN),
         SD_BUS_PROPERTY("DefaultStartLimitBurst", "u", bus_property_get_unsigned, offsetof(Manager, default_start_limit_burst), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultCPUAccounting", "b", bus_property_get_bool, offsetof(Manager, default_cpu_accounting), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultBlockIOAccounting", "b", bus_property_get_bool, offsetof(Manager, default_blockio_accounting), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -2409,6 +2568,7 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_METHOD("UnrefUnit", "s", NULL, method_unref_unit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("StartTransientUnit", "ssa(sv)a(sa(sv))", "o", method_start_transient_unit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetUnitProcesses", "s", "a(sus)", method_get_unit_processes, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("AttachProcessesToUnit", "ssau", NULL, method_attach_processes_to_unit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetJob", "u", "o", method_get_job, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetJobAfter", "u", "a(usssoo)", method_get_job_waiting, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetJobBefore", "u", "a(usssoo)", method_get_job_waiting, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -2456,6 +2616,7 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_METHOD("SetExitCode", "y", NULL, method_set_exit_code, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("LookupDynamicUserByName", "s", "u", method_lookup_dynamic_user_by_name, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("LookupDynamicUserByUID", "u", "s", method_lookup_dynamic_user_by_uid, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetDynamicUsers", NULL, "a(us)", method_get_dynamic_users, SD_BUS_VTABLE_UNPRIVILEGED),
 
         SD_BUS_SIGNAL("UnitNew", "so", 0),
         SD_BUS_SIGNAL("UnitRemoved", "so", 0),

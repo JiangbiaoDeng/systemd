@@ -3,6 +3,8 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2012 Lennart Poettering
@@ -207,14 +209,14 @@
     iterate through all fields of the current journal
     entry:</para>
 
-    <programlisting>...
+    <programlisting>…
 int print_fields(sd_journal *j) {
   const void *data;
   size_t length;
   SD_JOURNAL_FOREACH_DATA(j, data, length)
     printf("%.*s\n", (int) length, data);
 }
-...</programlisting>
+…</programlisting>
 
   </refsect1>
 

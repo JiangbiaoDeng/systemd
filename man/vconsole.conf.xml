@@ -3,6 +3,8 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2010 Lennart Poettering
@@ -78,6 +80,13 @@
     <para>Depending on the operating system other configuration files
     might be checked for configuration of the virtual console as well,
     however only as fallback.</para>
+
+    <para><filename>/etc/vconsole.conf</filename> is usually created and updated
+    using
+    <citerefentry><refentrytitle>systemd-localed.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
+    <citerefentry><refentrytitle>localectl</refentrytitle><manvolnum>1</manvolnum></citerefentry>
+    may be used to instruct <command>systemd-localed.service</command> to
+    query or update configuration.</para>
   </refsect1>
 
   <refsect1>

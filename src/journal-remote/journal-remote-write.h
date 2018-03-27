@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -20,19 +21,9 @@
 ***/
 
 #include "journal-file.h"
+#include "journal-importer.h"
 
 typedef struct RemoteServer RemoteServer;
-
-struct iovec_wrapper {
-        struct iovec *iovec;
-        size_t size_bytes;
-        size_t count;
-};
-
-int iovw_put(struct iovec_wrapper *iovw, void* data, size_t len);
-void iovw_free_contents(struct iovec_wrapper *iovw);
-size_t iovw_size(struct iovec_wrapper *iovw);
-void iovw_rebase(struct iovec_wrapper *iovw, char *old, char *new);
 
 typedef struct Writer {
         JournalFile *journal;

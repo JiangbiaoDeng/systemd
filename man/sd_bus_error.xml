@@ -3,6 +3,8 @@
 "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2014 Zbigniew Jędrzejewski-Szmek
@@ -68,7 +70,7 @@
       <funcsynopsisinfo>typedef struct {
         const char *name;
         const char *message;
-        ...
+        …
 } sd_bus_error;</funcsynopsisinfo>
 
       <para>
@@ -95,7 +97,7 @@
         <paramdef>sd_bus_error *<parameter>e</parameter></paramdef>
         <paramdef>const char *<parameter>name</parameter></paramdef>
         <paramdef>const char *<parameter>format</parameter></paramdef>
-        <paramdef>...</paramdef>
+        <paramdef>…</paramdef>
       </funcprototype>
 
       <funcprototype>
@@ -116,7 +118,7 @@
         <paramdef>sd_bus_error *<parameter>e</parameter></paramdef>
         <paramdef>int <parameter>error</parameter></paramdef>
         <paramdef>const char *<parameter>format</parameter></paramdef>
-        <paramdef>...</paramdef>
+        <paramdef>…</paramdef>
       </funcprototype>
 
       <funcprototype>
@@ -265,7 +267,7 @@
     <parameter>dst</parameter> using the values in
     <parameter>e</parameter>. If the strings in
     <parameter>e</parameter> were set using
-    <function>sd_bus_set_error_const()</function>, they will be shared.
+    <function>sd_bus_error_set_const()</function>, they will be shared.
     Otherwise, they will be copied. Returns a converted
     <varname>errno</varname>-like, negative error code.</para>
 

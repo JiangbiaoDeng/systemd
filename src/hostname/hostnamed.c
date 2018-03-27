@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -95,7 +96,7 @@ static int context_read_data(Context *c) {
         if (!c->data[PROP_HOSTNAME])
                 return -ENOMEM;
 
-        r = read_hostname_config("/etc/hostname", &c->data[PROP_STATIC_HOSTNAME]);
+        r = read_etc_hostname(NULL, &c->data[PROP_STATIC_HOSTNAME]);
         if (r < 0 && r != -ENOENT)
                 return r;
 
@@ -133,6 +134,7 @@ static bool valid_chassis(const char *chassis) {
                         "container\0"
                         "desktop\0"
                         "laptop\0"
+                        "convertible\0"
                         "server\0"
                         "tablet\0"
                         "handset\0"
@@ -199,6 +201,10 @@ static const char* fallback_chassis(void) {
 
         case 0x1E: /* Tablet */
                 return "tablet";
+
+        case 0x1F: /* Convertible */
+        case 0x20: /* Detachable */
+                return "convertible";
         }
 
 try_acpi:
@@ -283,7 +289,7 @@ static int context_update_kernel_hostname(Context *c) {
 
         /* ... and the ultimate fallback */
         else
-                hn = "localhost";
+                hn = FALLBACK_HOSTNAME;
 
         if (sethostname_idempotent(hn) < 0)
                 return -errno;
@@ -419,7 +425,7 @@ static int method_set_hostname(sd_bus_message *m, void *userdata, sd_bus_error *
                 name = c->data[PROP_STATIC_HOSTNAME];
 
         if (isempty(name))
-                name = "localhost";
+                name = FALLBACK_HOSTNAME;
 
         if (!hostname_is_valid(name, false))
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid hostname '%s'", name);
@@ -674,9 +680,9 @@ static int connect_bus(Context *c, sd_event *event, sd_bus **_bus) {
         if (r < 0)
                 return log_error_errno(r, "Failed to register object: %m");
 
-        r = sd_bus_request_name(bus, "org.freedesktop.hostname1", 0);
+        r = sd_bus_request_name_async(bus, NULL, "org.freedesktop.hostname1", 0, NULL, NULL);
         if (r < 0)
-                return log_error_errno(r, "Failed to register name: %m");
+                return log_error_errno(r, "Failed to request name: %m");
 
         r = sd_bus_attach_event(bus, event, 0);
         if (r < 0)

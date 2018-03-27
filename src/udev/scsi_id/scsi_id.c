@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright (C) IBM Corp. 2003
  * Copyright (C) SUSE Linux Products GmbH, 2006
@@ -258,9 +259,8 @@ static int get_file_options(struct udev *udev,
                         if (vendor_in == NULL)
                                 break;
                 } else if (vendor_in &&
-                           strneq(vendor, vendor_in, strlen(vendor_in)) &&
-                           (!model_in ||
-                            (strneq(model, model_in, strlen(model_in))))) {
+                           startswith(vendor, vendor_in) &&
+                           (!model_in || startswith(model, model_in))) {
                                 /*
                                  * Matched vendor and optionally model.
                                  *
@@ -336,7 +336,7 @@ static int set_options(struct udev *udev,
          * file) we have to reset this back to 1.
          */
         optind = 1;
-        while ((option = getopt_long(argc, argv, "d:f:gp:uvVxh", options, NULL)) >= 0)
+        while ((option = getopt_long(argc, argv, "d:f:gp:uvVxhbs:", options, NULL)) >= 0)
                 switch (option) {
                 case 'b':
                         all_good = false;
@@ -357,7 +357,7 @@ static int set_options(struct udev *udev,
 
                 case 'h':
                         help();
-                        exit(0);
+                        exit(EXIT_SUCCESS);
 
                 case 'p':
                         if (streq(optarg, "0x80"))
@@ -391,8 +391,8 @@ static int set_options(struct udev *udev,
                         break;
 
                 case 'V':
-                        printf("%s\n", VERSION);
-                        exit(0);
+                        printf("%s\n", PACKAGE_VERSION);
+                        exit(EXIT_SUCCESS);
 
                 case 'x':
                         export = true;
@@ -577,6 +577,8 @@ int main(int argc, char **argv)
         int newargc;
         char **newargv = NULL;
 
+        log_set_target(LOG_TARGET_AUTO);
+        udev_parse_config();
         log_parse_environment();
         log_open();
 
@@ -605,7 +607,7 @@ int main(int argc, char **argv)
          * Get command line options (overriding any config file settings).
          */
         if (set_options(udev, argc, argv, maj_min_dev) < 0)
-                exit(1);
+                exit(EXIT_FAILURE);
 
         if (!dev_specified) {
                 log_error("No device specified.");

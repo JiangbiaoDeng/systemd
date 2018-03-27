@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -101,6 +102,9 @@ struct Manager {
         int mdns_ipv4_fd;
         int mdns_ipv6_fd;
 
+        /* DNS-SD */
+        Hashmap *dnssd_services;
+
         sd_event_source *mdns_ipv4_event_source;
         sd_event_source *mdns_ipv6_event_source;
 
@@ -109,10 +113,13 @@ struct Manager {
         sd_event_source *bus_retry_event_source;
 
         /* The hostname we publish on LLMNR and mDNS */
+        char *full_hostname;
         char *llmnr_hostname;
         char *mdns_hostname;
         DnsResourceKey *llmnr_host_ipv4_key;
         DnsResourceKey *llmnr_host_ipv6_key;
+        DnsResourceKey *mdns_host_ipv4_key;
+        DnsResourceKey *mdns_host_ipv6_key;
 
         /* Watch the system hostname */
         int hostname_fd;
@@ -123,6 +130,7 @@ struct Manager {
 
         sd_event_source *sigusr1_event_source;
         sd_event_source *sigusr2_event_source;
+        sd_event_source *sigrtmin1_event_source;
 
         unsigned n_transactions_total;
         unsigned n_dnssec_verdict[_DNSSEC_VERDICT_MAX];
@@ -138,6 +146,8 @@ struct Manager {
 
         sd_event_source *dns_stub_udp_event_source;
         sd_event_source *dns_stub_tcp_event_source;
+
+        Hashmap *polkit_registry;
 };
 
 /* Manager */
@@ -181,5 +191,8 @@ void manager_dnssec_verdict(Manager *m, DnssecVerdict verdict, const DnsResource
 bool manager_routable(Manager *m, int family);
 
 void manager_flush_caches(Manager *m);
+void manager_reset_server_features(Manager *m);
 
 void manager_cleanup_saved_user(Manager *m);
+
+bool manager_next_dnssd_names(Manager *m);

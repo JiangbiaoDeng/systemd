@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -24,6 +25,7 @@ typedef struct ExecCommand ExecCommand;
 typedef struct ExecContext ExecContext;
 typedef struct ExecRuntime ExecRuntime;
 typedef struct ExecParameters ExecParameters;
+typedef struct Manager Manager;
 
 #include <sched.h>
 #include <stdbool.h>
@@ -36,6 +38,8 @@ typedef struct ExecParameters ExecParameters;
 #include "missing.h"
 #include "namespace.h"
 #include "nsflags.h"
+
+#define EXEC_STDIN_DATA_MAX (64U*1024U*1024U)
 
 typedef enum ExecUtmpMode {
         EXEC_UTMP_INIT,
@@ -52,6 +56,8 @@ typedef enum ExecInput {
         EXEC_INPUT_TTY_FAIL,
         EXEC_INPUT_SOCKET,
         EXEC_INPUT_NAMED_FD,
+        EXEC_INPUT_DATA,
+        EXEC_INPUT_FILE,
         _EXEC_INPUT_MAX,
         _EXEC_INPUT_INVALID = -1
 } ExecInput;
@@ -68,9 +74,26 @@ typedef enum ExecOutput {
         EXEC_OUTPUT_JOURNAL_AND_CONSOLE,
         EXEC_OUTPUT_SOCKET,
         EXEC_OUTPUT_NAMED_FD,
+        EXEC_OUTPUT_FILE,
         _EXEC_OUTPUT_MAX,
         _EXEC_OUTPUT_INVALID = -1
 } ExecOutput;
+
+typedef enum ExecPreserveMode {
+        EXEC_PRESERVE_NO,
+        EXEC_PRESERVE_YES,
+        EXEC_PRESERVE_RESTART,
+        _EXEC_PRESERVE_MODE_MAX,
+        _EXEC_PRESERVE_MODE_INVALID = -1
+} ExecPreserveMode;
+
+typedef enum ExecKeyringMode {
+        EXEC_KEYRING_INHERIT,
+        EXEC_KEYRING_PRIVATE,
+        EXEC_KEYRING_SHARED,
+        _EXEC_KEYRING_MODE_MAX,
+        _EXEC_KEYRING_MODE_INVALID = -1,
+} ExecKeyringMode;
 
 struct ExecStatus {
         dual_timestamp start_timestamp;
@@ -80,17 +103,28 @@ struct ExecStatus {
         int status;   /* as in sigingo_t::si_status */
 };
 
+typedef enum ExecCommandFlags {
+        EXEC_COMMAND_IGNORE_FAILURE = 1,
+        EXEC_COMMAND_FULLY_PRIVILEGED = 2,
+        EXEC_COMMAND_NO_SETUID = 4,
+        EXEC_COMMAND_AMBIENT_MAGIC = 8,
+} ExecCommandFlags;
+
 struct ExecCommand {
         char *path;
         char **argv;
         ExecStatus exec_status;
+        ExecCommandFlags flags;
         LIST_FIELDS(ExecCommand, command); /* useful for chaining commands */
-        bool ignore:1;
-        bool privileged:1;
 };
 
 struct ExecRuntime {
         int n_ref;
+
+        Manager *manager;
+
+        /* unit id of the owner */
+        char *id;
 
         char *tmp_dir;
         char *var_tmp_dir;
@@ -100,13 +134,29 @@ struct ExecRuntime {
         int netns_storage_socket[2];
 };
 
+typedef enum ExecDirectoryType {
+        EXEC_DIRECTORY_RUNTIME = 0,
+        EXEC_DIRECTORY_STATE,
+        EXEC_DIRECTORY_CACHE,
+        EXEC_DIRECTORY_LOGS,
+        EXEC_DIRECTORY_CONFIGURATION,
+        _EXEC_DIRECTORY_TYPE_MAX,
+        _EXEC_DIRECTORY_TYPE_INVALID = -1,
+} ExecDirectoryType;
+
+typedef struct ExecDirectory {
+        char **paths;
+        mode_t mode;
+} ExecDirectory;
+
 struct ExecContext {
         char **environment;
         char **environment_files;
         char **pass_environment;
+        char **unset_environment;
 
         struct rlimit *rlimit[_RLIMIT_MAX];
-        char *working_directory, *root_directory;
+        char *working_directory, *root_directory, *root_image;
         bool working_directory_missing_ok;
         bool working_directory_home;
 
@@ -124,6 +174,10 @@ struct ExecContext {
         ExecOutput std_output;
         ExecOutput std_error;
         char *stdio_fdname[3];
+        char *stdio_file[3];
+
+        void *stdin_data;
+        size_t stdin_data_size;
 
         nsec_t timer_slack_nsec;
 
@@ -159,8 +213,14 @@ struct ExecContext {
         bool smack_process_label_ignore;
         char *smack_process_label;
 
+        ExecKeyringMode keyring_mode;
+
         char **read_write_paths, **read_only_paths, **inaccessible_paths;
         unsigned long mount_flags;
+        BindMount *bind_mounts;
+        unsigned n_bind_mounts;
+        TemporaryFileSystem *temporary_filesystems;
+        unsigned n_temporary_filesystems;
 
         uint64_t capability_bounding_set;
         uint64_t capability_ambient_set;
@@ -169,6 +229,11 @@ struct ExecContext {
         int syslog_priority;
         char *syslog_identifier;
         bool syslog_level_prefix;
+
+        int log_level_max;
+
+        struct iovec* log_extra_fields;
+        size_t n_log_extra_fields;
 
         bool cpu_sched_reset_on_fork;
         bool non_blocking;
@@ -181,6 +246,7 @@ struct ExecContext {
         bool protect_kernel_tunables;
         bool protect_kernel_modules;
         bool protect_control_groups;
+        bool mount_apivfs;
 
         bool no_new_privileges;
 
@@ -195,10 +261,11 @@ struct ExecContext {
         bool same_pgrp;
 
         unsigned long personality;
+        bool lock_personality;
 
         unsigned long restrict_namespaces; /* The CLONE_NEWxyz flags permitted to the unit's processes */
 
-        Set *syscall_filter;
+        Hashmap *syscall_filter;
         Set *syscall_archs;
         int syscall_errno;
         bool syscall_whitelist:1;
@@ -206,8 +273,8 @@ struct ExecContext {
         Set *address_families;
         bool address_families_whitelist:1;
 
-        char **runtime_directory;
-        mode_t runtime_directory_mode;
+        ExecPreserveMode runtime_directory_preserve_mode;
+        ExecDirectory directories[_EXEC_DIRECTORY_TYPE_MAX];
 
         bool memory_deny_write_execute;
         bool restrict_realtime;
@@ -225,15 +292,20 @@ static inline bool exec_context_restrict_namespaces_set(const ExecContext *c) {
 }
 
 typedef enum ExecFlags {
-        EXEC_APPLY_PERMISSIONS = 1U << 0,
+        EXEC_APPLY_SANDBOXING  = 1U << 0,
         EXEC_APPLY_CHROOT      = 1U << 1,
         EXEC_APPLY_TTY_STDIN   = 1U << 2,
+        EXEC_NEW_KEYRING       = 1U << 3,
+        EXEC_PASS_LOG_UNIT     = 1U << 4, /* Whether to pass the unit name to the service's journal stream connection */
+        EXEC_CHOWN_DIRECTORIES = 1U << 5, /* chown() the runtime/state/cache/log directories to the user we run as, under all conditions */
+        EXEC_NSS_BYPASS_BUS    = 1U << 6, /* Set the SYSTEMD_NSS_BYPASS_BUS environment variable, to disable nss-systemd for dbus */
+        EXEC_CGROUP_DELEGATE   = 1U << 7,
 
         /* The following are not used by execute.c, but by consumers internally */
-        EXEC_PASS_FDS          = 1U << 3,
-        EXEC_IS_CONTROL        = 1U << 4,
-        EXEC_SETENV_RESULT     = 1U << 5,
-        EXEC_SET_WATCHDOG      = 1U << 6,
+        EXEC_PASS_FDS          = 1U << 8,
+        EXEC_IS_CONTROL        = 1U << 9,
+        EXEC_SETENV_RESULT     = 1U << 10,
+        EXEC_SET_WATCHDOG      = 1U << 11,
 } ExecFlags;
 
 struct ExecParameters {
@@ -242,16 +314,16 @@ struct ExecParameters {
 
         int *fds;
         char **fd_names;
-        unsigned n_fds;
+        unsigned n_storage_fds;
+        unsigned n_socket_fds;
 
         ExecFlags flags;
         bool selinux_context_net:1;
 
-        bool cgroup_delegate:1;
         CGroupMask cgroup_supported;
         const char *cgroup_path;
 
-        const char *runtime_prefix;
+        char **prefix;
 
         const char *confirm_spawn;
 
@@ -275,15 +347,11 @@ int exec_spawn(Unit *unit,
                DynamicCreds *dynamic_creds,
                pid_t *ret);
 
-void exec_command_done(ExecCommand *c);
 void exec_command_done_array(ExecCommand *c, unsigned n);
 
 ExecCommand* exec_command_free_list(ExecCommand *c);
 void exec_command_free_array(ExecCommand **c, unsigned n);
 
-char *exec_command_line(char **argv);
-
-void exec_command_dump(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_dump_list(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_append_list(ExecCommand **l, ExecCommand *e);
 int exec_command_set(ExecCommand *c, const char *path, ...);
@@ -291,29 +359,30 @@ int exec_command_append(ExecCommand *c, const char *path, ...);
 
 void exec_context_init(ExecContext *c);
 void exec_context_done(ExecContext *c);
-void exec_context_dump(ExecContext *c, FILE* f, const char *prefix);
+void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix);
 
-int exec_context_destroy_runtime_directory(ExecContext *c, const char *runtime_root);
+int exec_context_destroy_runtime_directory(const ExecContext *c, const char *runtime_root);
 
-int exec_context_load_environment(Unit *unit, const ExecContext *c, char ***l);
-int exec_context_named_iofds(Unit *unit, const ExecContext *c, const ExecParameters *p, int named_iofds[3]);
 const char* exec_context_fdname(const ExecContext *c, int fd_index);
 
-bool exec_context_may_touch_console(ExecContext *c);
-bool exec_context_maintains_privileges(ExecContext *c);
+bool exec_context_may_touch_console(const ExecContext *c);
+bool exec_context_maintains_privileges(const ExecContext *c);
+
+int exec_context_get_effective_ioprio(const ExecContext *c);
+
+void exec_context_free_log_extra_fields(ExecContext *c);
 
 void exec_status_start(ExecStatus *s, pid_t pid);
-void exec_status_exit(ExecStatus *s, ExecContext *context, pid_t pid, int code, int status);
-void exec_status_dump(ExecStatus *s, FILE *f, const char *prefix);
+void exec_status_exit(ExecStatus *s, const ExecContext *context, pid_t pid, int code, int status);
+void exec_status_dump(const ExecStatus *s, FILE *f, const char *prefix);
 
-int exec_runtime_make(ExecRuntime **rt, ExecContext *c, const char *id);
-ExecRuntime *exec_runtime_ref(ExecRuntime *r);
-ExecRuntime *exec_runtime_unref(ExecRuntime *r);
+int exec_runtime_acquire(Manager *m, const ExecContext *c, const char *name, bool create, ExecRuntime **ret);
+ExecRuntime *exec_runtime_unref(ExecRuntime *r, bool destroy);
 
-int exec_runtime_serialize(Unit *unit, ExecRuntime *rt, FILE *f, FDSet *fds);
-int exec_runtime_deserialize_item(Unit *unit, ExecRuntime **rt, const char *key, const char *value, FDSet *fds);
-
-void exec_runtime_destroy(ExecRuntime *rt);
+int exec_runtime_serialize(const Manager *m, FILE *f, FDSet *fds);
+int exec_runtime_deserialize_compat(Unit *u, const char *key, const char *value, FDSet *fds);
+void exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds);
+void exec_runtime_vacuum(Manager *m);
 
 const char* exec_output_to_string(ExecOutput i) _const_;
 ExecOutput exec_output_from_string(const char *s) _pure_;
@@ -323,3 +392,12 @@ ExecInput exec_input_from_string(const char *s) _pure_;
 
 const char* exec_utmp_mode_to_string(ExecUtmpMode i) _const_;
 ExecUtmpMode exec_utmp_mode_from_string(const char *s) _pure_;
+
+const char* exec_preserve_mode_to_string(ExecPreserveMode i) _const_;
+ExecPreserveMode exec_preserve_mode_from_string(const char *s) _pure_;
+
+const char* exec_keyring_mode_to_string(ExecKeyringMode i) _const_;
+ExecKeyringMode exec_keyring_mode_from_string(const char *s) _pure_;
+
+const char* exec_directory_type_to_string(ExecDirectoryType i) _const_;
+ExecDirectoryType exec_directory_type_from_string(const char *s) _pure_;

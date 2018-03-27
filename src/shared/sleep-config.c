@@ -1,7 +1,9 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
   Copyright 2013 Zbigniew Jędrzejewski-Szmek
+  Copyright 2018 Dell Inc.
 
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
@@ -38,15 +40,14 @@
 #include "string-util.h"
 #include "strv.h"
 
-#define USE(x, y) do { (x) = (y); (y) = NULL; } while (0)
-
-int parse_sleep_config(const char *verb, char ***_modes, char ***_states) {
+int parse_sleep_config(const char *verb, char ***_modes, char ***_states, usec_t *_delay) {
 
         _cleanup_strv_free_ char
                 **suspend_mode = NULL, **suspend_state = NULL,
                 **hibernate_mode = NULL, **hibernate_state = NULL,
                 **hybrid_mode = NULL, **hybrid_state = NULL;
         char **modes, **states;
+        usec_t delay = 180 * USEC_PER_MINUTE;
 
         const ConfigTableItem items[] = {
                 { "Sleep",   "SuspendMode",      config_parse_strv,  0, &suspend_mode  },
@@ -55,56 +56,65 @@ int parse_sleep_config(const char *verb, char ***_modes, char ***_states) {
                 { "Sleep",   "HibernateState",   config_parse_strv,  0, &hibernate_state },
                 { "Sleep",   "HybridSleepMode",  config_parse_strv,  0, &hybrid_mode  },
                 { "Sleep",   "HybridSleepState", config_parse_strv,  0, &hybrid_state },
+                { "Sleep",   "HibernateDelaySec", config_parse_sec,  0, &delay},
                 {}
         };
 
-        config_parse_many_nulstr(PKGSYSCONFDIR "/sleep.conf",
-                          CONF_PATHS_NULSTR("systemd/sleep.conf.d"),
-                          "Sleep\0", config_item_table_lookup, items,
-                          false, NULL);
+        (void) config_parse_many_nulstr(PKGSYSCONFDIR "/sleep.conf",
+                                        CONF_PATHS_NULSTR("systemd/sleep.conf.d"),
+                                        "Sleep\0", config_item_table_lookup, items,
+                                        CONFIG_PARSE_WARN, NULL);
 
         if (streq(verb, "suspend")) {
                 /* empty by default */
-                USE(modes, suspend_mode);
+                modes = TAKE_PTR(suspend_mode);
 
                 if (suspend_state)
-                        USE(states, suspend_state);
+                        states = TAKE_PTR(suspend_state);
                 else
                         states = strv_new("mem", "standby", "freeze", NULL);
 
         } else if (streq(verb, "hibernate")) {
                 if (hibernate_mode)
-                        USE(modes, hibernate_mode);
+                        modes = TAKE_PTR(hibernate_mode);
                 else
                         modes = strv_new("platform", "shutdown", NULL);
 
                 if (hibernate_state)
-                        USE(states, hibernate_state);
+                        states = TAKE_PTR(hibernate_state);
                 else
                         states = strv_new("disk", NULL);
 
         } else if (streq(verb, "hybrid-sleep")) {
                 if (hybrid_mode)
-                        USE(modes, hybrid_mode);
+                        modes = TAKE_PTR(hybrid_mode);
                 else
                         modes = strv_new("suspend", "platform", "shutdown", NULL);
 
                 if (hybrid_state)
-                        USE(states, hybrid_state);
+                        states = TAKE_PTR(hybrid_state);
                 else
                         states = strv_new("disk", NULL);
 
-        } else
+        } else if (streq(verb, "suspend-to-hibernate"))
+                modes = states = NULL;
+        else
                 assert_not_reached("what verb");
 
-        if ((!modes && !streq(verb, "suspend")) || !states) {
+        if ((!modes && STR_IN_SET(verb, "hibernate", "hybrid-sleep")) ||
+            (!states && !streq(verb, "suspend-to-hibernate"))) {
                 strv_free(modes);
                 strv_free(states);
                 return log_oom();
         }
 
-        *_modes = modes;
-        *_states = states;
+        if (_modes)
+                *_modes = modes;
+        if (_states)
+                *_states = states;
+        if (_delay)
+                *_delay = delay;
+
         return 0;
 }
 
@@ -259,15 +269,41 @@ static bool enough_memory_for_hibernation(void) {
         return r;
 }
 
+static bool can_s2h(void) {
+        int r;
+
+        r = access("/sys/class/rtc/rtc0/wakealarm", W_OK);
+        if (r < 0) {
+                log_full(errno == ENOENT ? LOG_DEBUG : LOG_WARNING,
+                         "/sys/class/rct/rct0/wakealarm is not writable %m");
+                return false;
+        }
+
+        r = can_sleep("suspend");
+        if (r < 0) {
+                log_debug_errno(r, "Unable to suspend system.");
+                return false;
+        }
+
+        r = can_sleep("hibernate");
+        if (r < 0) {
+                log_debug_errno(r, "Unable to hibernate system.");
+                return false;
+        }
+
+        return true;
+}
+
 int can_sleep(const char *verb) {
         _cleanup_strv_free_ char **modes = NULL, **states = NULL;
         int r;
 
-        assert(streq(verb, "suspend") ||
-               streq(verb, "hibernate") ||
-               streq(verb, "hybrid-sleep"));
+        assert(STR_IN_SET(verb, "suspend", "hibernate", "hybrid-sleep", "suspend-to-hibernate"));
 
-        r = parse_sleep_config(verb, &modes, &states);
+        if (streq(verb, "suspend-to-hibernate"))
+                return can_s2h();
+
+        r = parse_sleep_config(verb, &modes, &states, NULL);
         if (r < 0)
                 return false;
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -99,7 +100,10 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
         assert(key);
 
-        if (streq(key, "fsck.mode") && value) {
+        if (streq(key, "fsck.mode")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
                 if (streq(value, "auto"))
                         arg_force = arg_skip = false;
@@ -110,7 +114,10 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 else
                         log_warning("Invalid fsck.mode= parameter '%s'. Ignoring.", value);
 
-        } else if (streq(key, "fsck.repair") && value) {
+        } else if (streq(key, "fsck.repair")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
                 if (streq(value, "preen"))
                         arg_repair = "-a";
@@ -125,7 +132,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 }
         }
 
-#ifdef HAVE_SYSV_COMPAT
+#if HAVE_SYSV_COMPAT
         else if (streq(key, "fastboot") && !value) {
                 log_warning("Please pass 'fsck.mode=skip' rather than 'fastboot' on the kernel command line.");
                 arg_skip = true;
@@ -141,7 +148,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
 static void test_files(void) {
 
-#ifdef HAVE_SYSV_COMPAT
+#if HAVE_SYSV_COMPAT
         if (access("/fastboot", F_OK) >= 0) {
                 log_error("Please pass 'fsck.mode=skip' on the kernel command line rather than creating /fastboot on the root file system.");
                 arg_skip = true;
@@ -263,7 +270,7 @@ static int fsck_progress_socket(void) {
                 return log_warning_errno(errno, "socket(): %m");
 
         if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
-                r = log_full_errno(errno == ECONNREFUSED || errno == ENOENT ? LOG_DEBUG : LOG_WARNING,
+                r = log_full_errno(IN_SET(errno, ECONNREFUSED, ENOENT) ? LOG_DEBUG : LOG_WARNING,
                                    errno, "Failed to connect to progress socket %s, ignoring: %m", sa.un.sun_path);
                 safe_close(fd);
                 return r;
@@ -277,9 +284,8 @@ int main(int argc, char *argv[]) {
         _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
         const char *device, *type;
         bool root_directory;
-        siginfo_t status;
         struct stat st;
-        int r;
+        int r, exit_status;
         pid_t pid;
 
         if (argc > 2) {
@@ -293,7 +299,7 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
-        r = parse_proc_cmdline(parse_proc_cmdline_item, NULL, true);
+        r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, PROC_CMDLINE_STRIP_RD_PREFIX);
         if (r < 0)
                 log_warning_errno(r, "Failed to parse kernel command line, ignoring: %m");
 
@@ -385,22 +391,16 @@ int main(int argc, char *argv[]) {
                 }
         }
 
-        pid = fork();
-        if (pid < 0) {
-                r = log_error_errno(errno, "fork(): %m");
+        r = safe_fork("(fsck)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+        if (r < 0)
                 goto finish;
-        }
-        if (pid == 0) {
-                char dash_c[sizeof("-C")-1 + DECIMAL_STR_MAX(int) + 1];
+        if (r == 0) {
+                char dash_c[STRLEN("-C") + DECIMAL_STR_MAX(int) + 1];
                 int progress_socket = -1;
                 const char *cmdline[9];
                 int i = 0;
 
                 /* Child */
-
-                (void) reset_all_signal_handlers();
-                (void) reset_signal_mask();
-                assert_se(prctl(PR_SET_PDEATHSIG, SIGTERM) == 0);
 
                 /* Close the reading side of the progress pipe */
                 progress_pipe[0] = safe_close(progress_pipe[0]);
@@ -448,38 +448,30 @@ int main(int argc, char *argv[]) {
         (void) process_progress(progress_pipe[0]);
         progress_pipe[0] = -1;
 
-        r = wait_for_terminate(pid, &status);
-        if (r < 0) {
-                log_error_errno(r, "waitid(): %m");
+        exit_status = wait_for_terminate_and_check("fsck", pid, WAIT_LOG_ABNORMAL);
+        if (exit_status < 0) {
+                r = exit_status;
                 goto finish;
         }
+        if (exit_status & ~1) {
+                log_error("fsck failed with exit status %i.", exit_status);
 
-        if (status.si_code != CLD_EXITED || (status.si_status & ~1)) {
-
-                if (status.si_code == CLD_KILLED || status.si_code == CLD_DUMPED)
-                        log_error("fsck terminated by signal %s.", signal_to_string(status.si_status));
-                else if (status.si_code == CLD_EXITED)
-                        log_error("fsck failed with error code %i.", status.si_status);
-                else
-                        log_error("fsck failed due to unknown reason.");
-
-                r = -EINVAL;
-
-                if (status.si_code == CLD_EXITED && (status.si_status & FSCK_SYSTEM_SHOULD_REBOOT) && root_directory)
+                if ((exit_status & FSCK_SYSTEM_SHOULD_REBOOT) && root_directory) {
                         /* System should be rebooted. */
                         start_target(SPECIAL_REBOOT_TARGET, "replace-irreversibly");
-                else if (status.si_code == CLD_EXITED && (status.si_status & (FSCK_SYSTEM_SHOULD_REBOOT | FSCK_ERRORS_LEFT_UNCORRECTED)))
+                        r = -EINVAL;
+                } else if (exit_status & (FSCK_SYSTEM_SHOULD_REBOOT | FSCK_ERRORS_LEFT_UNCORRECTED)) {
                         /* Some other problem */
                         start_target(SPECIAL_EMERGENCY_TARGET, "replace");
-                else {
+                        r = -EINVAL;
+                } else {
                         log_warning("Ignoring error.");
                         r = 0;
                 }
-
         } else
                 r = 0;
 
-        if (status.si_code == CLD_EXITED && (status.si_status & FSCK_ERROR_CORRECTED))
+        if (exit_status & FSCK_ERROR_CORRECTED)
                 (void) touch("/run/systemd/quotacheck");
 
 finish:

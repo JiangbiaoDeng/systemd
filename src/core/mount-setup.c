@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -28,6 +29,7 @@
 #include "cgroup-util.h"
 #include "dev-setup.h"
 #include "efivars.h"
+#include "fileio.h"
 #include "fs-util.h"
 #include "label.h"
 #include "log.h"
@@ -45,9 +47,10 @@
 #include "virt.h"
 
 typedef enum MountMode {
-        MNT_NONE  =        0,
-        MNT_FATAL =        1 <<  0,
-        MNT_IN_CONTAINER = 1 <<  1,
+        MNT_NONE  =           0,
+        MNT_FATAL =           1 <<  0,
+        MNT_IN_CONTAINER =    1 <<  1,
+        MNT_CHECK_WRITABLE  = 1 <<  2,
 } MountMode;
 
 typedef struct MountPoint {
@@ -64,7 +67,7 @@ typedef struct MountPoint {
  * fourth (securityfs) is needed by IMA to load a custom policy. The
  * other ones we can delay until SELinux and IMA are loaded. When
  * SMACK is enabled we need smackfs, too, so it's a fifth one. */
-#ifdef HAVE_SMACK
+#if ENABLE_SMACK
 #define N_EARLY_MOUNT 5
 #else
 #define N_EARLY_MOUNT 4
@@ -79,7 +82,7 @@ static const MountPoint mount_table[] = {
           NULL,          MNT_FATAL|MNT_IN_CONTAINER },
         { "securityfs",  "/sys/kernel/security",      "securityfs", NULL,                      MS_NOSUID|MS_NOEXEC|MS_NODEV,
           NULL,          MNT_NONE                   },
-#ifdef HAVE_SMACK
+#if ENABLE_SMACK
         { "smackfs",     "/sys/fs/smackfs",           "smackfs",    "smackfsdef=*",            MS_NOSUID|MS_NOEXEC|MS_NODEV,
           mac_smack_use, MNT_FATAL                  },
         { "tmpfs",       "/dev/shm",                  "tmpfs",      "mode=1777,smackfsroot=*", MS_NOSUID|MS_NODEV|MS_STRICTATIME,
@@ -89,28 +92,34 @@ static const MountPoint mount_table[] = {
           NULL,          MNT_FATAL|MNT_IN_CONTAINER },
         { "devpts",      "/dev/pts",                  "devpts",     "mode=620,gid=" STRINGIFY(TTY_GID), MS_NOSUID|MS_NOEXEC,
           NULL,          MNT_IN_CONTAINER           },
-#ifdef HAVE_SMACK
+#if ENABLE_SMACK
         { "tmpfs",       "/run",                      "tmpfs",      "mode=755,smackfsroot=*",  MS_NOSUID|MS_NODEV|MS_STRICTATIME,
           mac_smack_use, MNT_FATAL                  },
 #endif
         { "tmpfs",       "/run",                      "tmpfs",      "mode=755",                MS_NOSUID|MS_NODEV|MS_STRICTATIME,
           NULL,          MNT_FATAL|MNT_IN_CONTAINER },
-        { "cgroup",      "/sys/fs/cgroup",            "cgroup2",    NULL,                      MS_NOSUID|MS_NOEXEC|MS_NODEV,
-          cg_is_unified_wanted, MNT_FATAL|MNT_IN_CONTAINER },
+        { "cgroup2",     "/sys/fs/cgroup",            "cgroup2",    "nsdelegate",              MS_NOSUID|MS_NOEXEC|MS_NODEV,
+          cg_is_unified_wanted, MNT_IN_CONTAINER|MNT_CHECK_WRITABLE },
+        { "cgroup2",     "/sys/fs/cgroup",            "cgroup2",    NULL,                      MS_NOSUID|MS_NOEXEC|MS_NODEV,
+          cg_is_unified_wanted, MNT_IN_CONTAINER|MNT_CHECK_WRITABLE },
         { "tmpfs",       "/sys/fs/cgroup",            "tmpfs",      "mode=755",                MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_STRICTATIME,
           cg_is_legacy_wanted, MNT_FATAL|MNT_IN_CONTAINER },
-        { "cgroup",      "/sys/fs/cgroup/systemd",    "cgroup2",    NULL,                      MS_NOSUID|MS_NOEXEC|MS_NODEV,
-          cg_is_unified_systemd_controller_wanted, MNT_IN_CONTAINER },
+        { "cgroup2",     "/sys/fs/cgroup/unified",    "cgroup2",    "nsdelegate",              MS_NOSUID|MS_NOEXEC|MS_NODEV,
+          cg_is_hybrid_wanted, MNT_IN_CONTAINER|MNT_CHECK_WRITABLE },
+        { "cgroup2",     "/sys/fs/cgroup/unified",    "cgroup2",    NULL,                      MS_NOSUID|MS_NOEXEC|MS_NODEV,
+          cg_is_hybrid_wanted, MNT_IN_CONTAINER|MNT_CHECK_WRITABLE },
         { "cgroup",      "/sys/fs/cgroup/systemd",    "cgroup",     "none,name=systemd,xattr", MS_NOSUID|MS_NOEXEC|MS_NODEV,
-          cg_is_legacy_systemd_controller_wanted, MNT_IN_CONTAINER           },
+          cg_is_legacy_wanted, MNT_IN_CONTAINER     },
         { "cgroup",      "/sys/fs/cgroup/systemd",    "cgroup",     "none,name=systemd",       MS_NOSUID|MS_NOEXEC|MS_NODEV,
-          cg_is_legacy_systemd_controller_wanted, MNT_FATAL|MNT_IN_CONTAINER },
+          cg_is_legacy_wanted, MNT_FATAL|MNT_IN_CONTAINER },
         { "pstore",      "/sys/fs/pstore",            "pstore",     NULL,                      MS_NOSUID|MS_NOEXEC|MS_NODEV,
           NULL,          MNT_NONE                   },
-#ifdef ENABLE_EFI
+#if ENABLE_EFI
         { "efivarfs",    "/sys/firmware/efi/efivars", "efivarfs",   NULL,                      MS_NOSUID|MS_NOEXEC|MS_NODEV,
           is_efi_boot,   MNT_NONE                   },
 #endif
+        { "bpf",         "/sys/fs/bpf",               "bpf",        "mode=700",                MS_NOSUID|MS_NOEXEC|MS_NODEV,
+          NULL,          MNT_NONE,                  },
 };
 
 /* These are API file systems that might be mounted by other software,
@@ -148,20 +157,22 @@ bool mount_point_ignore(const char *path) {
 }
 
 static int mount_one(const MountPoint *p, bool relabel) {
-        int r;
+        int r, priority;
 
         assert(p);
+
+        priority = (p->mode & MNT_FATAL) ? LOG_ERR : LOG_DEBUG;
 
         if (p->condition_fn && !p->condition_fn())
                 return 0;
 
         /* Relabel first, just in case */
         if (relabel)
-                (void) label_fix(p->where, true, true);
+                (void) label_fix(p->where, LABEL_IGNORE_ENOENT|LABEL_IGNORE_EROFS);
 
-        r = path_is_mount_point(p->where, AT_SYMLINK_FOLLOW);
+        r = path_is_mount_point(p->where, NULL, AT_SYMLINK_FOLLOW);
         if (r < 0 && r != -ENOENT) {
-                log_full_errno((p->mode & MNT_FATAL) ? LOG_ERR : LOG_DEBUG, r, "Failed to determine whether %s is a mount point: %m", p->where);
+                log_full_errno(priority, r, "Failed to determine whether %s is a mount point: %m", p->where);
                 return (p->mode & MNT_FATAL) ? r : 0;
         }
         if (r > 0)
@@ -189,13 +200,25 @@ static int mount_one(const MountPoint *p, bool relabel) {
                   p->type,
                   p->flags,
                   p->options) < 0) {
-                log_full_errno((p->mode & MNT_FATAL) ? LOG_ERR : LOG_DEBUG, errno, "Failed to mount %s at %s: %m", p->type, p->where);
+                log_full_errno(priority, errno, "Failed to mount %s at %s: %m", p->type, p->where);
                 return (p->mode & MNT_FATAL) ? -errno : 0;
         }
 
         /* Relabel again, since we now mounted something fresh here */
         if (relabel)
-                (void) label_fix(p->where, false, false);
+                (void) label_fix(p->where, 0);
+
+        if (p->mode & MNT_CHECK_WRITABLE) {
+                if (access(p->where, W_OK) < 0) {
+                        r = -errno;
+
+                        (void) umount(p->where);
+                        (void) rmdir(p->where);
+
+                        log_full_errno(priority, r, "Mount point %s not writable after mounting: %m", p->where);
+                        return (p->mode & MNT_FATAL) ? r : 0;
+                }
+        }
 
         return 1;
 }
@@ -225,6 +248,7 @@ int mount_setup_early(void) {
 
 int mount_cgroup_controllers(char ***join_controllers) {
         _cleanup_set_free_free_ Set *controllers = NULL;
+        bool has_argument = !!join_controllers;
         int r;
 
         if (!cg_is_legacy_wanted())
@@ -232,11 +256,20 @@ int mount_cgroup_controllers(char ***join_controllers) {
 
         /* Mount all available cgroup controllers that are built into the kernel. */
 
-        controllers = set_new(&string_hash_ops);
-        if (!controllers)
-                return log_oom();
+        if (!has_argument)
+                /* The defaults:
+                 * mount "cpu" + "cpuacct" together, and "net_cls" + "net_prio".
+                 *
+                 * We'd like to add "cpuset" to the mix, but "cpuset" doesn't really
+                 * work for groups with no initialized attributes.
+                 */
+                join_controllers = (char**[]) {
+                        STRV_MAKE("cpu", "cpuacct"),
+                        STRV_MAKE("net_cls", "net_prio"),
+                        NULL,
+                };
 
-        r = cg_kernel_controllers(controllers);
+        r = cg_kernel_controllers(&controllers);
         if (r < 0)
                 return log_error_errno(r, "Failed to enumerate cgroup controllers: %m");
 
@@ -254,10 +287,9 @@ int mount_cgroup_controllers(char ***join_controllers) {
                 if (!controller)
                         break;
 
-                if (join_controllers)
-                        for (k = join_controllers; *k; k++)
-                                if (strv_find(*k, controller))
-                                        break;
+                for (k = join_controllers; *k; k++)
+                        if (strv_find(*k, controller))
+                                break;
 
                 if (k && *k) {
                         char **i, **j;
@@ -269,7 +301,8 @@ int mount_cgroup_controllers(char ***join_controllers) {
 
                                         t = set_remove(controllers, *i);
                                         if (!t) {
-                                                free(*i);
+                                                if (has_argument)
+                                                        free(*i);
                                                 continue;
                                         }
                                 }
@@ -282,10 +315,8 @@ int mount_cgroup_controllers(char ***join_controllers) {
                         options = strv_join(*k, ",");
                         if (!options)
                                 return log_oom();
-                } else {
-                        options = controller;
-                        controller = NULL;
-                }
+                } else
+                        options = TAKE_PTR(controller);
 
                 where = strappend("/sys/fs/cgroup/", options);
                 if (!where)
@@ -332,7 +363,7 @@ int mount_cgroup_controllers(char ***join_controllers) {
         return 0;
 }
 
-#if defined(HAVE_SELINUX) || defined(HAVE_SMACK)
+#if HAVE_SELINUX || ENABLE_SMACK
 static int nftw_cb(
                 const char *fpath,
                 const struct stat *sb,
@@ -343,7 +374,7 @@ static int nftw_cb(
         if (_unlikely_(ftwbuf->level == 0))
                 return FTW_CONTINUE;
 
-        label_fix(fpath, false, false);
+        (void) label_fix(fpath, 0);
 
         /* /run/initramfs is static data and big, no need to
          * dynamically relabel its contents at boot... */
@@ -360,11 +391,10 @@ int mount_setup(bool loaded_policy) {
         int r = 0;
 
         r = mount_points_setup(ELEMENTSOF(mount_table), loaded_policy);
-
         if (r < 0)
                 return r;
 
-#if defined(HAVE_SELINUX) || defined(HAVE_SMACK)
+#if HAVE_SELINUX || ENABLE_SMACK
         /* Nodes in devtmpfs and /run need to be manually updated for
          * the appropriate labels, after mounting. The other virtual
          * API file systems like /sys and /proc do not need that, they
@@ -379,9 +409,19 @@ int mount_setup(bool loaded_policy) {
                 nftw("/dev/shm", nftw_cb, 64, FTW_MOUNT|FTW_PHYS|FTW_ACTIONRETVAL);
                 nftw("/run", nftw_cb, 64, FTW_MOUNT|FTW_PHYS|FTW_ACTIONRETVAL);
 
+                /* Temporarily remount the root cgroup filesystem to give it a proper label. */
+                r = cg_all_unified();
+                if (r == 0) {
+                        (void) mount(NULL, "/sys/fs/cgroup", NULL, MS_REMOUNT, NULL);
+                        (void) label_fix("/sys/fs/cgroup", 0);
+                        nftw("/sys/fs/cgroup", nftw_cb, 64, FTW_MOUNT|FTW_PHYS|FTW_ACTIONRETVAL);
+                        (void) mount(NULL, "/sys/fs/cgroup", NULL, MS_REMOUNT|MS_RDONLY, NULL);
+                } else if (r < 0)
+                        return log_error_errno(r, "Failed to determine whether we are in all unified mode: %m");
+
                 after_relabel = now(CLOCK_MONOTONIC);
 
-                log_info("Relabelled /dev and /run in %s.",
+                log_info("Relabelled /dev, /run and /sys/fs/cgroup in %s.",
                          format_timespan(timespan, sizeof(timespan), after_relabel - before_relabel, 0));
         }
 #endif
@@ -391,25 +431,24 @@ int mount_setup(bool loaded_policy) {
          * udevd. */
         dev_setup(NULL, UID_INVALID, GID_INVALID);
 
-        /* Mark the root directory as shared in regards to mount
-         * propagation. The kernel defaults to "private", but we think
-         * it makes more sense to have a default of "shared" so that
-         * nspawn and the container tools work out of the box. If
-         * specific setups need other settings they can reset the
-         * propagation mode to private if needed. */
+        /* Mark the root directory as shared in regards to mount propagation. The kernel defaults to "private", but we
+         * think it makes more sense to have a default of "shared" so that nspawn and the container tools work out of
+         * the box. If specific setups need other settings they can reset the propagation mode to private if
+         * needed. Note that we set this only when we are invoked directly by the kernel. If we are invoked by a
+         * container manager we assume the container manager knows what it is doing (for example, because it set up
+         * some directories with different propagation modes). */
         if (detect_container() <= 0)
                 if (mount(NULL, "/", NULL, MS_REC|MS_SHARED, NULL) < 0)
                         log_warning_errno(errno, "Failed to set up the root directory for shared mount propagation: %m");
 
-        /* Create a few directories we always want around, Note that
-         * sd_booted() checks for /run/systemd/system, so this mkdir
-         * really needs to stay for good, otherwise software that
-         * copied sd-daemon.c into their sources will misdetect
-         * systemd. */
+        /* Create a few directories we always want around, Note that sd_booted() checks for /run/systemd/system, so
+         * this mkdir really needs to stay for good, otherwise software that copied sd-daemon.c into their sources will
+         * misdetect systemd. */
         (void) mkdir_label("/run/systemd", 0755);
         (void) mkdir_label("/run/systemd/system", 0755);
-        (void) mkdir_label("/run/systemd/inaccessible", 0000);
+
         /* Set up inaccessible items */
+        (void) mkdir_label("/run/systemd/inaccessible", 0000);
         (void) mknod("/run/systemd/inaccessible/reg", S_IFREG | 0000, 0);
         (void) mkdir_label("/run/systemd/inaccessible/dir", 0000);
         (void) mknod("/run/systemd/inaccessible/chr", S_IFCHR | 0000, makedev(0, 0));

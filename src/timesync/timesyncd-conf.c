@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -34,6 +35,9 @@ int manager_parse_server_string(Manager *m, ServerType type, const char *string)
 
         first = type == SERVER_FALLBACK ? m->fallback_servers : m->system_servers;
 
+        if (type == SERVER_FALLBACK)
+                 m->have_fallbacks = true;
+
         for (;;) {
                 _cleanup_free_ char *word = NULL;
                 bool found = false;
@@ -61,6 +65,13 @@ int manager_parse_server_string(Manager *m, ServerType type, const char *string)
         }
 
         return 0;
+}
+
+int manager_parse_fallback_string(Manager *m, const char *string) {
+        if (m->have_fallbacks)
+                return 0;
+
+        return manager_parse_server_string(m, SERVER_FALLBACK, string);
 }
 
 int config_parse_servers(
@@ -96,11 +107,27 @@ int config_parse_servers(
 }
 
 int manager_parse_config_file(Manager *m) {
+        int r;
+
         assert(m);
 
-        return config_parse_many_nulstr(PKGSYSCONFDIR "/timesyncd.conf",
-                                 CONF_PATHS_NULSTR("systemd/timesyncd.conf.d"),
-                                 "Time\0",
-                                 config_item_perf_lookup, timesyncd_gperf_lookup,
-                                 false, m);
+        r = config_parse_many_nulstr(PKGSYSCONFDIR "/timesyncd.conf",
+                                     CONF_PATHS_NULSTR("systemd/timesyncd.conf.d"),
+                                     "Time\0",
+                                     config_item_perf_lookup, timesyncd_gperf_lookup,
+                                     CONFIG_PARSE_WARN, m);
+        if (r < 0)
+                return r;
+
+        if (m->poll_interval_min_usec < 16 * USEC_PER_SEC) {
+                log_warning("Invalid PollIntervalMinSec=. Using default value.");
+                m->poll_interval_min_usec = NTP_POLL_INTERVAL_MIN_USEC;
+        }
+
+        if (m->poll_interval_max_usec < m->poll_interval_min_usec) {
+                log_warning("PollIntervalMaxSec= is smaller than PollIntervalMinSec=. Using default value.");
+                m->poll_interval_max_usec = MAX(NTP_POLL_INTERVAL_MAX_USEC, m->poll_interval_min_usec * 32);
+        }
+
+        return r;
 }

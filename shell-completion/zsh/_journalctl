@@ -1,4 +1,5 @@
 #compdef journalctl
+# SPDX-License-Identifier: LGPL-2.1+
 
 _list_fields() {
     local -a journal_fields
@@ -107,8 +108,8 @@ _arguments -s \
     '--user[Show messages from user services]' \
     '(--directory -D -M --machine --root --file)'{-M+,--machine=}'[Operate on local container]:machines:_sd_machines' \
     '(--directory -D -M --machine --root --file)'{-D+,--directory=}'[Show journal files from directory]:directories:_directories' \
-    '(--directory -D -M --machine --root --file)''--root=[Operate on catalog hierarchy under specified directory]:directories:_directories' \
-    '(--directory -D -M --machine --root)--file=[Operate on specified journal files]:file:_files' \
+    '(--directory -D -M --machine --root --file)--root=[Operate on catalog hierarchy under specified directory]:directories:_directories' \
+    '(--directory -D -M --machine --root)*--file=[Operate on specified journal files]:file:_files' \
     '--new-id128[Generate a new 128 Bit ID]' \
     '--header[Show journal header information]' \
     '--disk-usage[Show total disk usage]' \

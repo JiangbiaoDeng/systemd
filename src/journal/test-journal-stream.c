@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -92,9 +93,9 @@ int main(int argc, char *argv[]) {
         assert_se(mkdtemp(t));
         assert_se(chdir(t) >= 0);
 
-        assert_se(journal_file_open(-1, "one.journal", O_RDWR|O_CREAT, 0666, true, false, NULL, NULL, NULL, NULL, &one) == 0);
-        assert_se(journal_file_open(-1, "two.journal", O_RDWR|O_CREAT, 0666, true, false, NULL, NULL, NULL, NULL, &two) == 0);
-        assert_se(journal_file_open(-1, "three.journal", O_RDWR|O_CREAT, 0666, true, false, NULL, NULL, NULL, NULL, &three) == 0);
+        assert_se(journal_file_open(-1, "one.journal", O_RDWR|O_CREAT, 0666, true, (uint64_t) -1, false, NULL, NULL, NULL, NULL, &one) == 0);
+        assert_se(journal_file_open(-1, "two.journal", O_RDWR|O_CREAT, 0666, true, (uint64_t) -1, false, NULL, NULL, NULL, NULL, &two) == 0);
+        assert_se(journal_file_open(-1, "three.journal", O_RDWR|O_CREAT, 0666, true, (uint64_t) -1, false, NULL, NULL, NULL, NULL, &three) == 0);
 
         for (i = 0; i < N_ENTRIES; i++) {
                 char *p, *q;

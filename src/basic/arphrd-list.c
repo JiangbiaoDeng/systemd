@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -23,7 +24,7 @@
 #include "arphrd-list.h"
 #include "macro.h"
 
-static const struct arphrd_name* lookup_arphrd(register const char *str, register unsigned int len);
+static const struct arphrd_name* lookup_arphrd(register const char *str, register GPERF_LEN_TYPE len);
 
 #include "arphrd-from-name.h"
 #include "arphrd-to-name.h"

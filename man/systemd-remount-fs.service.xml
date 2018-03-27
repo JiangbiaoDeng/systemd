@@ -2,6 +2,8 @@
 <!--*-nxml-*-->
 <!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN" "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2012 Lennart Poettering
@@ -72,7 +74,7 @@
     systems.</para>
 
     <para>For a longer discussion of kernel API file systems see
-    <ulink url="http://www.freedesktop.org/wiki/Software/systemd/APIFileSystems">API
+    <ulink url="https://www.freedesktop.org/wiki/Software/systemd/APIFileSystems">API
     File Systems</ulink>.</para>
   </refsect1>
 

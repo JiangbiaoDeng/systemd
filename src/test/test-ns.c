@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,6 +18,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -46,7 +48,7 @@ int main(int argc, char *argv[]) {
                 NULL
         };
 
-        static const NameSpaceInfo ns_info = {
+        static const NamespaceInfo ns_info = {
                 .private_dev = true,
                 .protect_control_groups = true,
                 .protect_kernel_tunables = true,
@@ -77,14 +79,19 @@ int main(int argc, char *argv[]) {
                 log_info("Not chrooted");
 
         r = setup_namespace(root_directory,
+                            NULL,
                             &ns_info,
                             (char **) writable,
                             (char **) readonly,
                             (char **) inaccessible,
+                            NULL,
+                            &(BindMount) { .source = (char*) "/usr/bin", .destination = (char*) "/etc/systemd", .read_only = true }, 1,
+                            &(TemporaryFileSystem) { .path = (char*) "/var", .options = (char*) "ro" }, 1,
                             tmp_dir,
                             var_tmp_dir,
                             PROTECT_HOME_NO,
                             PROTECT_SYSTEM_NO,
+                            0,
                             0);
         if (r < 0) {
                 log_error_errno(r, "Failed to setup namespace: %m");

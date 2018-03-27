@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -80,14 +81,36 @@ char *path_make_absolute(const char *p, const char *prefix) {
         /* Makes every item in the list an absolute path by prepending
          * the prefix, if specified and necessary */
 
-        if (path_is_absolute(p) || !prefix)
+        if (path_is_absolute(p) || isempty(prefix))
                 return strdup(p);
 
-        return strjoin(prefix, "/", p);
+        if (endswith(prefix, "/"))
+                return strjoin(prefix, p);
+        else
+                return strjoin(prefix, "/", p);
+}
+
+int safe_getcwd(char **ret) {
+        char *cwd;
+
+        cwd = get_current_dir_name();
+        if (!cwd)
+                return negative_errno();
+
+        /* Let's make sure the directory is really absolute, to protect us from the logic behind
+         * CVE-2018-1000001 */
+        if (cwd[0] != '/') {
+                free(cwd);
+                return -ENOMEDIUM;
+        }
+
+        *ret = cwd;
+        return 0;
 }
 
 int path_make_absolute_cwd(const char *p, char **ret) {
         char *c;
+        int r;
 
         assert(p);
         assert(ret);
@@ -100,11 +123,14 @@ int path_make_absolute_cwd(const char *p, char **ret) {
         else {
                 _cleanup_free_ char *cwd = NULL;
 
-                cwd = get_current_dir_name();
-                if (!cwd)
-                        return negative_errno();
+                r = safe_getcwd(&cwd);
+                if (r < 0)
+                        return r;
 
-                c = strjoin(cwd, "/", p);
+                if (endswith(cwd, "/"))
+                        c = strjoin(cwd, p);
+                else
+                        c = strjoin(cwd, "/", p);
         }
         if (!c)
                 return -ENOMEM;
@@ -131,8 +157,7 @@ int path_make_relative(const char *from_dir, const char *to_path, char **_r) {
 
         /* Skip the common part. */
         for (;;) {
-                size_t a;
-                size_t b;
+                size_t a, b;
 
                 from_dir += strspn(from_dir, "/");
                 to_path += strspn(to_path, "/");
@@ -144,7 +169,6 @@ int path_make_relative(const char *from_dir, const char *to_path, char **_r) {
                         else
                                 /* from_dir is a parent directory of to_path. */
                                 r = strdup(to_path);
-
                         if (!r)
                                 return -ENOMEM;
 
@@ -175,21 +199,32 @@ int path_make_relative(const char *from_dir, const char *to_path, char **_r) {
 
         /* Count the number of necessary ".." elements. */
         for (n_parents = 0;;) {
+                size_t w;
+
                 from_dir += strspn(from_dir, "/");
 
                 if (!*from_dir)
                         break;
 
-                from_dir += strcspn(from_dir, "/");
-                n_parents++;
+                w = strcspn(from_dir, "/");
+
+                /* If this includes ".." we can't do a simple series of "..", refuse */
+                if (w == 2 && from_dir[0] == '.' && from_dir[1] == '.')
+                        return -EINVAL;
+
+                /* Count number of elements, except if they are "." */
+                if (w != 1 || from_dir[0] != '.')
+                        n_parents++;
+
+                from_dir += w;
         }
 
-        r = malloc(n_parents * 3 + strlen(to_path) + 1);
+        r = new(char, n_parents * 3 + strlen(to_path) + 1);
         if (!r)
                 return -ENOMEM;
 
-        for (p = r; n_parents > 0; n_parents--, p += 3)
-                memcpy(p, "../", 3);
+        for (p = r; n_parents > 0; n_parents--)
+                p = mempcpy(p, "../", 3);
 
         strcpy(p, to_path);
         path_kill_slashes(r);
@@ -213,17 +248,18 @@ int path_strv_make_absolute_cwd(char **l) {
                 if (r < 0)
                         return r;
 
-                free(*s);
-                *s = t;
+                path_kill_slashes(t);
+                free_and_replace(*s, t);
         }
 
         return 0;
 }
 
-char **path_strv_resolve(char **l, const char *prefix) {
+char **path_strv_resolve(char **l, const char *root) {
         char **s;
         unsigned k = 0;
         bool enomem = false;
+        int r;
 
         if (strv_isempty(l))
                 return l;
@@ -233,17 +269,17 @@ char **path_strv_resolve(char **l, const char *prefix) {
          * changes on failure. */
 
         STRV_FOREACH(s, l) {
-                char *t, *u;
                 _cleanup_free_ char *orig = NULL;
+                char *t, *u;
 
                 if (!path_is_absolute(*s)) {
                         free(*s);
                         continue;
                 }
 
-                if (prefix) {
+                if (root) {
                         orig = *s;
-                        t = strappend(prefix, orig);
+                        t = prefix_root(root, orig);
                         if (!t) {
                                 enomem = true;
                                 continue;
@@ -251,28 +287,25 @@ char **path_strv_resolve(char **l, const char *prefix) {
                 } else
                         t = *s;
 
-                errno = 0;
-                u = canonicalize_file_name(t);
-                if (!u) {
-                        if (errno == ENOENT) {
-                                if (prefix) {
-                                        u = orig;
-                                        orig = NULL;
-                                        free(t);
-                                } else
-                                        u = t;
-                        } else {
+                r = chase_symlinks(t, root, 0, &u);
+                if (r == -ENOENT) {
+                        if (root) {
+                                u = TAKE_PTR(orig);
                                 free(t);
-                                if (errno == ENOMEM || errno == 0)
-                                        enomem = true;
+                        } else
+                                u = t;
+                } else if (r < 0) {
+                        free(t);
 
-                                continue;
-                        }
-                } else if (prefix) {
+                        if (r == -ENOMEM)
+                                enomem = true;
+
+                        continue;
+                } else if (root) {
                         char *x;
 
                         free(t);
-                        x = path_startswith(u, prefix);
+                        x = path_startswith(u, root);
                         if (x) {
                                 /* restore the slash if it was lost */
                                 if (!startswith(x, "/"))
@@ -304,12 +337,12 @@ char **path_strv_resolve(char **l, const char *prefix) {
         return l;
 }
 
-char **path_strv_resolve_uniq(char **l, const char *prefix) {
+char **path_strv_resolve_uniq(char **l, const char *root) {
 
         if (strv_isempty(l))
                 return l;
 
-        if (!path_strv_resolve(l, prefix))
+        if (!path_strv_resolve(l, root))
                 return NULL;
 
         return strv_uniq(l);
@@ -443,8 +476,8 @@ bool path_equal(const char *a, const char *b) {
         return path_compare(a, b) == 0;
 }
 
-bool path_equal_or_files_same(const char *a, const char *b) {
-        return path_equal(a, b) || files_same(a, b) > 0;
+bool path_equal_or_files_same(const char *a, const char *b, int flags) {
+        return path_equal(a, b) || files_same(a, b, flags) > 0;
 }
 
 char* path_join(const char *root, const char *path, const char *rest) {
@@ -529,7 +562,7 @@ bool paths_check_timestamp(const char* const* paths, usec_t *timestamp, bool upd
 
         assert(timestamp);
 
-        if (paths == NULL)
+        if (!paths)
                 return false;
 
         STRV_FOREACH(i, paths) {
@@ -694,16 +727,44 @@ char* dirname_malloc(const char *path) {
         return dir2;
 }
 
+const char *last_path_component(const char *path) {
+        /* Finds the last component of the path, preserving the
+         * optional trailing slash that signifies a directory.
+         *    a/b/c → c
+         *    a/b/c/ → c/
+         *    / → /
+         *    // → /
+         *    /foo/a → a
+         *    /foo/a/ → a/
+         * This is different than basename, which returns "" when
+         * a trailing slash is present.
+         */
+
+        unsigned l, k;
+
+        l = k = strlen(path);
+        if (l == 0) /* special case — an empty string */
+                return path;
+
+        while (k > 0 && path[k-1] == '/')
+                k--;
+
+        if (k == 0) /* the root directory */
+                return path + l - 1;
+
+        while (k > 0 && path[k-1] != '/')
+                k--;
+
+        return path + k;
+}
+
 bool filename_is_valid(const char *p) {
         const char *e;
 
         if (isempty(p))
                 return false;
 
-        if (streq(p, "."))
-                return false;
-
-        if (streq(p, ".."))
+        if (dot_or_dot_dot(p))
                 return false;
 
         e = strchrnul(p, '/');
@@ -716,19 +777,21 @@ bool filename_is_valid(const char *p) {
         return true;
 }
 
-bool path_is_safe(const char *p) {
+bool path_is_normalized(const char *p) {
 
         if (isempty(p))
                 return false;
 
-        if (streq(p, "..") || startswith(p, "../") || endswith(p, "/..") || strstr(p, "/../"))
+        if (dot_or_dot_dot(p))
+                return false;
+
+        if (startswith(p, "../") || endswith(p, "/..") || strstr(p, "/../"))
                 return false;
 
         if (strlen(p)+1 > PATH_MAX)
                 return false;
 
-        /* The following two checks are not really dangerous, but hey, they still are confusing */
-        if (streq(p, ".") || startswith(p, "./") || endswith(p, "/.") || strstr(p, "/./"))
+        if (startswith(p, "./") || endswith(p, "/.") || strstr(p, "/./"))
                 return false;
 
         if (strstr(p, "//"))
@@ -843,7 +906,9 @@ int systemd_installation_has_version(const char *root, unsigned minimal_version)
                         * for Gentoo which does a merge without making /lib a symlink.
                         */
                        "lib/systemd/libsystemd-shared-*.so\0"
-                       "usr/lib/systemd/libsystemd-shared-*.so\0") {
+                       "lib64/systemd/libsystemd-shared-*.so\0"
+                       "usr/lib/systemd/libsystemd-shared-*.so\0"
+                       "usr/lib64/systemd/libsystemd-shared-*.so\0") {
 
                 _cleanup_strv_free_ char **names = NULL;
                 _cleanup_free_ char *path = NULL;
@@ -892,4 +957,17 @@ int systemd_installation_has_version(const char *root, unsigned minimal_version)
         }
 
         return false;
+}
+
+bool dot_or_dot_dot(const char *path) {
+        if (!path)
+                return false;
+        if (path[0] != '.')
+                return false;
+        if (path[1] == 0)
+                return true;
+        if (path[1] != '.')
+                return false;
+
+        return path[2] == 0;
 }

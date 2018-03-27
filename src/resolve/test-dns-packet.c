@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd
 
@@ -20,6 +21,8 @@
 #include <net/if.h>
 #include <glob.h>
 
+#include "sd-id128.h"
+
 #include "alloc-util.h"
 #include "fileio.h"
 #include "glob-util.h"
@@ -29,6 +32,7 @@
 #include "resolved-dns-rr.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tests.h"
 #include "unaligned.h"
 
 #define HASH_KEY SD_ID128_MAKE(d3,1e,48,90,4b,fa,4c,fe,af,9d,d5,a1,d7,2e,8a,b1)
@@ -74,7 +78,7 @@ static void test_packet_from_file(const char* filename, bool canonical) {
                 assert_se(packet_size > 0);
                 assert_se(offset + 8 + packet_size <= data_size);
 
-                assert_se(dns_packet_new(&p, DNS_PROTOCOL_DNS, 0) >= 0);
+                assert_se(dns_packet_new(&p, DNS_PROTOCOL_DNS, 0, DNS_PACKET_SIZE_MAX) >= 0);
 
                 assert_se(dns_packet_append_blob(p, data + offset + 8, packet_size, NULL) >= 0);
                 assert_se(dns_packet_read_rr(p, &rr, NULL, NULL) >= 0);
@@ -89,7 +93,7 @@ static void test_packet_from_file(const char* filename, bool canonical) {
 
                 assert_se(dns_resource_record_to_wire_format(rr, canonical) >= 0);
 
-                assert_se(dns_packet_new(&p2, DNS_PROTOCOL_DNS, 0) >= 0);
+                assert_se(dns_packet_new(&p2, DNS_PROTOCOL_DNS, 0, DNS_PACKET_SIZE_MAX) >= 0);
                 assert_se(dns_packet_append_blob(p2, rr->wire_format, rr->wire_format_size, NULL) >= 0);
                 assert_se(dns_packet_read_rr(p2, &rr2, NULL, NULL) >= 0);
 
@@ -115,7 +119,7 @@ int main(int argc, char **argv) {
                 N = argc - 1;
                 fnames = argv + 1;
         } else {
-                assert_se(glob(RESOLVE_TEST_DIR "/*.pkts", GLOB_NOSORT, NULL, &g) == 0);
+                assert_se(glob(get_testdata_dir("/test-resolve/*.pkts"), GLOB_NOSORT, NULL, &g) == 0);
                 N = g.gl_pathc;
                 fnames = g.gl_pathv;
         }

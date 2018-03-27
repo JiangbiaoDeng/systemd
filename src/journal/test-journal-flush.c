@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -38,7 +39,7 @@ int main(int argc, char *argv[]) {
         assert_se(mkdtemp(dn));
         fn = strappend(dn, "/test.journal");
 
-        r = journal_file_open(-1, fn, O_CREAT|O_RDWR, 0644, false, false, NULL, NULL, NULL, NULL, &new_journal);
+        r = journal_file_open(-1, fn, O_CREAT|O_RDWR, 0644, false, 0, false, NULL, NULL, NULL, NULL, &new_journal);
         assert_se(r >= 0);
 
         r = sd_journal_open(&j, 0);

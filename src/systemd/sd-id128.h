@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #ifndef foosdid128hfoo
 #define foosdid128hfoo
 
@@ -39,12 +40,12 @@ union sd_id128 {
 #define SD_ID128_STRING_MAX 33
 
 char *sd_id128_to_string(sd_id128_t id, char s[SD_ID128_STRING_MAX]);
-
 int sd_id128_from_string(const char *s, sd_id128_t *ret);
 
 int sd_id128_randomize(sd_id128_t *ret);
 
 int sd_id128_get_machine(sd_id128_t *ret);
+int sd_id128_get_machine_app_specific(sd_id128_t app_id, sd_id128_t *ret);
 int sd_id128_get_boot(sd_id128_t *ret);
 int sd_id128_get_invocation(sd_id128_t *ret);
 
@@ -99,6 +100,9 @@ int sd_id128_get_invocation(sd_id128_t *ret);
                 ((x).bytes[15] >> 4) >= 10 ? 'a' + ((x).bytes[15] >> 4) - 10 : '0' + ((x).bytes[15] >> 4), \
                 ((x).bytes[15] & 15) >= 10 ? 'a' + ((x).bytes[15] & 15) - 10 : '0' + ((x).bytes[15] & 15), \
                 0 })
+
+#define SD_ID128_MAKE_STR(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) \
+        #a #b #c #d #e #f #g #h #i #j #k #l #m #n #o #p
 
 _sd_pure_ static __inline__ int sd_id128_equal(sd_id128_t a, sd_id128_t b) {
         return memcmp(&a, &b, 16) == 0;

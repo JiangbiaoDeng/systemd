@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -111,6 +112,8 @@ struct Session {
         bool started:1;
         bool stopping:1;
 
+        bool was_active:1;
+
         sd_bus_message *create_message;
 
         sd_event_source *timer_event_source;
@@ -128,7 +131,7 @@ struct Session {
 Session *session_new(Manager *m, const char *id);
 void session_free(Session *s);
 void session_set_user(Session *s, User *u);
-bool session_check_gc(Session *s, bool drop_not_started);
+bool session_may_gc(Session *s, bool drop_not_started);
 void session_add_to_gc_queue(Session *s);
 int session_activate(Session *s);
 bool session_is_active(Session *s);
@@ -176,7 +179,7 @@ void session_restore_vt(Session *s);
 void session_leave_vt(Session *s);
 
 bool session_is_controller(Session *s, const char *sender);
-int session_set_controller(Session *s, const char *sender, bool force);
+int session_set_controller(Session *s, const char *sender, bool force, bool prepare);
 void session_drop_controller(Session *s);
 
 int bus_session_method_activate(sd_bus_message *message, void *userdata, sd_bus_error *error);

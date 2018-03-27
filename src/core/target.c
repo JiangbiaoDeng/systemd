@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -56,27 +57,34 @@ static int target_add_default_dependencies(Target *t) {
                 UNIT_PART_OF
         };
 
-        Iterator i;
-        Unit *other;
         int r;
         unsigned k;
 
         assert(t);
 
-        /* Imply ordering for requirement dependencies on target
-         * units. Note that when the user created a contradicting
-         * ordering manually we won't add anything in here to make
-         * sure we don't create a loop. */
+        if (!UNIT(t)->default_dependencies)
+                return 0;
 
-        for (k = 0; k < ELEMENTSOF(deps); k++)
-                SET_FOREACH(other, UNIT(t)->dependencies[deps[k]], i) {
+        /* Imply ordering for requirement dependencies on target units. Note that when the user created a contradicting
+         * ordering manually we won't add anything in here to make sure we don't create a loop. */
+
+        for (k = 0; k < ELEMENTSOF(deps); k++) {
+                Unit *other;
+                Iterator i;
+                void *v;
+
+                HASHMAP_FOREACH_KEY(v, other, UNIT(t)->dependencies[deps[k]], i) {
                         r = unit_add_default_target_dependency(other, UNIT(t));
                         if (r < 0)
                                 return r;
                 }
+        }
+
+        if (unit_has_name(UNIT(t), SPECIAL_SHUTDOWN_TARGET))
+                return 0;
 
         /* Make sure targets are unloaded on shutdown */
-        return unit_add_dependency_by_name(UNIT(t), UNIT_CONFLICTS, SPECIAL_SHUTDOWN_TARGET, NULL, true);
+        return unit_add_two_dependencies_by_name(UNIT(t), UNIT_BEFORE, UNIT_CONFLICTS, SPECIAL_SHUTDOWN_TARGET, NULL, true, UNIT_DEPENDENCY_DEFAULT);
 }
 
 static int target_load(Unit *u) {
@@ -90,7 +98,7 @@ static int target_load(Unit *u) {
                 return r;
 
         /* This is a new unit? Then let's add in some extras */
-        if (u->load_state == UNIT_LOADED && u->default_dependencies) {
+        if (u->load_state == UNIT_LOADED) {
                 r = target_add_default_dependencies(t);
                 if (r < 0)
                         return r;

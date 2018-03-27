@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -22,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "id128-util.h"
 #include "log.h"
 #include "machine-id-setup.h"
 #include "path-util.h"
@@ -118,11 +120,14 @@ int main(int argc, char *argv[]) {
                 goto finish;
 
         if (arg_commit) {
+                const char *etc_machine_id;
+
                 r = machine_id_commit(arg_root);
                 if (r < 0)
                         goto finish;
 
-                r = sd_id128_get_machine(&id);
+                etc_machine_id = prefix_roota(arg_root, "/etc/machine-id");
+                r = id128_read(etc_machine_id, ID128_PLAIN, &id);
                 if (r < 0) {
                         log_error_errno(r, "Failed to read machine ID back: %m");
                         goto finish;

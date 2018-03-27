@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -52,6 +53,12 @@
 #  define PRI_TIME "li"
 #else
 #  error Unknown time_t size
+#endif
+
+#if defined __x86_64__ && defined __ILP32__
+#  define PRI_TIMEX PRIi64
+#else
+#  define PRI_TIMEX "li"
 #endif
 
 #if SIZEOF_RLIM_T == 8

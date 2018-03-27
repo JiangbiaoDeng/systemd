@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,8 +18,9 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#warning "Temporary work-around for broken glibc vs. linux kernel header definitions"
-#warning "This really should be removed sooner rather than later, when this is fixed upstream"
+/* Temporary work-around for broken glibc vs. linux kernel header definitions
+ * This is already fixed upstream, remove this when distributions have updated.
+ */
 #define _NET_IF_H 1
 
 #include <alloca.h>
@@ -71,16 +73,20 @@ static int entry_fill_basics(
         }
         if (source) {
                 entry->ip.src = source->in;
-                in_addr_prefixlen_to_netmask(&entry->ip.smsk, source_prefixlen);
+                in4_addr_prefixlen_to_netmask(&entry->ip.smsk, source_prefixlen);
         }
 
         if (out_interface) {
+                size_t l = strlen(out_interface);
+                assert(l < sizeof entry->ip.outiface);
+                assert(l < sizeof entry->ip.outiface_mask);
+
                 strcpy(entry->ip.outiface, out_interface);
-                memset(entry->ip.outiface_mask, 0xFF, strlen(out_interface)+1);
+                memset(entry->ip.outiface_mask, 0xFF, l + 1);
         }
         if (destination) {
                 entry->ip.dst = destination->in;
-                in_addr_prefixlen_to_netmask(&entry->ip.dmsk, destination_prefixlen);
+                in4_addr_prefixlen_to_netmask(&entry->ip.dmsk, destination_prefixlen);
         }
 
         return 0;
@@ -106,7 +112,7 @@ int fw_add_masquerade(
         if (af != AF_INET)
                 return -EOPNOTSUPP;
 
-        if (protocol != 0 && protocol != IPPROTO_TCP && protocol != IPPROTO_UDP)
+        if (!IN_SET(protocol, 0, IPPROTO_TCP, IPPROTO_UDP))
                 return -EOPNOTSUPP;
 
         h = iptc_init("nat");
@@ -190,7 +196,7 @@ int fw_add_local_dnat(
         if (af != AF_INET)
                 return -EOPNOTSUPP;
 
-        if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP)
+        if (!IN_SET(protocol, IPPROTO_TCP, IPPROTO_UDP))
                 return -EOPNOTSUPP;
 
         if (local_port <= 0)

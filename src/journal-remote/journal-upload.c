@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -36,6 +37,7 @@
 #include "log.h"
 #include "mkdir.h"
 #include "parse-util.h"
+#include "process-util.h"
 #include "sigbus.h"
 #include "signal-util.h"
 #include "string-util.h"
@@ -247,7 +249,7 @@ int start_upload(Uploader *u,
                 easy_setopt(curl, CURLOPT_HTTPHEADER, u->header,
                             LOG_ERR, return -EXFULL);
 
-                if (_unlikely_(log_get_max_level() >= LOG_DEBUG))
+                if (DEBUG_LOGGING)
                         /* enable verbose for easier tracing */
                         easy_setopt(curl, CURLOPT_VERBOSE, 1L, LOG_WARNING, );
 
@@ -326,9 +328,7 @@ static size_t fd_input_callback(void *buf, size_t size, size_t nmemb, void *user
 static void close_fd_input(Uploader *u) {
         assert(u);
 
-        if (u->input >= 0)
-                close_nointr(u->input);
-        u->input = -1;
+        u->input = safe_close(u->input);
         u->timeout = 0;
 }
 
@@ -541,9 +541,9 @@ static int parse_config(void) {
                 {}};
 
         return config_parse_many_nulstr(PKGSYSCONFDIR "/journal-upload.conf",
-                                 CONF_PATHS_NULSTR("systemd/journal-upload.conf.d"),
-                                 "Upload\0", config_item_table_lookup, items,
-                                 false, NULL);
+                                        CONF_PATHS_NULSTR("systemd/journal-upload.conf.d"),
+                                        "Upload\0", config_item_table_lookup, items,
+                                        CONFIG_PARSE_WARN, NULL);
 }
 
 static void help(void) {
@@ -570,8 +570,6 @@ static void help(void) {
                "     --follow[=BOOL]        Do [not] wait for input\n"
                "     --save-state[=FILE]    Save uploaded cursors (default \n"
                "                            " STATE_FILE ")\n"
-               "  -h --help                 Show this help and exit\n"
-               "     --version              Print version string and exit\n"
                , program_invocation_short_name);
 }
 
@@ -811,7 +809,7 @@ int main(int argc, char **argv) {
                 goto cleanup;
 
         log_debug("%s running as pid "PID_FMT,
-                  program_invocation_short_name, getpid());
+                  program_invocation_short_name, getpid_cached());
 
         use_journal = optind >= argc;
         if (use_journal) {

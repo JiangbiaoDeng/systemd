@@ -3,6 +3,8 @@
 "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2016 Lennart Poettering
@@ -21,7 +23,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 -->
 
-<refentry id="systemd-resolve"
+<refentry id="systemd-resolve" conditional='ENABLE_RESOLVE'
           xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
@@ -45,7 +47,8 @@
 
   <refnamediv>
     <refname>systemd-resolve</refname>
-    <refpurpose>Resolve domain names, IPV4 and IPv6 addresses, DNS resource records, and services</refpurpose>
+    <refname>resolvconf</refname>
+    <refpurpose>Resolve domain names, IPV4 and IPv6 addresses, DNS resource records, and services; introspect and reconfigure the DNS resolver</refpurpose>
   </refnamediv>
 
   <refsynopsisdiv>
@@ -102,6 +105,48 @@
       <command> --reset-statistics</command>
     </cmdsynopsis>
 
+    <cmdsynopsis>
+      <command>systemd-resolve</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+      <command> --flush-caches</command>
+    </cmdsynopsis>
+
+    <cmdsynopsis>
+      <command>systemd-resolve</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+      <command> --reset-server-features</command>
+    </cmdsynopsis>
+
+    <cmdsynopsis>
+      <command>systemd-resolve</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+      <command> --status</command>
+    </cmdsynopsis>
+
+    <cmdsynopsis>
+      <command>systemd-resolve</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+      <command> --set-dns=<replaceable>SERVER</replaceable></command> <command> --set-domain=<replaceable>DOMAIN</replaceable> --set-llmnr=<replaceable>MODE</replaceable> --set-mdns=<replaceable>MODE</replaceable> --set-dnssec=<replaceable>MODE</replaceable> --set-nta=<replaceable>DOMAIN</replaceable></command>
+    </cmdsynopsis>
+
+    <cmdsynopsis>
+      <command>systemd-resolve</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+      <command> --revert</command>
+    </cmdsynopsis>
+
+    <cmdsynopsis>
+      <command>resolvconf</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+      <command> -a <replaceable>INTERFACE</replaceable> &lt; <replaceable>FILE</replaceable></command>
+    </cmdsynopsis>
+
+    <cmdsynopsis>
+      <command>resolvconf</command>
+      <arg choice="opt" rep="repeat">OPTIONS</arg>
+      <command> -d <replaceable>INTERFACE</replaceable></command>
+    </cmdsynopsis>
+
   </refsynopsisdiv>
 
   <refsect1>
@@ -120,7 +165,7 @@
     originating from local, trusted sources is also reported authenticated, including resolution of the local host
     name, the <literal>localhost</literal> host name or all data from <filename>/etc/hosts</filename>.</para>
 
-    <para>The <option>--type=</option> switch may be used to specify a DNS resource record type (A, AAAA, SOA, MX, ...) in
+    <para>The <option>--type=</option> switch may be used to specify a DNS resource record type (A, AAAA, SOA, MX, …) in
     order to request a specific DNS resource record, instead of the address or reverse address lookups.
     The special value <literal>help</literal> may be used to list known values.</para>
 
@@ -182,7 +227,9 @@
         (i.e. classic unicast DNS), <literal>llmnr</literal> (<ulink
         url="https://tools.ietf.org/html/rfc4795">Link-Local Multicast Name Resolution</ulink>),
         <literal>llmnr-ipv4</literal>, <literal>llmnr-ipv6</literal> (LLMNR via the indicated underlying IP
-        protocols). By default the lookup is done via all protocols suitable for the lookup. If used, limits the set of
+        protocols), <literal>mdns</literal> (<ulink url="https://www.ietf.org/rfc/rfc6762.txt">Multicast DNS</ulink>),
+        <literal>mdns-ipv4</literal>, <literal>mdns-ipv6</literal> (MDNS via the indicated underlying IP protocols).
+        By default the lookup is done via all protocols suitable for the lookup. If used, limits the set of
         protocols that may be used. Use this option multiple times to enable resolving via multiple protocols at the
         same time. The setting <literal>llmnr</literal> is identical to specifying this switch once with
         <literal>llmnr-ipv4</literal> and once via <literal>llmnr-ipv6</literal>. Note that this option does not force
@@ -271,7 +318,7 @@
         <literal>payload</literal>, the payload of the packet is exported. If the argument is
         <literal>packet</literal>, the whole packet is dumped in wire format, prefixed by
         length specified as a little-endian 64-bit number. This format allows multiple packets
-        to be dumped and unambigously parsed.</para></listitem>
+        to be dumped and unambiguously parsed.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -297,7 +344,18 @@
       <varlistentry>
         <term><option>--flush-caches</option></term>
 
-        <listitem><para>Flushes all DNS resource record caches the service maintains locally.</para></listitem>
+        <listitem><para>Flushes all DNS resource record caches the service maintains locally. This is mostly equivalent
+        to sending the <constant>SIGUSR2</constant> to the <command>systemd-resolved</command>
+        service.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--reset-server-features</option></term>
+
+        <listitem><para>Flushes all feature level information the resolver learnt about specific servers, and ensures
+        that the server feature probing logic is started from the beginning with the next look-up request. This is
+        mostly equivalent to sending the <constant>SIGRTMIN+1</constant> to the <command>systemd-resolved</command>
+        service.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -306,10 +364,128 @@
         <listitem><para>Shows the global and per-link DNS settings in currently in effect.</para></listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><option>--set-dns=SERVER</option></term>
+        <term><option>--set-domain=DOMAIN</option></term>
+        <term><option>--set-llmnr=MODE</option></term>
+        <term><option>--set-mdns=MODE</option></term>
+        <term><option>--set-dnssec=MODE</option></term>
+        <term><option>--set-nta=DOMAIN</option></term>
+
+        <listitem><para>Set per-interface DNS configuration. These switches may be used to configure various DNS
+        settings for network interfaces that aren't managed by
+        <citerefentry><refentrytitle>systemd-networkd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>. (These
+        commands will fail when used on interfaces that are managed by <command>systemd-networkd</command>, please
+        configure their DNS settings directly inside the <filename>.network</filename> files instead.) These switches
+        may be used to inform <command>systemd-resolved</command> about per-interface DNS configuration determined
+        through external means. Multiple of these switches may be passed on a single invocation of
+        <command>systemd-resolve</command> in order to set multiple configuration options at once. If any of these
+        switches is used, it must be combined with <option>--interface=</option> to indicate the network interface the
+        new DNS configuration belongs to. The <option>--set-dns=</option> option expects an IPv4 or IPv6 address
+        specification of a DNS server to use, and may be used multiple times to define multiple servers for the same
+        interface. The <option>--set-domain=</option> option expects a valid DNS domain, possibly prefixed with
+        <literal>~</literal>, and configures a per-interface search or route-only domain. It may be used multiple times
+        to configure multiple such domains. The <option>--set-llmnr=</option>, <option>--set-mdns=</option> and
+        <option>--set-dnssec=</option> options may be used to configure the per-interface LLMNR, MulticastDNS and
+        DNSSEC settings. Finally, <option>--set-nta=</option> may be used to configure additional per-interface DNSSEC
+        NTA domains and may also be used multiple times. For details about these settings, their possible values and
+        their effect, see the corresponding options in
+        <citerefentry><refentrytitle>systemd.network</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--revert</option></term>
+
+        <listitem><para>Revert the per-interface DNS configuration. This option must be combined with
+        <option>--interface=</option> to indicate the network interface the DNS configuration shall be reverted on. If
+        the DNS configuration is reverted all per-interface DNS setting are reset to their defaults, undoing all
+        effects of <option>--set-dns=</option>, <option>--set-domain=</option>, <option>--set-llmnr=</option>,
+        <option>--set-mdns=</option>, <option>--set-dnssec=</option>, <option>--set-nta=</option>. Note that when a
+        network interface disappears all configuration is lost automatically, an explicit reverting is not necessary in
+        that case.</para></listitem>
+      </varlistentry>
+
       <xi:include href="standard-options.xml" xpointer="help" />
       <xi:include href="standard-options.xml" xpointer="version" />
       <xi:include href="standard-options.xml" xpointer="no-pager" />
     </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>Compatibility with <citerefentry><refentrytitle>resolvconf</refentrytitle><manvolnum>8</manvolnum></citerefentry></title>
+
+    <para><command>systemd-resolve</command> is a multi-call binary. When invoked as <literal>resolvconf</literal>
+    (generally achieved by means of a symbolic link of this name to the <command>systemd-resolve</command> binary) it
+    is run in a limited <citerefentry><refentrytitle>resolvconf</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+    compatibility mode. It accepts mostly the same arguments and pushes all data into
+    <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+    similar to how <option>--set-dns=</option> and <option>--set-domain=</option> operate. Note that
+    <command>systemd-resolved.service</command> is the only supported backend, which is different from other
+    implementations of this command. Note that not all operations supported by other implementations are supported
+    natively. Specifically:</para>
+
+    <variablelist>
+      <varlistentry>
+        <term><option>-a</option></term>
+        <listitem><para>Registers per-interface DNS configuration data with
+        <command>systemd-resolved</command>. Expects a network interface name as only command line argument. Reads
+        <citerefentry><refentrytitle>resolv.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry> compatible DNS
+        configuration data from its standard input. Relevant fields are <literal>nameserver</literal> and
+        <literal>domain</literal>/<literal>search</literal>. This command is mostly identical to invoking
+        <command>systemd-resolve</command> with a combination of <option>--set-dns=</option> and
+        <option>--set-domain=</option>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-d</option></term>
+        <listitem><para>Unregisters per-interface DNS configuration data with <command>systemd-resolved</command>. This
+        command is mostly identical to invoking <command>systemd-resolve</command> with
+        <option>--revert</option>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-f</option></term>
+
+        <listitem><para>When specified <option>-a</option> and <option>-d</option> will not complain about missing
+        network interfaces and will silently execute no operation in that case.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-x</option></term>
+
+        <listitem><para>This switch for "exclusive" operation is supported only partially. It is mapped to an
+        additional configured search domain of <literal>~.</literal> — i.e. ensures that DNS traffic is preferably
+        routed to the DNS servers on this interface, unless there are other, more specific domains configured on other
+        interfaces.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-m</option></term>
+        <term><option>-p</option></term>
+
+        <listitem><para>These switches are not supported and are silently ignored.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-u</option></term>
+        <term><option>-I</option></term>
+        <term><option>-i</option></term>
+        <term><option>-l</option></term>
+        <term><option>-R</option></term>
+        <term><option>-r</option></term>
+        <term><option>-v</option></term>
+        <term><option>-V</option></term>
+        <term><option>--enable-updates</option></term>
+        <term><option>--disable-updates</option></term>
+        <term><option>--are-updates-enabled</option></term>
+
+        <listitem><para>These switches are not supported and the command will fail if used.</para></listitem>
+      </varlistentry>
+
+    </variablelist>
+
+    <para>See <citerefentry><refentrytitle>resolvconf</refentrytitle><manvolnum>8</manvolnum></citerefentry> for details on this command line options.</para>
   </refsect1>
 
   <refsect1>
@@ -356,7 +532,7 @@ _xmpp-server._tcp/gmail.com: alt1.xmpp-server.l.google.com:5269 [priority=20, we
                              173.194.210.125
                              alt4.xmpp-server.l.google.com:5269 [priority=20, weight=0]
                              173.194.65.125
-                             ...
+                             …
 </programlisting>
     </example>
 
@@ -367,7 +543,7 @@ _xmpp-server._tcp/gmail.com: alt1.xmpp-server.l.google.com:5269 [priority=20, we
 d08ee310438ca124a6149ea5cc21b6313b390dce485576eff96f8722._openpgpkey.fedoraproject.org. IN OPENPGPKEY
         mQINBFBHPMsBEACeInGYJCb+7TurKfb6wGyTottCDtiSJB310i37/6ZYoeIay/5soJjlMyf
         MFQ9T2XNT/0LM6gTa0MpC1st9LnzYTMsT6tzRly1D1UbVI6xw0g0vE5y2Cjk3xUwAynCsSs
-        ...
+        …
 </programlisting>
     </example>
 
@@ -388,7 +564,10 @@ _443._tcp.fedoraproject.org IN TLSA 0 0 1 19400be5b7a31fb733917700789d2f0a2471c0
     <title>See Also</title>
     <para>
       <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+      <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>systemd.dnssd</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>systemd-networkd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>resolvconf</refentrytitle><manvolnum>8</manvolnum></citerefentry>
     </para>
   </refsect1>
 </refentry>

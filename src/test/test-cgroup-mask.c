@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -22,21 +23,30 @@
 #include "macro.h"
 #include "manager.h"
 #include "rm-rf.h"
+#include "string-util.h"
 #include "test-helper.h"
 #include "tests.h"
 #include "unit.h"
 
 static int test_cgroup_mask(void) {
-        Manager *m = NULL;
+        _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
+        _cleanup_(manager_freep) Manager *m = NULL;
         Unit *son, *daughter, *parent, *root, *grandchild, *parent_deep;
         FILE *serial = NULL;
         FDSet *fdset = NULL;
         int r;
 
+        r = enter_cgroup_subroot();
+        if (r == -ENOMEDIUM) {
+                puts("Skipping test: cgroupfs not available");
+                return EXIT_TEST_SKIP;
+        }
+
         /* Prepare the manager. */
-        assert_se(set_unit_path(TEST_DIR) >= 0);
-        r = manager_new(UNIT_FILE_USER, true, &m);
-        if (r == -EPERM || r == -EACCES) {
+        assert_se(set_unit_path(get_testdata_dir("")) >= 0);
+        assert_se(runtime_dir = setup_fake_runtime_dir());
+        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_BASIC, &m);
+        if (IN_SET(r, -EPERM, -EACCES)) {
                 puts("manager_new: Permission denied. Skipping test.");
                 return EXIT_TEST_SKIP;
         }
@@ -104,17 +114,41 @@ static int test_cgroup_mask(void) {
         assert_se(unit_get_target_mask(parent) == ((CGROUP_MASK_CPU | CGROUP_MASK_CPUACCT | CGROUP_MASK_IO | CGROUP_MASK_BLKIO | CGROUP_MASK_MEMORY) & m->cgroup_supported));
         assert_se(unit_get_target_mask(root) == ((CGROUP_MASK_CPU | CGROUP_MASK_CPUACCT | CGROUP_MASK_IO | CGROUP_MASK_BLKIO | CGROUP_MASK_MEMORY) & m->cgroup_supported));
 
-        manager_free(m);
-
         return 0;
 }
 
+static void test_cg_mask_to_string_one(CGroupMask mask, const char *t) {
+        _cleanup_free_ char *b = NULL;
+
+        assert_se(cg_mask_to_string(mask, &b) >= 0);
+        assert_se(streq_ptr(b, t));
+}
+
+static void test_cg_mask_to_string(void) {
+        test_cg_mask_to_string_one(0, NULL);
+        test_cg_mask_to_string_one(_CGROUP_MASK_ALL, "cpu cpuacct io blkio memory devices pids");
+        test_cg_mask_to_string_one(CGROUP_MASK_CPU, "cpu");
+        test_cg_mask_to_string_one(CGROUP_MASK_CPUACCT, "cpuacct");
+        test_cg_mask_to_string_one(CGROUP_MASK_IO, "io");
+        test_cg_mask_to_string_one(CGROUP_MASK_BLKIO, "blkio");
+        test_cg_mask_to_string_one(CGROUP_MASK_MEMORY, "memory");
+        test_cg_mask_to_string_one(CGROUP_MASK_DEVICES, "devices");
+        test_cg_mask_to_string_one(CGROUP_MASK_PIDS, "pids");
+        test_cg_mask_to_string_one(CGROUP_MASK_CPU|CGROUP_MASK_CPUACCT, "cpu cpuacct");
+        test_cg_mask_to_string_one(CGROUP_MASK_CPU|CGROUP_MASK_PIDS, "cpu pids");
+        test_cg_mask_to_string_one(CGROUP_MASK_CPUACCT|CGROUP_MASK_PIDS, "cpuacct pids");
+        test_cg_mask_to_string_one(CGROUP_MASK_DEVICES|CGROUP_MASK_PIDS, "devices pids");
+        test_cg_mask_to_string_one(CGROUP_MASK_IO|CGROUP_MASK_BLKIO, "io blkio");
+}
+
 int main(int argc, char* argv[]) {
-        _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
         int rc = 0;
 
-        assert_se(runtime_dir = setup_fake_runtime_dir());
+        log_parse_environment();
+        log_open();
+
         TEST_REQ_RUNNING_SYSTEMD(rc = test_cgroup_mask());
+        test_cg_mask_to_string();
 
         return rc;
 }

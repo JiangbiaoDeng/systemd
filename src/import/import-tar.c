@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -189,7 +190,7 @@ static int tar_import_finish(TarImport *i) {
         i->tar_fd = safe_close(i->tar_fd);
 
         if (i->tar_pid > 0) {
-                r = wait_for_terminate_and_warn("tar", i->tar_pid, true);
+                r = wait_for_terminate_and_check("tar", i->tar_pid, WAIT_LOG);
                 i->tar_pid = 0;
                 if (r < 0)
                         return r;
@@ -284,7 +285,7 @@ static int tar_import_process(TarImport *i) {
         }
         if (l == 0) {
                 if (i->compress.type == IMPORT_COMPRESS_UNKNOWN) {
-                        log_error("Premature end of file: %m");
+                        log_error("Premature end of file.");
                         r = -EIO;
                         goto finish;
                 }
@@ -298,7 +299,7 @@ static int tar_import_process(TarImport *i) {
         if (i->compress.type == IMPORT_COMPRESS_UNKNOWN) {
                 r = import_uncompress_detect(&i->compress, i->buffer, i->buffer_size);
                 if (r < 0) {
-                        log_error("Failed to detect file compression: %m");
+                        log_error_errno(r, "Failed to detect file compression: %m");
                         goto finish;
                 }
                 if (r == 0) /* Need more data */

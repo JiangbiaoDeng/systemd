@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -47,6 +48,8 @@ struct LinkAddress {
 
         DnsResourceRecord *llmnr_address_rr;
         DnsResourceRecord *llmnr_ptr_rr;
+        DnsResourceRecord *mdns_address_rr;
+        DnsResourceRecord *mdns_ptr_rr;
 
         LIST_FIELDS(LinkAddress, addresses);
 };
@@ -58,6 +61,7 @@ struct Link {
         unsigned flags;
 
         LIST_HEAD(LinkAddress, addresses);
+        unsigned n_addresses;
 
         LIST_HEAD(DnsServer, dns_servers);
         DnsServer *current_dns_server;
@@ -85,6 +89,8 @@ struct Link {
 
         bool loaded;
         char *state_file;
+
+        bool unicast_relevant;
 };
 
 int link_new(Manager *m, Link **ret, int ifindex);

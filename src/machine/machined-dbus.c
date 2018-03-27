@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -729,6 +730,26 @@ static int method_open_machine_root_directory(sd_bus_message *message, void *use
         return bus_machine_method_open_root_directory(message, machine, error);
 }
 
+static int method_get_machine_uid_shift(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        Machine *machine;
+        const char *name;
+        int r;
+
+        assert(message);
+        assert(m);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        machine = hashmap_get(m->machines, name);
+        if (!machine)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_MACHINE, "No machine '%s' known", name);
+
+        return bus_machine_method_get_uid_shift(message, machine, error);
+}
+
 static int method_remove_image(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         _cleanup_(image_unrefp) Image* i = NULL;
         const char *name;
@@ -823,6 +844,102 @@ static int method_mark_image_read_only(sd_bus_message *message, void *userdata, 
 
         i->userdata = userdata;
         return bus_image_method_mark_read_only(message, i, error);
+}
+
+static int method_get_image_hostname(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_(image_unrefp) Image *i = NULL;
+        const char *name;
+        int r;
+
+        assert(message);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        if (!image_name_is_valid(name))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Image name '%s' is invalid.", name);
+
+        r = image_find(name, &i);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", name);
+
+        i->userdata = userdata;
+        return bus_image_method_get_hostname(message, i, error);
+}
+
+static int method_get_image_machine_id(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_(image_unrefp) Image *i = NULL;
+        const char *name;
+        int r;
+
+        assert(message);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        if (!image_name_is_valid(name))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Image name '%s' is invalid.", name);
+
+        r = image_find(name, &i);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", name);
+
+        i->userdata = userdata;
+        return bus_image_method_get_machine_id(message, i, error);
+}
+
+static int method_get_image_machine_info(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_(image_unrefp) Image *i = NULL;
+        const char *name;
+        int r;
+
+        assert(message);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        if (!image_name_is_valid(name))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Image name '%s' is invalid.", name);
+
+        r = image_find(name, &i);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", name);
+
+        i->userdata = userdata;
+        return bus_image_method_get_machine_info(message, i, error);
+}
+
+static int method_get_image_os_release(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_(image_unrefp) Image *i = NULL;
+        const char *name;
+        int r;
+
+        assert(message);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        if (!image_name_is_valid(name))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Image name '%s' is invalid.", name);
+
+        r = image_find(name, &i);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", name);
+
+        i->userdata = userdata;
+        return bus_image_method_get_os_release(message, i, error);
 }
 
 static int clean_pool_done(Operation *operation, int ret, sd_bus_error *error) {
@@ -961,11 +1078,10 @@ static int method_clean_pool(sd_bus_message *message, void *userdata, sd_bus_err
                 return -errno;
 
         /* This might be a slow operation, run it asynchronously in a background process */
-        child = fork();
-        if (child < 0)
-                return sd_bus_error_set_errnof(error, errno, "Failed to fork(): %m");
-
-        if (child == 0) {
+        r = safe_fork("(sd-clean)", FORK_RESET_SIGNALS, &child);
+        if (r < 0)
+                return sd_bus_error_set_errnof(error, r, "Failed to fork(): %m");
+        if (r == 0) {
                 _cleanup_(image_hashmap_freep) Hashmap *images = NULL;
                 bool success = true;
                 Image *image;
@@ -1203,7 +1319,7 @@ static int method_map_to_machine_user(sd_bus_message *message, void *userdata, s
 
         HASHMAP_FOREACH(machine, m->machines, i) {
                 _cleanup_fclose_ FILE *f = NULL;
-                char p[strlen("/proc//uid_map") + DECIMAL_STR_MAX(pid_t) + 1];
+                char p[STRLEN("/proc//uid_map") + DECIMAL_STR_MAX(pid_t) + 1];
 
                 if (machine->class != MACHINE_CONTAINER)
                         continue;
@@ -1211,7 +1327,7 @@ static int method_map_to_machine_user(sd_bus_message *message, void *userdata, s
                 xsprintf(p, "/proc/" UID_FMT "/uid_map", machine->leader);
                 f = fopen(p, "re");
                 if (!f) {
-                        log_warning_errno(errno, "Failed top open %s, ignoring,", p);
+                        log_warning_errno(errno, "Failed to open %s, ignoring,", p);
                         continue;
                 }
 
@@ -1321,7 +1437,7 @@ static int method_map_to_machine_group(sd_bus_message *message, void *groupdata,
 
         HASHMAP_FOREACH(machine, m->machines, i) {
                 _cleanup_fclose_ FILE *f = NULL;
-                char p[strlen("/proc//gid_map") + DECIMAL_STR_MAX(pid_t) + 1];
+                char p[STRLEN("/proc//gid_map") + DECIMAL_STR_MAX(pid_t) + 1];
 
                 if (machine->class != MACHINE_CONTAINER)
                         continue;
@@ -1329,7 +1445,7 @@ static int method_map_to_machine_group(sd_bus_message *message, void *groupdata,
                 xsprintf(p, "/proc/" GID_FMT "/gid_map", machine->leader);
                 f = fopen(p, "re");
                 if (!f) {
-                        log_warning_errno(errno, "Failed top open %s, ignoring,", p);
+                        log_warning_errno(errno, "Failed to open %s, ignoring,", p);
                         continue;
                 }
 
@@ -1392,10 +1508,15 @@ const sd_bus_vtable manager_vtable[] = {
         SD_BUS_METHOD("CopyFromMachine", "sss", NULL, method_copy_machine, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("CopyToMachine", "sss", NULL, method_copy_machine, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("OpenMachineRootDirectory", "s", "h", method_open_machine_root_directory, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetMachineUIDShift", "s", "u", method_get_machine_uid_shift, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("RemoveImage", "s", NULL, method_remove_image, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("RenameImage", "ss", NULL, method_rename_image, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("CloneImage", "ssb", NULL, method_clone_image, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("MarkImageReadOnly", "sb", NULL, method_mark_image_read_only, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetImageHostname", "s", "s", method_get_image_hostname, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetImageMachineID", "s", "ay", method_get_image_machine_id, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetImageMachineInfo", "s", "a{ss}", method_get_image_machine_info, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetImageOSRelease", "s", "a{ss}", method_get_image_os_release, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("SetPoolLimit", "t", NULL, method_set_pool_limit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("SetImageLimit", "st", NULL, method_set_image_limit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("CleanPool", "s", "a(st)", method_clean_pool, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -1803,4 +1924,31 @@ int manager_add_machine(Manager *m, const char *name, Machine **_machine) {
                 *_machine = machine;
 
         return 0;
+}
+
+int bus_reply_pair_array(sd_bus_message *m, char **l) {
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        char **k, **v;
+        int r;
+
+        r = sd_bus_message_new_method_return(m, &reply);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_open_container(reply, 'a', "{ss}");
+        if (r < 0)
+                return r;
+
+        STRV_FOREACH_PAIR(k, v, l) {
+                r = sd_bus_message_append(reply, "{ss}", *k, *v);
+                if (r < 0)
+                        return r;
+        }
+
+        r = sd_bus_message_close_container(reply);
+        if (r < 0)
+                return r;
+
+        return sd_bus_send(NULL, reply, NULL);
+
 }

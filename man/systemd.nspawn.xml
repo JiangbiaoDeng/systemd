@@ -6,6 +6,8 @@
 ]>
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2015 Lennart Poettering
@@ -202,6 +204,15 @@
       </varlistentry>
 
       <varlistentry>
+        <term><varname>PivotRoot=</varname></term>
+
+        <listitem><para>Selects a directory to pivot to <filename>/</filename> inside the container when starting up.
+        Takes a single path, or a pair of two paths separated by a colon. Both paths must be absolute, and are resolved
+        in the container's file system namespace. This corresponds to the <option>--pivot-root=</option> command line
+        switch.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>Capability=</varname></term>
         <term><varname>DropCapability=</varname></term>
 
@@ -265,11 +276,21 @@
       <varlistentry>
         <term><varname>NotifyReady=</varname></term>
 
-        <listitem><para>Configures support for notifications from the container's init process.
-        This is equivalent to use <option>--notify-ready=</option> command line switch,
-        and takes the same options. See <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-        for details about the specific options supported.</para></listitem>
+        <listitem><para>Configures support for notifications from the container's init process.  This is equivalent to
+        the <option>--notify-ready=</option> command line switch, and takes the same parameters. See
+        <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry> for details
+        about the specific options supported.</para></listitem>
       </varlistentry>
+
+      <varlistentry>
+        <term><varname>SystemCallFilter=</varname></term>
+
+        <listitem><para>Configures the system call filter applied to containers. This is equivalent to the
+        <option>--system-call-filter=</option> command line switch, and takes the same list parameter. See
+        <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry> for
+        details.</para></listitem>
+      </varlistentry>
+
     </variablelist>
   </refsect1>
 
@@ -332,6 +353,17 @@
         <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry>
         for details about the specific options supported. This setting
         is privileged (see above).</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>Overlay=</varname></term>
+        <term><varname>OverlayReadOnly=</varname></term>
+
+        <listitem><para>Adds an overlay mount point. Takes a colon-separated list of paths.  This option may be used
+        multiple times to configure multiple overlay mounts. This option is equivalent to the command line switches
+        <option>--overlay=</option> and <option>--overlay-ro=</option>, see
+        <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry> for details
+        about the specific options supported. This setting is privileged (see above).</para></listitem>
       </varlistentry>
 
       <varlistentry>

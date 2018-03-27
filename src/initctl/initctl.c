@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -37,6 +38,7 @@
 #include "log.h"
 #include "special.h"
 #include "util.h"
+#include "process-util.h"
 
 #define SERVER_FD_MAX 16
 #define TIMEOUT_MSEC ((int) (DEFAULT_EXIT_USEC/USEC_PER_MSEC))
@@ -388,7 +390,7 @@ int main(int argc, char *argv[]) {
         if (server_init(&server, (unsigned) n) < 0)
                 return EXIT_FAILURE;
 
-        log_debug("systemd-initctl running as pid "PID_FMT, getpid());
+        log_debug("systemd-initctl running as pid "PID_FMT, getpid_cached());
 
         sd_notify(false,
                   "READY=1\n"
@@ -415,7 +417,7 @@ int main(int argc, char *argv[]) {
 
         r = EXIT_SUCCESS;
 
-        log_debug("systemd-initctl stopped as pid "PID_FMT, getpid());
+        log_debug("systemd-initctl stopped as pid "PID_FMT, getpid_cached());
 
 fail:
         sd_notify(false,

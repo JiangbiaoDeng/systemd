@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #ifndef foosdcommonhfoo
 #define foosdcommonhfoo
 
@@ -22,8 +23,8 @@
 
 /* This is a private header; never even think of including this directly! */
 
-#if __INCLUDE_LEVEL__ <= 1
-#error "Do not include _sd-common.h directly; it is a private header."
+#if defined(__INCLUDE_LEVEL__) && __INCLUDE_LEVEL__ <= 1
+#  error "Do not include _sd-common.h directly; it is a private header."
 #endif
 
 #ifndef _sd_printf_

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -18,6 +19,7 @@
 ***/
 
 #include <getopt.h>
+#include <linux/if_addrlabel.h>
 #include <net/if.h>
 #include <stdbool.h>
 
@@ -35,6 +37,7 @@
 #include "hwdb-util.h"
 #include "local-addresses.h"
 #include "locale-util.h"
+#include "macro.h"
 #include "netlink-util.h"
 #include "pager.h"
 #include "parse-util.h"
@@ -53,49 +56,28 @@ static bool arg_no_pager = false;
 static bool arg_legend = true;
 static bool arg_all = false;
 
-static int link_get_type_string(unsigned short iftype, sd_device *d, char **ret) {
+static char *link_get_type_string(unsigned short iftype, sd_device *d) {
         const char *t;
         char *p;
 
-        assert(ret);
-
-        if (iftype == ARPHRD_ETHER && d) {
-                const char *devtype = NULL, *id = NULL;
-                /* WLANs have iftype ARPHRD_ETHER, but we want
-                 * to show a more useful type string for
-                 * them */
+        if (d) {
+                const char *devtype = NULL;
 
                 (void) sd_device_get_devtype(d, &devtype);
-
-                if (streq_ptr(devtype, "wlan"))
-                        id = "wlan";
-                else if (streq_ptr(devtype, "wwan"))
-                        id = "wwan";
-
-                if (id) {
-                        p = strdup(id);
-                        if (!p)
-                                return -ENOMEM;
-
-                        *ret = p;
-                        return 1;
-                }
+                if (!isempty(devtype))
+                        return strdup(devtype);
         }
 
         t = arphrd_to_name(iftype);
-        if (!t) {
-                *ret = NULL;
-                return 0;
-        }
+        if (!t)
+                return NULL;
 
         p = strdup(t);
         if (!p)
-                return -ENOMEM;
+                return NULL;
 
         ascii_strlower(p);
-        *ret = p;
-
-        return 0;
+        return p;
 }
 
 static void operational_state_to_color(const char *state, const char **on, const char **off) {
@@ -291,7 +273,7 @@ static int list_links(int argc, char *argv[], void *userdata) {
         if (c < 0)
                 return c;
 
-        pager_open(arg_no_pager, false);
+        (void) pager_open(arg_no_pager, false);
 
         if (arg_legend)
                 printf("%3s %-16s %-18s %-11s %-10s\n",
@@ -320,7 +302,7 @@ static int list_links(int argc, char *argv[], void *userdata) {
                 xsprintf(devid, "n%i", links[i].ifindex);
                 (void) sd_device_new_from_device_id(&d, devid);
 
-                (void) link_get_type_string(links[i].iftype, d, &t);
+                t = link_get_type_string(links[i].iftype, d);
 
                 printf("%3i %-16s %-18s %s%-11s%s %s%-10s%s\n",
                        links[i].ifindex, links[i].name, strna(t),
@@ -337,7 +319,7 @@ static int list_links(int argc, char *argv[], void *userdata) {
 /* IEEE Organizationally Unique Identifier vendor string */
 static int ieee_oui(sd_hwdb *hwdb, const struct ether_addr *mac, char **ret) {
         const char *description;
-        char modalias[strlen("OUI:XXYYXXYYXXYY") + 1], *desc;
+        char modalias[STRLEN("OUI:XXYYXXYYXXYY") + 1], *desc;
         int r;
 
         assert(ret);
@@ -381,7 +363,7 @@ static int get_gateway_description(
 
         assert(rtnl);
         assert(ifindex >= 0);
-        assert(family == AF_INET || family == AF_INET6);
+        assert(IN_SET(family, AF_INET, AF_INET6));
         assert(gateway);
         assert(gateway_description);
 
@@ -569,6 +551,76 @@ static int dump_addresses(
         return 0;
 }
 
+static int dump_address_labels(sd_netlink *rtnl) {
+        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL, *reply = NULL;
+        sd_netlink_message *m;
+        int r;
+
+        assert(rtnl);
+
+        r = sd_rtnl_message_new_addrlabel(rtnl, &req, RTM_GETADDRLABEL, 0, AF_INET6);
+        if (r < 0)
+                return log_error_errno(r, "Could not allocate RTM_GETADDRLABEL message: %m");
+
+        r = sd_netlink_message_request_dump(req, true);
+        if (r < 0)
+                return r;
+
+        r = sd_netlink_call(rtnl, req, 0, &reply);
+        if (r < 0)
+                return r;
+
+        printf("%10s/%s %30s\n", "Prefix", "Prefixlen", "Label");
+
+        for (m = reply; m; m = sd_netlink_message_next(m)) {
+                _cleanup_free_ char *pretty = NULL;
+                union in_addr_union prefix = {};
+                uint8_t prefixlen;
+                uint32_t label;
+
+                r = sd_netlink_message_get_errno(m);
+                if (r < 0) {
+                        log_error_errno(r, "got error: %m");
+                        continue;
+                }
+
+                r = sd_netlink_message_read_u32(m, IFAL_LABEL, &label);
+                if (r < 0 && r != -ENODATA) {
+                        log_error_errno(r, "Could not read IFAL_LABEL, ignoring: %m");
+                        continue;
+                }
+
+                r = sd_netlink_message_read_in6_addr(m, IFAL_ADDRESS, &prefix.in6);
+                if (r < 0)
+                        continue;
+
+                r = in_addr_to_string(AF_INET6, &prefix, &pretty);
+                if (r < 0)
+                        continue;
+
+                r = sd_rtnl_message_addrlabel_get_prefixlen(m, &prefixlen);
+                if (r < 0)
+                        continue;
+
+                printf("%10s/%-5u %30u\n", pretty, prefixlen, label);
+        }
+
+        return 0;
+}
+
+static int list_address_labels(int argc, char *argv[], void *userdata) {
+        _cleanup_(sd_netlink_unrefp) sd_netlink *rtnl = NULL;
+        int r;
+
+        r = sd_netlink_open(&rtnl);
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to netlink: %m");
+
+        dump_address_labels(rtnl);
+
+        return 0;
+}
+
 static int open_lldp_neighbors(int ifindex, FILE **ret) {
         _cleanup_free_ char *p = NULL;
         FILE *f;
@@ -743,7 +795,7 @@ static int link_status_one(
                         (void) sd_device_get_property_value(d, "ID_MODEL", &model);
         }
 
-        (void) link_get_type_string(info->iftype, d, &t);
+        t = link_get_type_string(info->iftype, d);
 
         (void) sd_network_link_get_network_file(info->ifindex, &network);
 
@@ -845,7 +897,7 @@ static int link_status(int argc, char *argv[], void *userdata) {
         _cleanup_free_ LinkInfo *links = NULL;
         int r, c, i;
 
-        pager_open(arg_no_pager, false);
+        (void) pager_open(arg_no_pager, false);
 
         r = sd_netlink_open(&rtnl);
         if (r < 0)
@@ -941,7 +993,7 @@ static int link_lldp_status(int argc, char *argv[], void *userdata) {
         if (c < 0)
                 return c;
 
-        pager_open(arg_no_pager, false);
+        (void) pager_open(arg_no_pager, false);
 
         if (arg_legend)
                 printf("%-16s %-17s %-16s %-11s %-17s %-16s\n",
@@ -1043,6 +1095,7 @@ static void help(void) {
                "  list [LINK...]        List links\n"
                "  status [LINK...]      Show link status\n"
                "  lldp [LINK...]        Show LLDP neighbors\n"
+               "  label                 Show current address label entries in the kernel\n"
                , program_invocation_short_name);
 }
 
@@ -1103,10 +1156,11 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 static int networkctl_main(int argc, char *argv[]) {
-        const Verb verbs[] = {
-                { "list",   VERB_ANY, VERB_ANY, VERB_DEFAULT, list_links       },
-                { "status", VERB_ANY, VERB_ANY, 0,            link_status      },
-                { "lldp",   VERB_ANY, VERB_ANY, 0,            link_lldp_status },
+        static const Verb verbs[] = {
+                { "list",   VERB_ANY, VERB_ANY, VERB_DEFAULT, list_links          },
+                { "status", VERB_ANY, VERB_ANY, 0,            link_status         },
+                { "lldp",   VERB_ANY, VERB_ANY, 0,            link_lldp_status    },
+                { "label",  VERB_ANY, VERB_ANY, 0,            list_address_labels },
                 {}
         };
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -32,10 +33,10 @@ int manager_parse_config_file(Manager *m) {
         assert(m);
 
         return config_parse_many_nulstr(PKGSYSCONFDIR "/networkd.conf",
-                                 CONF_PATHS_NULSTR("systemd/networkd.conf.d"),
-                                 "DHCP\0",
-                                 config_item_perf_lookup, networkd_gperf_lookup,
-                                 false, m);
+                                        CONF_PATHS_NULSTR("systemd/networkd.conf.d"),
+                                        "DHCP\0",
+                                        config_item_perf_lookup, networkd_gperf_lookup,
+                                        CONFIG_PARSE_WARN, m);
 }
 
 static const char* const duid_type_table[_DUID_TYPE_MAX] = {
@@ -87,7 +88,7 @@ int config_parse_duid_rawdata(
                 }
 
                 len = strlen(cbyte);
-                if (len != 1 && len != 2) {
+                if (!IN_SET(len, 1, 2)) {
                         log_syntax(unit, LOG_ERR, filename, line, 0, "Invalid length - DUID byte: %s, ignoring assignment: %s.", cbyte, rvalue);
                         return 0;
                 }

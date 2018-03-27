@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -38,6 +39,7 @@ enum {
         VIRTUALIZATION_ZVM,
         VIRTUALIZATION_PARALLELS,
         VIRTUALIZATION_BHYVE,
+        VIRTUALIZATION_QNX,
         VIRTUALIZATION_VM_OTHER,
         VIRTUALIZATION_VM_LAST = VIRTUALIZATION_VM_OTHER,
 

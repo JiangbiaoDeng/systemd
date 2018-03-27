@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -29,6 +30,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "log.h"
+#include "module-util.h"
 #include "proc-cmdline.h"
 #include "string-util.h"
 #include "strv.h"
@@ -62,7 +64,11 @@ static int add_modules(const char *p) {
 static int parse_proc_cmdline_item(const char *key, const char *value, void *data) {
         int r;
 
-        if (streq(key, "modules-load") && value) {
+        if (proc_cmdline_key_streq(key, "modules_load")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
                 r = add_modules(value);
                 if (r < 0)
                         return r;
@@ -73,7 +79,8 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
 static int load_module(struct kmod_ctx *ctx, const char *m) {
         const int probe_flags = KMOD_PROBE_APPLY_BLACKLIST;
-        struct kmod_list *itr, *modlist = NULL;
+        struct kmod_list *itr;
+        _cleanup_(kmod_module_unref_listp) struct kmod_list *modlist = NULL;
         int r = 0;
 
         log_debug("load: %s", m);
@@ -88,7 +95,7 @@ static int load_module(struct kmod_ctx *ctx, const char *m) {
         }
 
         kmod_list_foreach(itr, modlist) {
-                struct kmod_module *mod;
+                _cleanup_(kmod_module_unrefp) struct kmod_module *mod = NULL;
                 int state, err;
 
                 mod = kmod_module_get_module(itr);
@@ -112,15 +119,19 @@ static int load_module(struct kmod_ctx *ctx, const char *m) {
                         else if (err == KMOD_PROBE_APPLY_BLACKLIST)
                                 log_info("Module '%s' is blacklisted", kmod_module_get_name(mod));
                         else {
-                                log_error_errno(err, "Failed to insert '%s': %m", kmod_module_get_name(mod));
-                                r = err;
+                                assert(err < 0);
+
+                                log_full_errno(err == ENODEV ? LOG_NOTICE :
+                                               err == ENOENT ? LOG_WARNING :
+                                                               LOG_ERR,
+                                               err,
+                                               "Failed to insert '%s': %m",
+                                               kmod_module_get_name(mod));
+                                if (!IN_SET(err, ENODEV, ENOENT))
+                                        r = err;
                         }
                 }
-
-                kmod_module_unref(mod);
         }
-
-        kmod_module_unref_list(modlist);
 
         return r;
 }
@@ -214,7 +225,7 @@ static int parse_argv(int argc, char *argv[]) {
 
 int main(int argc, char *argv[]) {
         int r, k;
-        struct kmod_ctx *ctx;
+        _cleanup_(kmod_unrefp) struct kmod_ctx *ctx = NULL;
 
         r = parse_argv(argc, argv);
         if (r <= 0)
@@ -226,7 +237,7 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
-        r = parse_proc_cmdline(parse_proc_cmdline_item, NULL, true);
+        r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, PROC_CMDLINE_STRIP_RD_PREFIX);
         if (r < 0)
                 log_warning_errno(r, "Failed to parse kernel command line, ignoring: %m");
 
@@ -260,7 +271,7 @@ int main(int argc, char *argv[]) {
                                 r = k;
                 }
 
-                k = conf_files_list_nulstr(&files, ".conf", NULL, conf_file_dirs);
+                k = conf_files_list_nulstr(&files, ".conf", NULL, 0, conf_file_dirs);
                 if (k < 0) {
                         log_error_errno(k, "Failed to enumerate modules-load.d files: %m");
                         if (r == 0)
@@ -276,7 +287,6 @@ int main(int argc, char *argv[]) {
         }
 
 finish:
-        kmod_unref(ctx);
         strv_free(arg_proc_cmdline_modules);
 
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -33,6 +34,7 @@
 #include "hostname-util.h"
 #include "spawn-polkit-agent.h"
 #include "util.h"
+#include "verbs.h"
 
 static bool arg_ask_password = true;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
@@ -41,32 +43,20 @@ static bool arg_transient = false;
 static bool arg_pretty = false;
 static bool arg_static = false;
 
-static void polkit_agent_open_if_enabled(void) {
-
-        /* Open the polkit agent as a child process if necessary */
-        if (!arg_ask_password)
-                return;
-
-        if (arg_transport != BUS_TRANSPORT_LOCAL)
-                return;
-
-        polkit_agent_open();
-}
-
 typedef struct StatusInfo {
-        char *hostname;
-        char *static_hostname;
-        char *pretty_hostname;
-        char *icon_name;
-        char *chassis;
-        char *deployment;
-        char *location;
-        char *kernel_name;
-        char *kernel_release;
-        char *os_pretty_name;
-        char *os_cpe_name;
-        char *virtualization;
-        char *architecture;
+        const char *hostname;
+        const char *static_hostname;
+        const char *pretty_hostname;
+        const char *icon_name;
+        const char *chassis;
+        const char *deployment;
+        const char *location;
+        const char *kernel_name;
+        const char *kernel_release;
+        const char *os_pretty_name;
+        const char *os_cpe_name;
+        const char *virtualization;
+        const char *architecture;
 } StatusInfo;
 
 static void print_status_info(StatusInfo *i) {
@@ -137,10 +127,8 @@ static int show_one_name(sd_bus *bus, const char* attr) {
                         "org.freedesktop.hostname1",
                         attr,
                         &error, &reply, "s");
-        if (r < 0) {
-                log_error("Could not get property: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Could not get property: %s", bus_error_message(&error, r));
 
         r = sd_bus_message_read(reply, "s", &s);
         if (r < 0)
@@ -151,7 +139,7 @@ static int show_one_name(sd_bus *bus, const char* attr) {
         return 0;
 }
 
-static int show_all_names(sd_bus *bus) {
+static int show_all_names(sd_bus *bus, sd_bus_error *error) {
         StatusInfo info = {};
 
         static const struct bus_properties_map hostname_map[]  = {
@@ -175,44 +163,35 @@ static int show_all_names(sd_bus *bus) {
                 {}
         };
 
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *host_message = NULL, *manager_message = NULL;
         int r;
 
         r = bus_map_all_properties(bus,
                                    "org.freedesktop.hostname1",
                                    "/org/freedesktop/hostname1",
                                    hostname_map,
+                                   error,
+                                   &host_message,
                                    &info);
         if (r < 0)
-                goto fail;
+                return r;
 
-        bus_map_all_properties(bus,
-                               "org.freedesktop.systemd1",
-                               "/org/freedesktop/systemd1",
-                               manager_map,
-                               &info);
+        r = bus_map_all_properties(bus,
+                                   "org.freedesktop.systemd1",
+                                   "/org/freedesktop/systemd1",
+                                   manager_map,
+                                   error,
+                                   &manager_message,
+                                   &info);
 
         print_status_info(&info);
-
-fail:
-        free(info.hostname);
-        free(info.static_hostname);
-        free(info.pretty_hostname);
-        free(info.icon_name);
-        free(info.chassis);
-        free(info.deployment);
-        free(info.location);
-        free(info.kernel_name);
-        free(info.kernel_release);
-        free(info.os_pretty_name);
-        free(info.os_cpe_name);
-        free(info.virtualization);
-        free(info.architecture);
 
         return r;
 }
 
-static int show_status(sd_bus *bus, char **args, unsigned n) {
-        assert(args);
+static int show_status(int argc, char **argv, void *userdata) {
+        sd_bus *bus = userdata;
+        int r;
 
         if (arg_pretty || arg_static || arg_transient) {
                 const char *attr;
@@ -226,15 +205,22 @@ static int show_status(sd_bus *bus, char **args, unsigned n) {
                         arg_static ? "StaticHostname" : "Hostname";
 
                 return show_one_name(bus, attr);
-        } else
-                return show_all_names(bus);
+        } else {
+                _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+
+                r = show_all_names(bus, &error);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to query system properties: %s", bus_error_message(&error, r));
+
+                return 0;
+        }
 }
 
 static int set_simple_string(sd_bus *bus, const char *method, const char *value) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r = 0;
 
-        polkit_agent_open_if_enabled();
+        polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
 
         r = sd_bus_call_method(
                         bus,
@@ -249,13 +235,11 @@ static int set_simple_string(sd_bus *bus, const char *method, const char *value)
         return r;
 }
 
-static int set_hostname(sd_bus *bus, char **args, unsigned n) {
+static int set_hostname(int argc, char **argv, void *userdata) {
         _cleanup_free_ char *h = NULL;
-        const char *hostname = args[1];
+        const char *hostname = argv[1];
+        sd_bus *bus = userdata;
         int r;
-
-        assert(args);
-        assert(n == 2);
 
         if (!arg_pretty && !arg_static && !arg_transient)
                 arg_pretty = arg_static = arg_transient = true;
@@ -303,35 +287,23 @@ static int set_hostname(sd_bus *bus, char **args, unsigned n) {
         return 0;
 }
 
-static int set_icon_name(sd_bus *bus, char **args, unsigned n) {
-        assert(args);
-        assert(n == 2);
-
-        return set_simple_string(bus, "SetIconName", args[1]);
+static int set_icon_name(int argc, char **argv, void *userdata) {
+        return set_simple_string(userdata, "SetIconName", argv[1]);
 }
 
-static int set_chassis(sd_bus *bus, char **args, unsigned n) {
-        assert(args);
-        assert(n == 2);
-
-        return set_simple_string(bus, "SetChassis", args[1]);
+static int set_chassis(int argc, char **argv, void *userdata) {
+        return set_simple_string(userdata, "SetChassis", argv[1]);
 }
 
-static int set_deployment(sd_bus *bus, char **args, unsigned n) {
-        assert(args);
-        assert(n == 2);
-
-        return set_simple_string(bus, "SetDeployment", args[1]);
+static int set_deployment(int argc, char **argv, void *userdata) {
+        return set_simple_string(userdata, "SetDeployment", argv[1]);
 }
 
-static int set_location(sd_bus *bus, char **args, unsigned n) {
-        assert(args);
-        assert(n == 2);
-
-        return set_simple_string(bus, "SetLocation", args[1]);
+static int set_location(int argc, char **argv, void *userdata) {
+        return set_simple_string(userdata, "SetLocation", argv[1]);
 }
 
-static void help(void) {
+static int help(void) {
         printf("%s [OPTIONS...] COMMAND ...\n\n"
                "Query or change system hostname.\n\n"
                "  -h --help              Show this help\n"
@@ -350,6 +322,12 @@ static void help(void) {
                "  set-deployment NAME    Set deployment environment for host\n"
                "  set-location NAME      Set location for host\n"
                , program_invocation_short_name);
+
+        return 0;
+}
+
+static int verb_help(int argc, char **argv, void *userdata) {
+        return help();
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -384,8 +362,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -428,82 +405,18 @@ static int parse_argv(int argc, char *argv[]) {
 
 static int hostnamectl_main(sd_bus *bus, int argc, char *argv[]) {
 
-        static const struct {
-                const char* verb;
-                const enum {
-                        MORE,
-                        LESS,
-                        EQUAL
-                } argc_cmp;
-                const int argc;
-                int (* const dispatch)(sd_bus *bus, char **args, unsigned n);
-        } verbs[] = {
-                { "status",           LESS,  1, show_status    },
-                { "set-hostname",     EQUAL, 2, set_hostname   },
-                { "set-icon-name",    EQUAL, 2, set_icon_name  },
-                { "set-chassis",      EQUAL, 2, set_chassis    },
-                { "set-deployment",   EQUAL, 2, set_deployment },
-                { "set-location",     EQUAL, 2, set_location   },
+        static const Verb verbs[] = {
+                { "status",         VERB_ANY, 1,        VERB_DEFAULT, show_status    },
+                { "set-hostname",   2,        2,        0,            set_hostname   },
+                { "set-icon-name",  2,        2,        0,            set_icon_name  },
+                { "set-chassis",    2,        2,        0,            set_chassis    },
+                { "set-deployment", 2,        2,        0,            set_deployment },
+                { "set-location",   2,        2,        0,            set_location   },
+                { "help",           VERB_ANY, VERB_ANY, 0,            verb_help      }, /* Not documented, but supported since it is created. */
+                {}
         };
 
-        int left;
-        unsigned i;
-
-        assert(argc >= 0);
-        assert(argv);
-
-        left = argc - optind;
-
-        if (left <= 0)
-                /* Special rule: no arguments means "status" */
-                i = 0;
-        else {
-                if (streq(argv[optind], "help")) {
-                        help();
-                        return 0;
-                }
-
-                for (i = 0; i < ELEMENTSOF(verbs); i++)
-                        if (streq(argv[optind], verbs[i].verb))
-                                break;
-
-                if (i >= ELEMENTSOF(verbs)) {
-                        log_error("Unknown operation %s", argv[optind]);
-                        return -EINVAL;
-                }
-        }
-
-        switch (verbs[i].argc_cmp) {
-
-        case EQUAL:
-                if (left != verbs[i].argc) {
-                        log_error("Invalid number of arguments.");
-                        return -EINVAL;
-                }
-
-                break;
-
-        case MORE:
-                if (left < verbs[i].argc) {
-                        log_error("Too few arguments.");
-                        return -EINVAL;
-                }
-
-                break;
-
-        case LESS:
-                if (left > verbs[i].argc) {
-                        log_error("Too many arguments.");
-                        return -EINVAL;
-                }
-
-                break;
-
-        default:
-                assert_not_reached("Unknown comparison operator.");
-        }
-
-        return verbs[i].dispatch(bus, argv + optind, left);
+        return dispatch_verb(argc, argv, verbs, bus);
 }
 
 int main(int argc, char *argv[]) {

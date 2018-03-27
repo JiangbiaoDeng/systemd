@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -28,6 +29,7 @@
 #include "sd-ipv4ll.h"
 #include "sd-lldp.h"
 #include "sd-ndisc.h"
+#include "sd-radv.h"
 #include "sd-netlink.h"
 
 #include "list.h"
@@ -84,7 +86,11 @@ typedef struct Link {
         LinkState state;
         LinkOperationalState operstate;
 
-        unsigned link_messages;
+        unsigned address_messages;
+        unsigned address_label_messages;
+        unsigned route_messages;
+        unsigned routing_policy_rule_messages;
+        unsigned routing_policy_rule_remove_messages;
         unsigned enslaving;
 
         Set *addresses;
@@ -107,7 +113,9 @@ typedef struct Link {
         bool ipv4ll_address:1;
         bool ipv4ll_route:1;
 
-        bool static_configured;
+        bool static_routes_configured;
+        bool routing_policy_rules_configured;
+        bool setting_mtu;
 
         LIST_HEAD(Address, pool_addresses);
 
@@ -116,6 +124,8 @@ typedef struct Link {
         sd_ndisc *ndisc;
         Set *ndisc_rdnss;
         Set *ndisc_dnssl;
+
+        sd_radv *radv;
 
         sd_dhcp6_client *dhcp6_client;
         bool rtnl_extended_attrs;
@@ -137,6 +147,9 @@ Link *link_ref(Link *link);
 int link_get(Manager *m, int ifindex, Link **ret);
 int link_add(Manager *manager, sd_netlink_message *message, Link **ret);
 void link_drop(Link *link);
+
+int link_up(Link *link);
+int link_down(Link *link);
 
 int link_address_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata);
 int link_route_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata);
@@ -162,6 +175,7 @@ int link_set_mtu(Link *link, uint32_t mtu);
 
 int ipv4ll_configure(Link *link);
 int dhcp4_configure(Link *link);
+int dhcp4_set_promote_secondaries(Link *link);
 int dhcp6_configure(Link *link);
 int dhcp6_request_address(Link *link, int ir);
 

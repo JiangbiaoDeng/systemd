@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -144,6 +145,15 @@ void manager_next_dns_server(Manager *m);
 
 bool dns_server_address_valid(int family, const union in_addr_union *sa);
 
+DnssecMode dns_server_get_dnssec_mode(DnsServer *s);
+
 DEFINE_TRIVIAL_CLEANUP_FUNC(DnsServer*, dns_server_unref);
 
 extern const struct hash_ops dns_server_hash_ops;
+
+void dns_server_flush_cache(DnsServer *s);
+
+void dns_server_reset_features(DnsServer *s);
+void dns_server_reset_features_all(DnsServer *s);
+
+void dns_server_dump(DnsServer *s, FILE *f);

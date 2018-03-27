@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -431,8 +432,8 @@ int manager_etc_hosts_lookup(Manager *m, DnsQuestion* q, DnsAnswer **answer) {
         for (i = 0; i < bn->n_items; i++) {
                 _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
 
-                if ((found_a && bn->items[i]->family != AF_INET) &&
-                    (found_aaaa && bn->items[i]->family != AF_INET6))
+                if ((!found_a && bn->items[i]->family == AF_INET) ||
+                    (!found_aaaa && bn->items[i]->family == AF_INET6))
                         continue;
 
                 r = dns_resource_record_new_address(&rr, bn->items[i]->family, &bn->items[i]->address, bn->name);
@@ -444,5 +445,5 @@ int manager_etc_hosts_lookup(Manager *m, DnsQuestion* q, DnsAnswer **answer) {
                         return r;
         }
 
-        return 1;
+        return found_a || found_aaaa;
 }

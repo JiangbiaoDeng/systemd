@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -33,6 +34,8 @@ struct sd_dhcp_route {
         struct in_addr dst_addr;
         struct in_addr gw_addr;
         unsigned char dst_prefixlen;
+
+        uint8_t option;
 };
 
 struct sd_dhcp_raw_option {
@@ -75,6 +78,7 @@ struct sd_dhcp_lease {
         uint16_t mtu; /* 0 if unset */
 
         char *domainname;
+        char **search_domains;
         char *hostname;
         char *root_path;
 
@@ -92,6 +96,7 @@ struct sd_dhcp_lease {
 int dhcp_lease_new(sd_dhcp_lease **ret);
 
 int dhcp_lease_parse_options(uint8_t code, uint8_t len, const void *option, void *userdata);
+int dhcp_lease_parse_search_domains(const uint8_t *option, size_t len, char ***domains);
 int dhcp_lease_insert_private_option(sd_dhcp_lease *lease, uint8_t tag, const void *data, uint8_t len);
 
 int dhcp_lease_set_default_subnet_mask(sd_dhcp_lease *lease);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -74,9 +75,7 @@ static int context_read_data(Context *c) {
         else if (r < 0)
                 log_warning_errno(r, "Failed to get target of /etc/localtime: %m");
 
-        free(c->zone);
-        c->zone = t;
-        t = NULL;
+        free_and_replace(c->zone, t);
 
         c->local_rtc = clock_is_localtime(NULL) > 0;
 
@@ -413,7 +412,7 @@ static int method_set_timezone(sd_bus_message *m, void *userdata, sd_bus_error *
         }
 
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_TIMEZONE_CHANGE),
+                   "MESSAGE_ID=" SD_MESSAGE_TIMEZONE_CHANGE_STR,
                    "TIMEZONE=%s", c->zone,
                    LOG_MESSAGE("Changed time zone to '%s'.", c->zone),
                    NULL);
@@ -591,7 +590,7 @@ static int method_set_time(sd_bus_message *m, void *userdata, sd_bus_error *erro
         clock_set_hwclock(tm);
 
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_TIME_CHANGE),
+                   "MESSAGE_ID=" SD_MESSAGE_TIME_CHANGE_STR,
                    "REALTIME="USEC_FMT, timespec_load(&ts),
                    LOG_MESSAGE("Changed local time to %s", ctime(&ts.tv_sec)),
                    NULL);
@@ -676,9 +675,9 @@ static int connect_bus(Context *c, sd_event *event, sd_bus **_bus) {
         if (r < 0)
                 return log_error_errno(r, "Failed to register object: %m");
 
-        r = sd_bus_request_name(bus, "org.freedesktop.timedate1", 0);
+        r = sd_bus_request_name_async(bus, NULL, "org.freedesktop.timedate1", 0, NULL, NULL);
         if (r < 0)
-                return log_error_errno(r, "Failed to register name: %m");
+                return log_error_errno(r, "Failed to request name: %m");
 
         r = sd_bus_attach_event(bus, event, 0);
         if (r < 0)

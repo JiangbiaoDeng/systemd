@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,6 +20,7 @@
 
 #include <linux/veth.h>
 #include <net/if.h>
+#include <sys/file.h>
 
 #include "libudev.h"
 #include "sd-id128.h"

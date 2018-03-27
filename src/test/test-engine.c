@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -30,18 +31,23 @@
 int main(int argc, char *argv[]) {
         _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error err = SD_BUS_ERROR_NULL;
-        Manager *m = NULL;
+        _cleanup_(manager_freep) Manager *m = NULL;
         Unit *a = NULL, *b = NULL, *c = NULL, *d = NULL, *e = NULL, *g = NULL, *h = NULL;
         FILE *serial = NULL;
         FDSet *fdset = NULL;
         Job *j;
         int r;
 
-        assert_se(runtime_dir = setup_fake_runtime_dir());
+        r = enter_cgroup_subroot();
+        if (r == -ENOMEDIUM) {
+                log_notice_errno(r, "Skipping test: cgroupfs not available");
+                return EXIT_TEST_SKIP;
+        }
 
         /* prepare the test */
-        assert_se(set_unit_path(TEST_DIR) >= 0);
-        r = manager_new(UNIT_FILE_USER, true, &m);
+        assert_se(set_unit_path(get_testdata_dir("")) >= 0);
+        assert_se(runtime_dir = setup_fake_runtime_dir());
+        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_BASIC, &m);
         if (MANAGER_SKIP_TEST(r)) {
                 log_notice_errno(r, "Skipping test: manager_new: %m");
                 return EXIT_TEST_SKIP;
@@ -110,7 +116,32 @@ int main(int argc, char *argv[]) {
         assert_se(manager_add_job(m, JOB_START, h, JOB_FAIL, NULL, &j) == 0);
         manager_dump_jobs(m, stdout, "\t");
 
-        manager_free(m);
+        assert_se(!hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], b));
+        assert_se(!hashmap_get(b->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
+        assert_se(!hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], c));
+        assert_se(!hashmap_get(c->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
+
+        assert_se(unit_add_dependency(a, UNIT_PROPAGATES_RELOAD_TO, b, true, UNIT_DEPENDENCY_UDEV) == 0);
+        assert_se(unit_add_dependency(a, UNIT_PROPAGATES_RELOAD_TO, c, true, UNIT_DEPENDENCY_PROC_SWAP) == 0);
+
+        assert_se(hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], b));
+        assert_se(hashmap_get(b->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
+        assert_se(hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], c));
+        assert_se(hashmap_get(c->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
+
+        unit_remove_dependencies(a, UNIT_DEPENDENCY_UDEV);
+
+        assert_se(!hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], b));
+        assert_se(!hashmap_get(b->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
+        assert_se(hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], c));
+        assert_se(hashmap_get(c->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
+
+        unit_remove_dependencies(a, UNIT_DEPENDENCY_PROC_SWAP);
+
+        assert_se(!hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], b));
+        assert_se(!hashmap_get(b->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
+        assert_se(!hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], c));
+        assert_se(!hashmap_get(c->dependencies[UNIT_RELOAD_PROPAGATED_FROM], a));
 
         return 0;
 }

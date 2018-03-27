@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -36,6 +37,7 @@
 #define SPECIAL_SUSPEND_TARGET "suspend.target"
 #define SPECIAL_HIBERNATE_TARGET "hibernate.target"
 #define SPECIAL_HYBRID_SLEEP_TARGET "hybrid-sleep.target"
+#define SPECIAL_SUSPEND_TO_HIBERNATE_TARGET "suspend-to-hibernate.target"
 
 /* Special boot targets */
 #define SPECIAL_RESCUE_TARGET "rescue.target"
@@ -46,7 +48,6 @@
 /* Early boot targets */
 #define SPECIAL_SYSINIT_TARGET "sysinit.target"
 #define SPECIAL_SOCKETS_TARGET "sockets.target"
-#define SPECIAL_BUSNAMES_TARGET "busnames.target"
 #define SPECIAL_TIMERS_TARGET "timers.target"
 #define SPECIAL_PATHS_TARGET "paths.target"
 #define SPECIAL_LOCAL_FS_TARGET "local-fs.target"
@@ -103,6 +104,7 @@
 #define SPECIAL_DBUS_SOCKET "dbus.socket"
 #define SPECIAL_JOURNALD_SOCKET "systemd-journald.socket"
 #define SPECIAL_JOURNALD_SERVICE "systemd-journald.service"
+#define SPECIAL_TMPFILES_SETUP_SERVICE "systemd-tmpfiles-setup.service"
 
 /* Magic init signals */
 #define SPECIAL_KBREQUEST_TARGET "kbrequest.target"

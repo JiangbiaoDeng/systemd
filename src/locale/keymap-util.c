@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,6 +20,7 @@
 ***/
 
 #include <errno.h>
+#include <stdio_ext.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -39,7 +41,7 @@ static bool startswith_comma(const char *s, const char *prefix) {
         if (!s)
                 return false;
 
-        return *s == ',' || *s == '\0';
+        return IN_SET(*s, ',', '\0');
 }
 
 static const char* strnulldash(const char *s) {
@@ -177,7 +179,7 @@ static int x11_read_data(Context *c) {
                 char_array_0(line);
                 l = strstrip(line);
 
-                if (l[0] == 0 || l[0] == '#')
+                if (IN_SET(l[0], 0, '#'))
                         continue;
 
                 if (in_section && first_word(l, "Option")) {
@@ -200,9 +202,7 @@ static int x11_read_data(Context *c) {
                                         p = &c->x11_options;
 
                                 if (p) {
-                                        free(*p);
-                                        *p = a[2];
-                                        a[2] = NULL;
+                                        free_and_replace(*p, a[2]);
                                 }
                         }
 
@@ -278,8 +278,7 @@ int locale_write_data(Context *c, char ***settings) {
         if (r < 0)
                 return r;
 
-        *settings = l;
-        l = NULL;
+        *settings = TAKE_PTR(l);
         return 0;
 }
 
@@ -359,10 +358,12 @@ int x11_write_data(Context *c) {
         if (r < 0)
                 return r;
 
-        fchmod(fileno(f), 0644);
+        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+        (void) fchmod(fileno(f), 0644);
 
-        fputs("# Read and parsed by systemd-localed. It's probably wise not to edit this file\n"
-              "# manually too freely.\n"
+        fputs("# Written by systemd-localed(8), read by systemd-localed and Xorg. It's\n"
+              "# probably wise not to edit this file manually. Use localectl(1) to\n"
+              "# instruct systemd-localed to update it.\n"
               "Section \"InputClass\"\n"
               "        Identifier \"system-keyboard\"\n"
               "        MatchIsKeyboard \"on\"\n", f);
@@ -381,7 +382,7 @@ int x11_write_data(Context *c) {
 
         fputs("EndSection\n", f);
 
-        r = fflush_and_check(f);
+        r = fflush_sync_and_check(f);
         if (r < 0)
                 goto fail;
 
@@ -393,8 +394,6 @@ int x11_write_data(Context *c) {
         return 0;
 
 fail:
-        (void) unlink("/etc/X11/xorg.conf.d/00-keyboard.conf");
-
         if (temp_path)
                 (void) unlink(temp_path);
 
@@ -426,7 +425,7 @@ static int read_next_mapping(const char* filename,
                 (*n)++;
 
                 l = strstrip(line);
-                if (l[0] == 0 || l[0] == '#')
+                if (IN_SET(l[0], 0, '#'))
                         continue;
 
                 r = strv_split_extract(&b, l, WHITESPACE, EXTRACT_QUOTES);
@@ -539,8 +538,7 @@ int find_converted_keymap(const char *x11_layout, const char *x11_variant, char 
                         log_debug("Found converted keymap %s at %s",
                                   n, uncompressed ? p : pz);
 
-                        *new_keymap = n;
-                        n = NULL;
+                        *new_keymap = TAKE_PTR(n);
                         return 1;
                 }
         }

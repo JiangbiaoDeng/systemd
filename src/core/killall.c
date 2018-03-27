@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -24,6 +25,7 @@
 
 #include "alloc-util.h"
 #include "def.h"
+#include "dirent-util.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "killall.h"
@@ -65,32 +67,29 @@ static bool ignore_proc(pid_t pid, bool warn_rootfs) {
         if (count <= 0)
                 return true;
 
-        /* Processes with argv[0][0] = '@' we ignore from the killing
-         * spree.
+        /* Processes with argv[0][0] = '@' we ignore from the killing spree.
          *
          * http://www.freedesktop.org/wiki/Software/systemd/RootStorageDaemons */
-        if (c == '@' && warn_rootfs) {
-                _cleanup_free_ char *comm = NULL;
+        if (c != '@')
+                return false;
 
-                r = pid_from_same_root_fs(pid);
-                if (r < 0)
-                        return true;
+        if (warn_rootfs &&
+            pid_from_same_root_fs(pid) == 0) {
+
+                _cleanup_free_ char *comm = NULL;
 
                 get_process_comm(pid, &comm);
 
-                if (r)
-                        log_notice("Process " PID_FMT " (%s) has been marked to be excluded from killing. It is "
-                                   "running from the root file system, and thus likely to block re-mounting of the "
-                                   "root file system to read-only. Please consider moving it into an initrd file "
-                                   "system instead.", pid, strna(comm));
-                return true;
-        } else if (c == '@')
-                return true;
+                log_notice("Process " PID_FMT " (%s) has been marked to be excluded from killing. It is "
+                           "running from the root file system, and thus likely to block re-mounting of the "
+                           "root file system to read-only. Please consider moving it into an initrd file "
+                           "system instead.", pid, strna(comm));
+        }
 
-        return false;
+        return true;
 }
 
-static void wait_for_children(Set *pids, sigset_t *mask) {
+static void wait_for_children(Set *pids, sigset_t *mask, usec_t timeout) {
         usec_t until;
 
         assert(mask);
@@ -98,7 +97,7 @@ static void wait_for_children(Set *pids, sigset_t *mask) {
         if (set_isempty(pids))
                 return;
 
-        until = now(CLOCK_MONOTONIC) + DEFAULT_TIMEOUT_USEC;
+        until = now(CLOCK_MONOTONIC) + timeout;
         for (;;) {
                 struct timespec ts;
                 int k;
@@ -131,9 +130,9 @@ static void wait_for_children(Set *pids, sigset_t *mask) {
                  * might not be our child. */
                 SET_FOREACH(p, pids, i) {
 
-                        /* We misuse getpgid as a check whether a
-                         * process still exists. */
-                        if (getpgid(PTR_TO_PID(p)) >= 0)
+                        /* kill(pid, 0) sends no signal, but it tells
+                         * us whether the process still exists. */
+                        if (kill(PTR_TO_PID(p), 0) == 0)
                                 continue;
 
                         if (errno != ESRCH)
@@ -172,12 +171,11 @@ static int killall(int sig, Set *pids, bool send_sighup) {
         if (!dir)
                 return -errno;
 
-        while ((d = readdir(dir))) {
+        FOREACH_DIRENT_ALL(d, dir, break) {
                 pid_t pid;
                 int r;
 
-                if (d->d_type != DT_DIR &&
-                    d->d_type != DT_UNKNOWN)
+                if (!IN_SET(d->d_type, DT_DIR, DT_UNKNOWN))
                         continue;
 
                 if (parse_pid(d->d_name, &pid) < 0)
@@ -215,14 +213,15 @@ static int killall(int sig, Set *pids, bool send_sighup) {
 
 
                         if (get_ctty_devnr(pid, NULL) >= 0)
-                                kill(pid, SIGHUP);
+                                /* it's OK if the process is gone, just ignore the result */
+                                (void) kill(pid, SIGHUP);
                 }
         }
 
         return set_size(pids);
 }
 
-void broadcast_signal(int sig, bool wait_for_exit, bool send_sighup) {
+void broadcast_signal(int sig, bool wait_for_exit, bool send_sighup, usec_t timeout) {
         sigset_t mask, oldmask;
         _cleanup_set_free_ Set *pids = NULL;
 
@@ -242,7 +241,7 @@ void broadcast_signal(int sig, bool wait_for_exit, bool send_sighup) {
                 log_warning_errno(errno, "kill(-1, SIGCONT) failed: %m");
 
         if (wait_for_exit)
-                wait_for_children(pids, &mask);
+                wait_for_children(pids, &mask, timeout);
 
         assert_se(sigprocmask(SIG_SETMASK, &oldmask, NULL) == 0);
 }

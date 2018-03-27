@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -137,7 +138,8 @@ int main(int argc, char *argv[]) {
         if (argc > 1)
                 arg_dest = argv[1];
 
-        log_set_target(LOG_TARGET_SAFE);
+        log_set_prohibit_ipc(true);
+        log_set_target(LOG_TARGET_AUTO);
         log_parse_environment();
         log_open();
 
@@ -201,15 +203,15 @@ int main(int argc, char *argv[]) {
                                 return EXIT_FAILURE;
                         }
 
+                        /* We assume that gettys on virtual terminals are
+                         * started via manual configuration and do this magic
+                         * only for non-VC terminals. */
+
                         if (isempty(tty) || tty_is_vc(tty))
                                 continue;
 
                         if (verify_tty(tty) < 0)
                                 continue;
-
-                        /* We assume that gettys on virtual terminals are
-                         * started via manual configuration and do this magic
-                         * only for non-VC terminals. */
 
                         if (add_serial_getty(tty) < 0)
                                 return EXIT_FAILURE;

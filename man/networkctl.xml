@@ -3,6 +3,8 @@
 "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2015 Zbigniew Jędrzejewski-Szmek
@@ -102,7 +104,7 @@
       <varlistentry>
         <term>
           <command>list</command>
-          <optional><replaceable>LINK...</replaceable></optional>
+          <optional><replaceable>LINK…</replaceable></optional>
         </term>
 
         <listitem>
@@ -122,7 +124,7 @@
       <varlistentry>
         <term>
           <command>status</command>
-          <optional><replaceable>LINK...</replaceable></optional>
+          <optional><replaceable>LINK…</replaceable></optional>
         </term>
 
         <listitem>
@@ -150,7 +152,7 @@
       <varlistentry>
         <term>
           <command>lldp</command>
-          <optional><replaceable>LINK...</replaceable></optional>
+          <optional><replaceable>LINK…</replaceable></optional>
         </term>
 
         <listitem>
@@ -172,14 +174,40 @@ s - Service VLAN, m - Two-port MAC Relay (TPMR)
 1 neighbors listed.</programlisting></para>
         </listitem>
       </varlistentry>
+
+      <varlistentry>
+        <term>
+          <command>label</command>
+        </term>
+
+        <listitem><para>Show numerical address labels that can be used for address selection.
+        This is the same information that
+        <citerefentry><refentrytitle>ip-addrlabel</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+        shows. See <ulink url="https://tools.ietf.org/html/rfc3484">RFC 3484</ulink>
+        for a discussion of address labels.</para>
+
+        <para>Produces output similar to:
+        <programlisting>Prefix/Prefixlen                          Label
+        ::/0                                  1
+    fc00::/7                                  5
+    fec0::/10                                11
+    2002::/16                                 2
+    3ffe::/16                                12
+ 2001:10::/28                                 7
+    2001::/32                                 6
+::ffff:0.0.0.0/96                             4
+        ::/96                                 3
+       ::1/128                                0</programlisting></para>
+        </listitem>
+      </varlistentry>
+
     </variablelist>
   </refsect1>
 
   <refsect1>
     <title>Exit status</title>
 
-    <para>On success, 0 is returned, a non-zero failure
-    code otherwise.</para>
+    <para>On success, 0 is returned, a non-zero failure code otherwise.</para>
   </refsect1>
 
   <refsect1>
@@ -187,7 +215,8 @@ s - Service VLAN, m - Two-port MAC Relay (TPMR)
     <para>
       <citerefentry><refentrytitle>systemd-networkd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.network</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+      <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
+      <citerefentry project='die-net'><refentrytitle>ip</refentrytitle><manvolnum>8</manvolnum></citerefentry>
     </para>
   </refsect1>
 </refentry>

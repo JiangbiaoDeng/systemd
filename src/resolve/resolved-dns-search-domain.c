@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -55,8 +56,7 @@ int dns_search_domain_new(
         d->n_ref = 1;
         d->manager = m;
         d->type = type;
-        d->name = normalized;
-        normalized = NULL;
+        d->name = TAKE_PTR(normalized);
 
         switch (type) {
 

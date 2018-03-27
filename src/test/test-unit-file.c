@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -55,7 +56,7 @@ static int test_unit_file_get_set(void) {
 
         r = unit_file_get_list(UNIT_FILE_SYSTEM, NULL, h, NULL, NULL);
 
-        if (r == -EPERM || r == -EACCES) {
+        if (IN_SET(r, -EPERM, -EACCES)) {
                 log_notice_errno(r, "Skipping test: unit_file_get_list: %m");
                 return EXIT_TEST_SKIP;
         }
@@ -93,7 +94,7 @@ static void check_execcommand(ExecCommand *c,
                 assert_se(streq_ptr(c->argv[1], argv1));
         if (n > 1)
                 assert_se(streq_ptr(c->argv[2], argv2));
-        assert_se(c->ignore == ignore);
+        assert_se(!!(c->flags & EXEC_COMMAND_IGNORE_FAILURE) == ignore);
 }
 
 static void test_config_parse_exec(void) {
@@ -112,10 +113,10 @@ static void test_config_parse_exec(void) {
 
         ExecCommand *c = NULL, *c1;
         const char *ccc;
-        Manager *m = NULL;
-        Unit *u = NULL;
+        _cleanup_(manager_freep) Manager *m = NULL;
+        _cleanup_(unit_freep) Unit *u = NULL;
 
-        r = manager_new(UNIT_FILE_USER, true, &m);
+        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_MINIMAL, &m);
         if (MANAGER_SKIP_TEST(r)) {
                 log_notice_errno(r, "Skipping test: manager_new: %m");
                 return;
@@ -146,7 +147,7 @@ static void test_config_parse_exec(void) {
         r = config_parse_exec(NULL, "fake", 4, "section", 1,
                               "LValue", 0, "/RValue/ argv0 r1",
                               &c, u);
-        assert_se(r == 0);
+        assert_se(r == -ENOEXEC);
         assert_se(c1->command_next == NULL);
 
         log_info("/* honour_argv0 */");
@@ -161,7 +162,7 @@ static void test_config_parse_exec(void) {
         r = config_parse_exec(NULL, "fake", 3, "section", 1,
                               "LValue", 0, "@/RValue",
                               &c, u);
-        assert_se(r == 0);
+        assert_se(r == -ENOEXEC);
         assert_se(c1->command_next == NULL);
 
         log_info("/* no command, whitespace only, reset */");
@@ -220,7 +221,7 @@ static void test_config_parse_exec(void) {
                               "-@/RValue argv0 r1 ; ; "
                               "/goo/goo boo",
                               &c, u);
-        assert_se(r >= 0);
+        assert_se(r == -ENOEXEC);
         c1 = c1->command_next;
         check_execcommand(c1, "/RValue", "argv0", "r1", NULL, true);
 
@@ -374,7 +375,7 @@ static void test_config_parse_exec(void) {
                 r = config_parse_exec(NULL, "fake", 4, "section", 1,
                                       "LValue", 0, path,
                                       &c, u);
-                assert_se(r == 0);
+                assert_se(r == -ENOEXEC);
                 assert_se(c1->command_next == NULL);
         }
 
@@ -401,21 +402,21 @@ static void test_config_parse_exec(void) {
         r = config_parse_exec(NULL, "fake", 4, "section", 1,
                               "LValue", 0, "/path\\",
                               &c, u);
-        assert_se(r == 0);
+        assert_se(r == -ENOEXEC);
         assert_se(c1->command_next == NULL);
 
         log_info("/* missing ending ' */");
         r = config_parse_exec(NULL, "fake", 4, "section", 1,
                               "LValue", 0, "/path 'foo",
                               &c, u);
-        assert_se(r == 0);
+        assert_se(r == -ENOEXEC);
         assert_se(c1->command_next == NULL);
 
         log_info("/* missing ending ' with trailing backslash */");
         r = config_parse_exec(NULL, "fake", 4, "section", 1,
                               "LValue", 0, "/path 'foo\\",
                               &c, u);
-        assert_se(r == 0);
+        assert_se(r == -ENOEXEC);
         assert_se(c1->command_next == NULL);
 
         log_info("/* invalid space between modifiers */");
@@ -440,9 +441,70 @@ static void test_config_parse_exec(void) {
         assert_se(c == NULL);
 
         exec_command_free_list(c);
+}
 
-        unit_free(u);
-        manager_free(m);
+static void test_config_parse_log_extra_fields(void) {
+        /* int config_parse_log_extra_fields(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) */
+
+        int r;
+
+        _cleanup_(manager_freep) Manager *m = NULL;
+        _cleanup_(unit_freep) Unit *u = NULL;
+        ExecContext c = {};
+
+        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_MINIMAL, &m);
+        if (MANAGER_SKIP_TEST(r)) {
+                log_notice_errno(r, "Skipping test: manager_new: %m");
+                return;
+        }
+
+        assert_se(r >= 0);
+        assert_se(manager_startup(m, NULL, NULL) >= 0);
+
+        assert_se(u = unit_new(m, sizeof(Service)));
+
+        log_info("/* %s – basic test */", __func__);
+        r = config_parse_log_extra_fields(NULL, "fake", 1, "section", 1,
+                                          "LValue", 0, "FOO=BAR \"QOOF=quux '  ' \"",
+                                          &c, u);
+        assert_se(r >= 0);
+        assert_se(c.n_log_extra_fields == 2);
+        assert_se(strneq(c.log_extra_fields[0].iov_base, "FOO=BAR", c.log_extra_fields[0].iov_len));
+        assert_se(strneq(c.log_extra_fields[1].iov_base, "QOOF=quux '  ' ", c.log_extra_fields[1].iov_len));
+
+        log_info("/* %s – add some */", __func__);
+        r = config_parse_log_extra_fields(NULL, "fake", 1, "section", 1,
+                                          "LValue", 0, "FOO2=BAR2 QOOF2=quux '  '",
+                                          &c, u);
+        assert_se(r >= 0);
+        assert_se(c.n_log_extra_fields == 4);
+        assert_se(strneq(c.log_extra_fields[0].iov_base, "FOO=BAR", c.log_extra_fields[0].iov_len));
+        assert_se(strneq(c.log_extra_fields[1].iov_base, "QOOF=quux '  ' ", c.log_extra_fields[1].iov_len));
+        assert_se(strneq(c.log_extra_fields[2].iov_base, "FOO2=BAR2", c.log_extra_fields[2].iov_len));
+        assert_se(strneq(c.log_extra_fields[3].iov_base, "QOOF2=quux", c.log_extra_fields[3].iov_len));
+
+        exec_context_dump(&c, stdout, "    --> ");
+
+        log_info("/* %s – reset */", __func__);
+        r = config_parse_log_extra_fields(NULL, "fake", 1, "section", 1,
+                                          "LValue", 0, "",
+                                          &c, u);
+        assert_se(r >= 0);
+        assert_se(c.n_log_extra_fields == 0);
+
+        exec_context_free_log_extra_fields(&c);
+
+        log_info("/* %s – bye */", __func__);
 }
 
 #define env_file_1                              \
@@ -670,6 +732,12 @@ static void test_config_parse_capability_set(void) {
         assert_se(capability_bounding_set == (make_cap(CAP_NET_RAW) | make_cap(CAP_NET_ADMIN)));
 
         r = config_parse_capability_set(NULL, "fake", 1, "section", 1,
+                              "CapabilityBoundingSet", 0, "~CAP_NET_ADMIN",
+                              &capability_bounding_set, NULL);
+        assert_se(r >= 0);
+        assert_se(capability_bounding_set == make_cap(CAP_NET_RAW));
+
+        r = config_parse_capability_set(NULL, "fake", 1, "section", 1,
                               "CapabilityBoundingSet", 0, "",
                               &capability_bounding_set, NULL);
         assert_se(r >= 0);
@@ -841,6 +909,10 @@ static void test_config_parse_pass_environ(void) {
 
 }
 
+static void test_unit_dump_config_items(void) {
+        unit_dump_config_items(stdout);
+}
+
 int main(int argc, char *argv[]) {
         _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
         int r;
@@ -848,10 +920,17 @@ int main(int argc, char *argv[]) {
         log_parse_environment();
         log_open();
 
+        r = enter_cgroup_subroot();
+        if (r == -ENOMEDIUM) {
+                log_notice_errno(r, "Skipping test: cgroupfs not available");
+                return EXIT_TEST_SKIP;
+        }
+
         assert_se(runtime_dir = setup_fake_runtime_dir());
 
         r = test_unit_file_get_set();
         test_config_parse_exec();
+        test_config_parse_log_extra_fields();
         test_config_parse_capability_set();
         test_config_parse_rlimit();
         test_config_parse_pass_environ();
@@ -861,6 +940,7 @@ int main(int argc, char *argv[]) {
         test_load_env_file_4();
         test_load_env_file_5();
         TEST_REQ_RUNNING_SYSTEMD(test_install_printf());
+        test_unit_dump_config_items();
 
         return r;
 }

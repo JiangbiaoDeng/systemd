@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -396,7 +397,7 @@ static int method_take_control(sd_bus_message *message, void *userdata, sd_bus_e
         if (uid != 0 && (force || uid != s->user->uid))
                 return sd_bus_error_setf(error, SD_BUS_ERROR_ACCESS_DENIED, "Only owner of session may take control");
 
-        r = session_set_controller(s, sd_bus_message_get_sender(message), force);
+        r = session_set_controller(s, sd_bus_message_get_sender(message), force, true);
         if (r < 0)
                 return r;
 
@@ -444,14 +445,23 @@ static int method_take_device(sd_bus_message *message, void *userdata, sd_bus_er
                  * equivalent). */
                 return sd_bus_error_setf(error, BUS_ERROR_DEVICE_IS_TAKEN, "Device already taken");
 
-        r = session_device_new(s, dev, &sd);
+        r = session_device_new(s, dev, true, &sd);
         if (r < 0)
                 return r;
 
+        r = session_device_save(sd);
+        if (r < 0)
+                goto error;
+
         r = sd_bus_reply_method_return(message, "hb", sd->fd, !sd->active);
         if (r < 0)
-                session_device_free(sd);
+                goto error;
 
+        session_save(s);
+        return 1;
+
+error:
+        session_device_free(sd);
         return r;
 }
 
@@ -478,6 +488,8 @@ static int method_release_device(sd_bus_message *message, void *userdata, sd_bus
                 return sd_bus_error_setf(error, BUS_ERROR_DEVICE_NOT_TAKEN, "Device not taken");
 
         session_device_free(sd);
+        session_save(s);
+
         return sd_bus_reply_method_return(message, NULL);
 }
 
@@ -569,23 +581,15 @@ int session_object_find(sd_bus *bus, const char *path, const char *interface, vo
         assert(m);
 
         if (streq(path, "/org/freedesktop/login1/session/self")) {
-                _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
                 sd_bus_message *message;
-                const char *name;
 
                 message = sd_bus_get_current_message(bus);
                 if (!message)
                         return 0;
 
-                r = sd_bus_query_sender_creds(message, SD_BUS_CREDS_SESSION|SD_BUS_CREDS_AUGMENT, &creds);
+                r = manager_get_session_from_creds(m, message, NULL, error, &session);
                 if (r < 0)
                         return r;
-
-                r = sd_bus_creds_get_session(creds, &name);
-                if (r < 0)
-                        return r;
-
-                session = hashmap_get(m->sessions, name);
         } else {
                 _cleanup_free_ char *e = NULL;
                 const char *p;
@@ -599,10 +603,9 @@ int session_object_find(sd_bus *bus, const char *path, const char *interface, vo
                         return -ENOMEM;
 
                 session = hashmap_get(m->sessions, e);
+                if (!session)
+                        return 0;
         }
-
-        if (!session)
-                return 0;
 
         *found = session;
         return 1;

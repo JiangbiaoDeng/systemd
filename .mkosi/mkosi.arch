@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-2.1+
+#
 # This file is part of systemd.
 #
 # Copyright 2016 Zeal Jagannatha
@@ -32,8 +34,6 @@ RootSize=2G
 Cache=/var/cache/pacman/pkg/
 BuildPackages=
         acl
-        autoconf
-        automake
         bzip2
         cryptsetup
         curl
@@ -41,16 +41,16 @@ BuildPackages=
         docbook-xsl
         elfutils
         gcc
+        gettext
         git
         gnu-efi-libs
         gnutls
         gperf
-        intltool
         iptables
         kmod
         libcap
         libgcrypt
-        libidn
+        libidn2
         libmicrohttpd
         libseccomp
         libtool
@@ -58,10 +58,14 @@ BuildPackages=
         libxkbcommon
         libxslt
         lz4
-        make
+        m4
+        meson
         pam
         pkgconfig
         python
         python-lxml
         qrencode
         xz
+
+Packages=
+        libidn2

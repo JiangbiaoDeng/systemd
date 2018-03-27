@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -24,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sd-id128.h"
 #include "sd-ipv4acd.h"
 #include "sd-ipv4ll.h"
 
@@ -246,6 +248,12 @@ static int ipv4ll_pick_address(sd_ipv4ll *ll) {
         log_ipv4ll(ll, "Picked new IP address %s.", strna(address));
 
         return sd_ipv4ll_set_address(ll, &(struct in_addr) { addr });
+}
+
+int sd_ipv4ll_restart(sd_ipv4ll *ll) {
+        ll->address = 0;
+
+        return sd_ipv4ll_start(ll);
 }
 
 #define MAC_HASH_KEY SD_ID128_MAKE(df,04,22,98,3f,ad,14,52,f9,87,2e,d1,9c,70,e2,f2)

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -146,7 +147,7 @@ static int verify_socket(Unit *u) {
 }
 
 static int verify_executable(Unit *u, ExecCommand *exec) {
-        if (exec == NULL)
+        if (!exec)
                 return 0;
 
         if (access(exec->path, X_OK) < 0)
@@ -219,7 +220,7 @@ static int verify_unit(Unit *u, bool check_man) {
 
         assert(u);
 
-        if (log_get_max_level() >= LOG_DEBUG)
+        if (DEBUG_LOGGING)
                 unit_dump(u, stdout, "\t");
 
         log_unit_debug(u, "Creating %s/start job", u->id);
@@ -242,7 +243,7 @@ static int verify_unit(Unit *u, bool check_man) {
         return r;
 }
 
-int verify_units(char **filenames, UnitFileScope scope, bool check_man) {
+int verify_units(char **filenames, UnitFileScope scope, bool check_man, bool run_generators) {
         _cleanup_(sd_bus_error_free) sd_bus_error err = SD_BUS_ERROR_NULL;
         _cleanup_free_ char *var = NULL;
         Manager *m = NULL;
@@ -253,6 +254,9 @@ int verify_units(char **filenames, UnitFileScope scope, bool check_man) {
 
         Unit *units[strv_length(filenames)];
         int i, count = 0;
+        const uint8_t flags = MANAGER_TEST_RUN_BASIC |
+                              MANAGER_TEST_RUN_ENV_GENERATORS |
+                              run_generators * MANAGER_TEST_RUN_GENERATORS;
 
         if (strv_isempty(filenames))
                 return 0;
@@ -264,7 +268,7 @@ int verify_units(char **filenames, UnitFileScope scope, bool check_man) {
 
         assert_se(set_unit_path(var) >= 0);
 
-        r = manager_new(scope, true, &m);
+        r = manager_new(scope, flags, &m);
         if (r < 0)
                 return log_error_errno(r, "Failed to initialize manager: %m");
 

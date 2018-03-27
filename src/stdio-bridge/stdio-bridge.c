@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -43,7 +44,7 @@ static int help(void) {
                "STDIO or socket-activatable proxy to a given DBus endpoint.\n\n"
                "  -h --help              Show this help\n"
                "     --version           Show package version\n"
-               "     --bus-path=PATH     Path to the kernel bus (default: %s)\n",
+               "  -p --bus-path=PATH     Path to the kernel bus (default: %s)\n",
                program_invocation_short_name, DEFAULT_BUS_PATH);
 
         return 0;
@@ -56,9 +57,10 @@ static int parse_argv(int argc, char *argv[]) {
         };
 
         static const struct option options[] = {
-                { "help",            no_argument,       NULL, 'h'     },
-                { "bus-path",        required_argument, NULL, 'p'     },
-                { NULL,              0,                 NULL, 0       }
+                { "help",            no_argument,       NULL, 'h'         },
+                { "version",         no_argument,       NULL, ARG_VERSION },
+                { "bus-path",        required_argument, NULL, 'p'         },
+                {},
         };
 
         int c;
@@ -115,7 +117,7 @@ int main(int argc, char *argv[]) {
                 in_fd = SD_LISTEN_FDS_START;
                 out_fd = SD_LISTEN_FDS_START;
         } else {
-                log_error("Illegal number of file descriptors passed\n");
+                log_error("Illegal number of file descriptors passed.");
                 goto finish;
         }
 
@@ -190,7 +192,7 @@ int main(int argc, char *argv[]) {
         }
 
         for (;;) {
-                _cleanup_(sd_bus_message_unrefp)sd_bus_message *m = NULL;
+                _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
                 int events_a, events_b, fd;
                 uint64_t timeout_a, timeout_b, t;
                 struct timespec _ts, *ts;
@@ -292,7 +294,7 @@ int main(int argc, char *argv[]) {
                         r = ppoll(p, ELEMENTSOF(p), ts, NULL);
                 }
                 if (r < 0) {
-                        log_error("ppoll() failed: %m");
+                        log_error_errno(errno, "ppoll() failed: %m");
                         goto finish;
                 }
         }

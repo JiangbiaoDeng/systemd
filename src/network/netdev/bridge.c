@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
     This file is part of systemd.
 
@@ -24,6 +25,7 @@
 #include "netlink-util.h"
 #include "netdev/bridge.h"
 #include "networkd-manager.h"
+#include "vlan-util.h"
 
 /* callback for brige netdev's parameter set */
 static int netdev_bridge_set_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata) {
@@ -72,7 +74,7 @@ static int netdev_bridge_post_create(NetDev *netdev, Link *link, sd_netlink_mess
                 return log_netdev_error_errno(netdev, r, "Could not append IFLA_INFO_DATA attribute: %m");
 
         /* convert to jiffes */
-        if (b->forward_delay > 0) {
+        if (b->forward_delay != USEC_INFINITY) {
                 r = sd_netlink_message_append_u32(req, IFLA_BR_FORWARD_DELAY, usec_to_jiffies(b->forward_delay));
                 if (r < 0)
                         return log_netdev_error_errno(netdev, r, "Could not append IFLA_BR_FORWARD_DELAY attribute: %m");
@@ -90,7 +92,7 @@ static int netdev_bridge_post_create(NetDev *netdev, Link *link, sd_netlink_mess
                         return log_netdev_error_errno(netdev, r, "Could not append IFLA_BR_MAX_AGE attribute: %m");
         }
 
-        if (b->ageing_time > 0) {
+        if (b->ageing_time != USEC_INFINITY) {
                 r = sd_netlink_message_append_u32(req, IFLA_BR_AGEING_TIME, usec_to_jiffies(b->ageing_time));
                 if (r < 0)
                         return log_netdev_error_errno(netdev, r, "Could not append IFLA_BR_AGEING_TIME attribute: %m");
@@ -102,7 +104,13 @@ static int netdev_bridge_post_create(NetDev *netdev, Link *link, sd_netlink_mess
                         return log_netdev_error_errno(netdev, r, "Could not append IFLA_BR_PRIORITY attribute: %m");
         }
 
-        if (b->default_pvid > 0) {
+        if (b->group_fwd_mask > 0) {
+                r = sd_netlink_message_append_u16(req, IFLA_BR_GROUP_FWD_MASK, b->group_fwd_mask);
+                if (r < 0)
+                        return log_netdev_error_errno(netdev, r, "Could not append IFLA_BR_GROUP_FWD_MASK attribute: %m");
+        }
+
+        if (b->default_pvid != VLANID_INVALID) {
                 r = sd_netlink_message_append_u16(req, IFLA_BR_VLAN_DEFAULT_PVID, b->default_pvid);
                 if (r < 0)
                         return log_netdev_error_errno(netdev, r, "Could not append IFLA_BR_VLAN_DEFAULT_PVID attribute: %m");
@@ -160,6 +168,9 @@ static void bridge_init(NetDev *n) {
         b->mcast_snooping = -1;
         b->vlan_filtering = -1;
         b->stp = -1;
+        b->default_pvid = VLANID_INVALID;
+        b->forward_delay = USEC_INFINITY;
+        b->ageing_time = USEC_INFINITY;
 }
 
 const NetDevVTable bridge_vtable = {

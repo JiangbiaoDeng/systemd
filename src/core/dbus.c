@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -36,9 +37,11 @@
 #include "dbus-unit.h"
 #include "dbus.h"
 #include "fd-util.h"
+#include "fs-util.h"
 #include "log.h"
 #include "missing.h"
 #include "mkdir.h"
+#include "process-util.h"
 #include "selinux-access.h"
 #include "special.h"
 #include "string-util.h"
@@ -92,7 +95,7 @@ int bus_forward_agent_released(Manager *m, const char *path) {
                                "Released",
                                "s", path);
         if (r < 0)
-                return log_warning_errno(r, "Failed to propagate agent release message: %m");
+                return log_debug_errno(r, "Failed to propagate agent release message: %m");
 
         return 1;
 }
@@ -136,9 +139,10 @@ static int signal_disconnected(sd_bus_message *message, void *userdata, sd_bus_e
         assert_se(bus = sd_bus_message_get_bus(message));
 
         if (bus == m->api_bus)
-                destroy_bus(m, &m->api_bus);
+                bus_done_api(m);
         if (bus == m->system_bus)
-                destroy_bus(m, &m->system_bus);
+                bus_done_system(m);
+
         if (set_remove(m->private_buses, bus)) {
                 log_debug("Got disconnect on private connection.");
                 destroy_bus(m, &bus);
@@ -175,7 +179,7 @@ static int signal_activation_request(sd_bus_message *message, void *userdata, sd
                 goto failed;
 
         if (u->refuse_manual_start) {
-                r = sd_bus_error_setf(&error, BUS_ERROR_ONLY_BY_DEPENDENCY, "Operation refused, %s may be requested by dependency only.", u->id);
+                r = sd_bus_error_setf(&error, BUS_ERROR_ONLY_BY_DEPENDENCY, "Operation refused, %s may be requested by dependency only (it is configured to refuse manual start/stop).", u->id);
                 goto failed;
         }
 
@@ -211,7 +215,7 @@ failed:
         return 0;
 }
 
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
 static int mac_selinux_filter(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         Manager *m = userdata;
         const char *verb, *path;
@@ -298,7 +302,7 @@ static int bus_job_find(sd_bus *bus, const char *path, const char *interface, vo
 }
 
 static int find_unit(Manager *m, sd_bus *bus, const char *path, Unit **unit, sd_bus_error *error) {
-        Unit *u;
+        Unit *u = NULL;  /* just to appease gcc, initialization is not really necessary */
         int r;
 
         assert(m);
@@ -323,14 +327,14 @@ static int find_unit(Manager *m, sd_bus *bus, const char *path, Unit **unit, sd_
                         return r;
 
                 u = manager_get_unit_by_pid(m, pid);
+                if (!u)
+                        return 0;
         } else {
                 r = manager_load_unit_from_dbus_path(m, path, error, &u);
                 if (r < 0)
                         return 0;
+                assert(u);
         }
-
-        if (!u)
-                return 0;
 
         *unit = u;
         return 1;
@@ -477,7 +481,7 @@ static int bus_kill_context_find(sd_bus *bus, const char *path, const char *inte
 }
 
 static int bus_job_enumerate(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error) {
-        _cleanup_free_ char **l = NULL;
+        _cleanup_strv_free_ char **l = NULL;
         Manager *m = userdata;
         unsigned k = 0;
         Iterator i;
@@ -497,14 +501,13 @@ static int bus_job_enumerate(sd_bus *bus, const char *path, void *userdata, char
 
         assert(hashmap_size(m->jobs) == k);
 
-        *nodes = l;
-        l = NULL;
+        *nodes = TAKE_PTR(l);
 
         return k;
 }
 
 static int bus_unit_enumerate(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error) {
-        _cleanup_free_ char **l = NULL;
+        _cleanup_strv_free_ char **l = NULL;
         Manager *m = userdata;
         unsigned k = 0;
         Iterator i;
@@ -522,8 +525,7 @@ static int bus_unit_enumerate(sd_bus *bus, const char *path, void *userdata, cha
                 k++;
         }
 
-        *nodes = l;
-        l = NULL;
+        *nodes = TAKE_PTR(l);
 
         return k;
 }
@@ -535,7 +537,7 @@ static int bus_setup_api_vtables(Manager *m, sd_bus *bus) {
         assert(m);
         assert(bus);
 
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
         r = sd_bus_add_filter(bus, NULL, mac_selinux_filter, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to add SELinux access filter: %m");
@@ -602,18 +604,16 @@ static int bus_setup_disconnected_match(Manager *m, sd_bus *bus) {
         assert(m);
         assert(bus);
 
-        r = sd_bus_add_match(
+        r = sd_bus_match_signal_async(
                         bus,
                         NULL,
-                        "sender='org.freedesktop.DBus.Local',"
-                        "type='signal',"
-                        "path='/org/freedesktop/DBus/Local',"
-                        "interface='org.freedesktop.DBus.Local',"
-                        "member='Disconnected'",
-                        signal_disconnected, m);
-
+                        "org.freedesktop.DBus.Local",
+                        "/org/freedesktop/DBus/Local",
+                        "org.freedesktop.DBus.Local",
+                        "Disconnected",
+                        signal_disconnected, NULL, m);
         if (r < 0)
-                return log_error_errno(r, "Failed to register match for Disconnected message: %m");
+                return log_error_errno(r, "Failed to request match for Disconnected message: %m");
 
         return 0;
 }
@@ -651,6 +651,8 @@ static int bus_on_connection(sd_event_source *s, int fd, uint32_t revents, void 
                 return 0;
         }
 
+        (void) sd_bus_set_description(bus, "private-bus-connection");
+
         r = sd_bus_set_fd(bus, nfd, nfd);
         if (r < 0) {
                 log_warning_errno(r, "Failed to set fd on new connection bus: %m");
@@ -679,6 +681,12 @@ static int bus_on_connection(sd_event_source *s, int fd, uint32_t revents, void 
                                    SD_BUS_CREDS_SELINUX_CONTEXT);
         if (r < 0) {
                 log_warning_errno(r, "Failed to enable credentials for new connection: %m");
+                return 0;
+        }
+
+        r = sd_bus_set_sender(bus, "org.freedesktop.systemd1");
+        if (r < 0) {
+                log_warning_errno(r, "Failed to set direct connection sender: %m");
                 return 0;
         }
 
@@ -717,17 +725,29 @@ static int bus_on_connection(sd_event_source *s, int fd, uint32_t revents, void 
         return 0;
 }
 
-int manager_sync_bus_names(Manager *m, sd_bus *bus) {
+static int manager_dispatch_sync_bus_names(sd_event_source *es, void *userdata) {
         _cleanup_strv_free_ char **names = NULL;
+        Manager *m = userdata;
         const char *name;
         Iterator i;
         Unit *u;
         int r;
 
+        assert(es);
         assert(m);
-        assert(bus);
+        assert(m->sync_bus_names_event_source == es);
 
-        r = sd_bus_list_names(bus, &names, NULL);
+        /* First things first, destroy the defer event so that we aren't triggered again */
+        m->sync_bus_names_event_source = sd_event_source_unref(m->sync_bus_names_event_source);
+
+        /* Let's see if there's anything to do still? */
+        if (!m->api_bus)
+                return 0;
+        if (hashmap_isempty(m->watch_bus))
+                return 0;
+
+        /* OK, let's sync up the names. Let's see which names are currently on the bus. */
+        r = sd_bus_list_names(m->api_bus, &names, NULL);
         if (r < 0)
                 return log_error_errno(r, "Failed to get initial list of names: %m");
 
@@ -751,15 +771,15 @@ int manager_sync_bus_names(Manager *m, sd_bus *bus) {
                         const char *unique;
 
                         /* If it is, determine its current owner */
-                        r = sd_bus_get_name_creds(bus, name, SD_BUS_CREDS_UNIQUE_NAME, &creds);
+                        r = sd_bus_get_name_creds(m->api_bus, name, SD_BUS_CREDS_UNIQUE_NAME, &creds);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to get bus name owner %s: %m", name);
+                                log_full_errno(r == -ENXIO ? LOG_DEBUG : LOG_ERR, r, "Failed to get bus name owner %s: %m", name);
                                 continue;
                         }
 
                         r = sd_bus_creds_get_unique_name(creds, &unique);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to get unique name for %s: %m", name);
+                                log_full_errno(r == -ENXIO ? LOG_DEBUG : LOG_ERR, r, "Failed to get unique name for %s: %m", name);
                                 continue;
                         }
 
@@ -782,6 +802,34 @@ int manager_sync_bus_names(Manager *m, sd_bus *bus) {
                 }
         }
 
+        return 0;
+}
+
+int manager_enqueue_sync_bus_names(Manager *m) {
+        int r;
+
+        assert(m);
+
+        /* Enqueues a request to synchronize the bus names in a later event loop iteration. The callers generally don't
+         * want us to invoke ->bus_name_owner_change() unit calls from their stack frames as this might result in event
+         * dispatching on its own creating loops, hence we simply create a defer event for the event loop and exit. */
+
+        if (m->sync_bus_names_event_source)
+                return 0;
+
+        r = sd_event_add_defer(m->event, &m->sync_bus_names_event_source, manager_dispatch_sync_bus_names, m);
+        if (r < 0)
+                return log_error_errno(r, "Failed to create bus name synchronization event: %m");
+
+        r = sd_event_source_set_priority(m->sync_bus_names_event_source, SD_EVENT_PRIORITY_IDLE);
+        if (r < 0)
+                return log_error_errno(r, "Failed to set event priority: %m");
+
+        r = sd_event_source_set_enabled(m->sync_bus_names_event_source, SD_EVENT_ONESHOT);
+        if (r < 0)
+                return log_error_errno(r, "Failed to set even to oneshot: %m");
+
+        (void) sd_event_source_set_description(m->sync_bus_names_event_source, "manager-sync-bus-names");
         return 0;
 }
 
@@ -812,36 +860,30 @@ static int bus_setup_api(Manager *m, sd_bus *bus) {
                         log_error_errno(r, "Failed to subscribe to NameOwnerChanged signal for '%s': %m", name);
         }
 
-        r = sd_bus_add_match(
+        r = sd_bus_match_signal_async(
                         bus,
                         NULL,
-                        "type='signal',"
-                        "sender='org.freedesktop.DBus',"
-                        "path='/org/freedesktop/DBus',"
-                        "interface='org.freedesktop.systemd1.Activator',"
-                        "member='ActivationRequest'",
-                        signal_activation_request, m);
+                        "org.freedesktop.DBus",
+                        "/org/freedesktop/DBus",
+                        "org.freedesktop.systemd1.Activator",
+                        "ActivationRequest",
+                        signal_activation_request, NULL, m);
         if (r < 0)
                 log_warning_errno(r, "Failed to subscribe to activation signal: %m");
 
-        /* Allow replacing of our name, to ease implementation of
-         * reexecution, where we keep the old connection open until
-         * after the new connection is set up and the name installed
-         * to allow clients to synchronously wait for reexecution to
-         * finish */
-        r = sd_bus_request_name(bus,"org.freedesktop.systemd1", SD_BUS_NAME_REPLACE_EXISTING|SD_BUS_NAME_ALLOW_REPLACEMENT);
+        /* Allow replacing of our name, to ease implementation of reexecution, where we keep the old connection open
+         * until after the new connection is set up and the name installed to allow clients to synchronously wait for
+         * reexecution to finish */
+        r = sd_bus_request_name_async(bus, NULL, "org.freedesktop.systemd1", SD_BUS_NAME_REPLACE_EXISTING|SD_BUS_NAME_ALLOW_REPLACEMENT, NULL, NULL);
         if (r < 0)
-                return log_error_errno(r, "Failed to register name: %m");
-
-        r = manager_sync_bus_names(m, bus);
-        if (r < 0)
-                return r;
+                return log_error_errno(r, "Failed to request name: %m");
 
         log_debug("Successfully connected to API bus.");
+
         return 0;
 }
 
-static int bus_init_api(Manager *m) {
+int bus_init_api(Manager *m) {
         _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
         int r;
 
@@ -856,31 +898,28 @@ static int bus_init_api(Manager *m) {
                         r = sd_bus_open_system(&bus);
                 else
                         r = sd_bus_open_user(&bus);
-
-                if (r < 0) {
-                        log_debug("Failed to connect to API bus, retrying later...");
-                        return 0;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to connect to API bus: %m");
 
                 r = sd_bus_attach_event(bus, m->event, SD_EVENT_PRIORITY_NORMAL);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to attach API bus to event loop: %m");
-                        return 0;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to attach API bus to event loop: %m");
 
                 r = bus_setup_disconnected_match(m, bus);
                 if (r < 0)
-                        return 0;
+                        return r;
         }
 
         r = bus_setup_api(m, bus);
-        if (r < 0) {
-                log_error_errno(r, "Failed to set up API bus: %m");
-                return 0;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to set up API bus: %m");
 
         m->api_bus = bus;
         bus = NULL;
+
+        r = manager_enqueue_sync_bus_names(m);
+        if (r < 0)
+                return r;
 
         return 0;
 }
@@ -893,23 +932,23 @@ static int bus_setup_system(Manager *m, sd_bus *bus) {
 
         /* if we are a user instance we get the Released message via the system bus */
         if (MANAGER_IS_USER(m)) {
-                r = sd_bus_add_match(
+                r = sd_bus_match_signal_async(
                                 bus,
                                 NULL,
-                                "type='signal',"
-                                "interface='org.freedesktop.systemd1.Agent',"
-                                "member='Released',"
-                                "path='/org/freedesktop/systemd1/agent'",
-                                signal_agent_released, m);
+                                NULL,
+                                "/org/freedesktop/systemd1/agent",
+                                "org.freedesktop.systemd1.Agent",
+                                "Released",
+                                signal_agent_released, NULL, m);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to register Released match on system bus: %m");
+                        log_warning_errno(r, "Failed to request Released match on system bus: %m");
         }
 
         log_debug("Successfully connected to system bus.");
         return 0;
 }
 
-static int bus_init_system(Manager *m) {
+int bus_init_system(Manager *m) {
         _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
         int r;
 
@@ -917,32 +956,25 @@ static int bus_init_system(Manager *m) {
                 return 0;
 
         /* The API and system bus is the same if we are running in system mode */
-        if (MANAGER_IS_SYSTEM(m) && m->api_bus) {
-                m->system_bus = sd_bus_ref(m->api_bus);
-                return 0;
-        }
+        if (MANAGER_IS_SYSTEM(m) && m->api_bus)
+                bus = sd_bus_ref(m->api_bus);
+        else {
+                r = sd_bus_open_system(&bus);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to connect to system bus: %m");
 
-        r = sd_bus_open_system(&bus);
-        if (r < 0) {
-                log_debug("Failed to connect to system bus, retrying later...");
-                return 0;
-        }
+                r = sd_bus_attach_event(bus, m->event, SD_EVENT_PRIORITY_NORMAL);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to attach system bus to event loop: %m");
 
-        r = bus_setup_disconnected_match(m, bus);
-        if (r < 0)
-                return 0;
-
-        r = sd_bus_attach_event(bus, m->event, SD_EVENT_PRIORITY_NORMAL);
-        if (r < 0) {
-                log_error_errno(r, "Failed to attach system bus to event loop: %m");
-                return 0;
+                r = bus_setup_disconnected_match(m, bus);
+                if (r < 0)
+                        return r;
         }
 
         r = bus_setup_system(m, bus);
-        if (r < 0) {
-                log_error_errno(r, "Failed to set up system bus: %m");
-                return 0;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to set up system bus: %m");
 
         m->system_bus = bus;
         bus = NULL;
@@ -950,7 +982,7 @@ static int bus_init_system(Manager *m) {
         return 0;
 }
 
-static int bus_init_private(Manager *m) {
+int bus_init_private(Manager *m) {
         _cleanup_close_ int fd = -1;
         union sockaddr_union sa = {
                 .un.sun_family = AF_UNIX
@@ -967,7 +999,7 @@ static int bus_init_private(Manager *m) {
         if (MANAGER_IS_SYSTEM(m)) {
 
                 /* We want the private bus only when running as init */
-                if (getpid() != 1)
+                if (getpid_cached() != 1)
                         return 0;
 
                 strcpy(sa.un.sun_path, "/run/systemd/private");
@@ -1004,6 +1036,9 @@ static int bus_init_private(Manager *m) {
         if (r < 0)
                 return log_error_errno(errno, "Failed to make private socket listening: %m");
 
+        /* Generate an inotify event in case somebody waits for this socket to appear using inotify() */
+        (void) touch(sa.un.sun_path);
+
         r = sd_event_add_io(m->event, &s, fd, EPOLLIN, bus_on_connection, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate event source: %m");
@@ -1019,28 +1054,9 @@ static int bus_init_private(Manager *m) {
         return 0;
 }
 
-int bus_init(Manager *m, bool try_bus_connect) {
-        int r;
-
-        if (try_bus_connect) {
-                r = bus_init_system(m);
-                if (r < 0)
-                        return r;
-
-                r = bus_init_api(m);
-                if (r < 0)
-                        return r;
-        }
-
-        r = bus_init_private(m);
-        if (r < 0)
-                return r;
-
-        return 0;
-}
-
 static void destroy_bus(Manager *m, sd_bus **bus) {
         Iterator i;
+        Unit *u;
         Job *j;
 
         assert(m);
@@ -1049,6 +1065,17 @@ static void destroy_bus(Manager *m, sd_bus **bus) {
         if (!*bus)
                 return;
 
+        /* Make sure all bus slots watching names are released. */
+        HASHMAP_FOREACH(u, m->watch_bus, i) {
+                if (!u->match_bus_slot)
+                        continue;
+
+                if (sd_bus_slot_get_bus(u->match_bus_slot) != *bus)
+                        continue;
+
+                u->match_bus_slot = sd_bus_slot_unref(u->match_bus_slot);
+        }
+
         /* Get rid of tracked clients on this bus */
         if (m->subscribed && sd_bus_track_get_bus(m->subscribed) == *bus)
                 m->subscribed = sd_bus_track_unref(m->subscribed);
@@ -1056,6 +1083,10 @@ static void destroy_bus(Manager *m, sd_bus **bus) {
         HASHMAP_FOREACH(j, m->jobs, i)
                 if (j->bus_track && sd_bus_track_get_bus(j->bus_track) == *bus)
                         j->bus_track = sd_bus_track_unref(j->bus_track);
+
+        HASHMAP_FOREACH(u, m->units, i)
+                if (u->bus_track && sd_bus_track_get_bus(u->bus_track) == *bus)
+                        u->bus_track = sd_bus_track_unref(u->bus_track);
 
         /* Get rid of queued message on this bus */
         if (m->queued_message && sd_bus_message_get_bus(m->queued_message) == *bus)
@@ -1071,28 +1102,44 @@ static void destroy_bus(Manager *m, sd_bus **bus) {
         *bus = sd_bus_unref(*bus);
 }
 
-void bus_done(Manager *m) {
-        sd_bus *b;
-
+void bus_done_api(Manager *m) {
         assert(m);
 
         if (m->api_bus)
                 destroy_bus(m, &m->api_bus);
+}
+
+void bus_done_system(Manager *m) {
+        assert(m);
+
         if (m->system_bus)
                 destroy_bus(m, &m->system_bus);
+}
+
+void bus_done_private(Manager *m) {
+        sd_bus *b;
+
+        assert(m);
+
         while ((b = set_steal_first(m->private_buses)))
                 destroy_bus(m, &b);
 
         m->private_buses = set_free(m->private_buses);
 
-        m->subscribed = sd_bus_track_unref(m->subscribed);
-        m->deserialized_subscribed = strv_free(m->deserialized_subscribed);
-
-        if (m->private_listen_event_source)
-                m->private_listen_event_source = sd_event_source_unref(m->private_listen_event_source);
-
+        m->private_listen_event_source = sd_event_source_unref(m->private_listen_event_source);
         m->private_listen_fd = safe_close(m->private_listen_fd);
+}
 
+void bus_done(Manager *m) {
+        assert(m);
+
+        bus_done_api(m);
+        bus_done_system(m);
+        bus_done_private(m);
+
+        assert(!m->subscribed);
+
+        m->deserialized_subscribed = strv_free(m->deserialized_subscribed);
         bus_verify_polkit_async_registry_free(m->polkit_registry);
 }
 
@@ -1148,14 +1195,20 @@ int bus_foreach_bus(
 
         /* Send to all direct buses, unconditionally */
         SET_FOREACH(b, m->private_buses, i) {
+
+                /* Don't bother with enqueing these messages to clients that haven't started yet */
+                if (sd_bus_is_ready(b) <= 0)
+                        continue;
+
                 r = send_message(b, userdata);
                 if (r < 0)
                         ret = r;
         }
 
         /* Send to API bus, but only if somebody is subscribed */
-        if (sd_bus_track_count(m->subscribed) > 0 ||
-            sd_bus_track_count(subscribed2) > 0) {
+        if (m->api_bus &&
+            (sd_bus_track_count(m->subscribed) > 0 ||
+             sd_bus_track_count(subscribed2) > 0)) {
                 r = send_message(m->api_bus, userdata);
                 if (r < 0)
                         ret = r;
@@ -1223,4 +1276,35 @@ int bus_verify_reload_daemon_async(Manager *m, sd_bus_message *call, sd_bus_erro
 
 int bus_verify_set_environment_async(Manager *m, sd_bus_message *call, sd_bus_error *error) {
         return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.set-environment", NULL, false, UID_INVALID, &m->polkit_registry, error);
+}
+
+uint64_t manager_bus_n_queued_write(Manager *m) {
+        uint64_t c = 0;
+        Iterator i;
+        sd_bus *b;
+        int r;
+
+        /* Returns the total number of messages queued for writing on all our direct and API busses. */
+
+        SET_FOREACH(b, m->private_buses, i) {
+                uint64_t k;
+
+                r = sd_bus_get_n_queued_write(b, &k);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to query queued messages for private bus: %m");
+                else
+                        c += k;
+        }
+
+        if (m->api_bus) {
+                uint64_t k;
+
+                r = sd_bus_get_n_queued_write(m->api_bus, &k);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to query queued messages for API bus: %m");
+                else
+                        c += k;
+        }
+
+        return c;
 }

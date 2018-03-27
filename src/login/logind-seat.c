@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,6 +20,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio_ext.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -93,7 +95,7 @@ int seat_save(Seat *s) {
         if (!s->started)
                 return 0;
 
-        r = mkdir_safe_label("/run/systemd/seats", 0755, 0, 0);
+        r = mkdir_safe_label("/run/systemd/seats", 0755, 0, 0, MKDIR_WARN_MODE);
         if (r < 0)
                 goto fail;
 
@@ -101,7 +103,8 @@ int seat_save(Seat *s) {
         if (r < 0)
                 goto fail;
 
-        fchmod(fileno(f), 0644);
+        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+        (void) fchmod(fileno(f), 0644);
 
         fprintf(f,
                 "# This is private data. Do not parse.\n"
@@ -379,7 +382,8 @@ int seat_read_active_vt(Seat *s) {
         if (!seat_has_vts(s))
                 return 0;
 
-        lseek(s->manager->console_active_fd, SEEK_SET, 0);
+        if (lseek(s->manager->console_active_fd, SEEK_SET, 0) < 0)
+                return log_error_errno(errno, "lseek on console_active_fd failed: %m");
 
         k = read(s->manager->console_active_fd, t, sizeof(t)-1);
         if (k <= 0) {
@@ -396,10 +400,8 @@ int seat_read_active_vt(Seat *s) {
         }
 
         r = safe_atou(t+3, &vtnr);
-        if (r < 0) {
-                log_error("Failed to parse VT number %s", t+3);
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse VT number \"%s\": %m", t+3);
 
         if (!vtnr) {
                 log_error("VT number invalid: %s", t+3);
@@ -416,7 +418,7 @@ int seat_start(Seat *s) {
                 return 0;
 
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_SEAT_START),
+                   "MESSAGE_ID=" SD_MESSAGE_SEAT_START_STR,
                    "SEAT_ID=%s", s->id,
                    LOG_MESSAGE("New seat %s.", s->id),
                    NULL);
@@ -444,7 +446,7 @@ int seat_stop(Seat *s, bool force) {
 
         if (s->started)
                 log_struct(LOG_INFO,
-                           LOG_MESSAGE_ID(SD_MESSAGE_SEAT_STOP),
+                           "MESSAGE_ID=" SD_MESSAGE_SEAT_STOP_STR,
                            "SEAT_ID=%s", s->id,
                            LOG_MESSAGE("Removed seat %s.", s->id),
                            NULL);
@@ -541,8 +543,6 @@ int seat_attach_session(Seat *s, Session *session) {
         LIST_PREPEND(sessions_by_seat, s->sessions, session);
         seat_assign_position(s, session);
 
-        seat_send_changed(s, "Sessions", NULL);
-
         /* On seats with VTs, the VT logic defines which session is active. On
          * seats without VTs, we automatically activate new sessions. */
         if (!seat_has_vts(s))
@@ -560,8 +560,7 @@ void seat_complete_switch(Seat *s) {
         if (!s->pending_switch)
                 return;
 
-        session = s->pending_switch;
-        s->pending_switch = NULL;
+        session = TAKE_PTR(s->pending_switch);
 
         seat_set_active(s, session);
 }
@@ -639,16 +638,16 @@ int seat_get_idle_hint(Seat *s, dual_timestamp *t) {
         return idle_hint;
 }
 
-bool seat_check_gc(Seat *s, bool drop_not_started) {
+bool seat_may_gc(Seat *s, bool drop_not_started) {
         assert(s);
 
         if (drop_not_started && !s->started)
-                return false;
-
-        if (seat_is_seat0(s))
                 return true;
 
-        return seat_has_master_device(s);
+        if (seat_is_seat0(s))
+                return false;
+
+        return !seat_has_master_device(s);
 }
 
 void seat_add_to_gc_queue(Seat *s) {
@@ -666,8 +665,7 @@ static bool seat_name_valid_char(char c) {
                 (c >= 'a' && c <= 'z') ||
                 (c >= 'A' && c <= 'Z') ||
                 (c >= '0' && c <= '9') ||
-                c == '-' ||
-                c == '_';
+                IN_SET(c, '-', '_');
 }
 
 bool seat_name_is_valid(const char *name) {

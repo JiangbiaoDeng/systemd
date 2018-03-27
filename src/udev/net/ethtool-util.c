@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
  This file is part of systemd.
 
@@ -24,12 +25,13 @@
 
 #include "conf-parser.h"
 #include "ethtool-util.h"
+#include "link-config.h"
 #include "log.h"
+#include "missing.h"
 #include "socket-util.h"
 #include "string-table.h"
 #include "strxcpyx.h"
 #include "util.h"
-#include "missing.h"
 
 static const char* const duplex_table[_DUP_MAX] = {
         [DUP_FULL] = "full",
@@ -40,20 +42,36 @@ DEFINE_STRING_TABLE_LOOKUP(duplex, Duplex);
 DEFINE_CONFIG_PARSE_ENUM(config_parse_duplex, duplex, Duplex, "Failed to parse duplex setting");
 
 static const char* const wol_table[_WOL_MAX] = {
-        [WOL_PHY] = "phy",
-        [WOL_MAGIC] = "magic",
-        [WOL_OFF] = "off"
+        [WOL_PHY]         = "phy",
+        [WOL_UCAST]       = "unicast",
+        [WOL_MCAST]       = "multicast",
+        [WOL_BCAST]       = "broadcast",
+        [WOL_ARP]         = "arp",
+        [WOL_MAGIC]       = "magic",
+        [WOL_MAGICSECURE] = "secureon",
+        [WOL_OFF]         = "off"
 };
 
 DEFINE_STRING_TABLE_LOOKUP(wol, WakeOnLan);
 DEFINE_CONFIG_PARSE_ENUM(config_parse_wol, wol, WakeOnLan, "Failed to parse WakeOnLan setting");
 
+static const char* const port_table[_NET_DEV_PORT_MAX] = {
+        [NET_DEV_PORT_TP]     = "tp",
+        [NET_DEV_PORT_AUI]    = "aui",
+        [NET_DEV_PORT_MII]    = "mii",
+        [NET_DEV_PORT_FIBRE]  = "fibre",
+        [NET_DEV_PORT_BNC]    = "bnc"
+};
+
+DEFINE_STRING_TABLE_LOOKUP(port, NetDevPort);
+DEFINE_CONFIG_PARSE_ENUM(config_parse_port, port, NetDevPort, "Failed to parse Port setting");
+
 static const char* const netdev_feature_table[_NET_DEV_FEAT_MAX] = {
-        [NET_DEV_FEAT_GSO] = "tx-generic-segmentation",
-        [NET_DEV_FEAT_GRO] = "rx-gro",
-        [NET_DEV_FEAT_LRO] = "rx-lro",
-        [NET_DEV_FEAT_TSO] = "tx-tcp-segmentation",
-        [NET_DEV_FEAT_UFO] = "tx-udp-fragmentation",
+        [NET_DEV_FEAT_GSO]  = "tx-generic-segmentation",
+        [NET_DEV_FEAT_GRO]  = "rx-gro",
+        [NET_DEV_FEAT_LRO]  = "rx-lro",
+        [NET_DEV_FEAT_TSO]  = "tx-tcp-segmentation",
+        [NET_DEV_FEAT_TSO6] = "tx-tcp6-segmentation",
 };
 
 int ethtool_connect(int *ret) {
@@ -64,6 +82,7 @@ int ethtool_connect(int *ret) {
         fd = socket_ioctl_fd();
         if (fd < 0)
                 return fd;
+
         *ret = fd;
 
         return 0;
@@ -183,26 +202,56 @@ int ethtool_set_wol(int *fd, const char *ifname, WakeOnLan wol) {
                 return -errno;
 
         switch (wol) {
-                case WOL_PHY:
-                        if (ecmd.wolopts != WAKE_PHY) {
-                                ecmd.wolopts = WAKE_PHY;
-                                need_update = true;
-                        }
-                        break;
-                case WOL_MAGIC:
-                        if (ecmd.wolopts != WAKE_MAGIC) {
-                                ecmd.wolopts = WAKE_MAGIC;
-                                need_update = true;
-                        }
-                        break;
-                case WOL_OFF:
-                        if (ecmd.wolopts != 0) {
-                                ecmd.wolopts = 0;
-                                need_update = true;
-                        }
-                        break;
-                default:
-                        break;
+        case WOL_PHY:
+                if (ecmd.wolopts != WAKE_PHY) {
+                        ecmd.wolopts = WAKE_PHY;
+                        need_update = true;
+                }
+                break;
+        case WOL_UCAST:
+                if (ecmd.wolopts != WAKE_UCAST) {
+                        ecmd.wolopts = WAKE_UCAST;
+                        need_update = true;
+                }
+                break;
+        case WOL_MCAST:
+                if (ecmd.wolopts != WAKE_MCAST) {
+                        ecmd.wolopts = WAKE_MCAST;
+                        need_update = true;
+                }
+                break;
+        case WOL_BCAST:
+                if (ecmd.wolopts != WAKE_BCAST) {
+                        ecmd.wolopts = WAKE_BCAST;
+                        need_update = true;
+                }
+                break;
+        case WOL_ARP:
+                if (ecmd.wolopts != WAKE_ARP) {
+                        ecmd.wolopts = WAKE_ARP;
+                        need_update = true;
+                }
+                break;
+        case WOL_MAGIC:
+                if (ecmd.wolopts != WAKE_MAGIC) {
+                        ecmd.wolopts = WAKE_MAGIC;
+                        need_update = true;
+                }
+                break;
+        case WOL_MAGICSECURE:
+                if (ecmd.wolopts != WAKE_MAGICSECURE) {
+                        ecmd.wolopts = WAKE_MAGICSECURE;
+                        need_update = true;
+                }
+                break;
+        case WOL_OFF:
+                if (ecmd.wolopts != 0) {
+                        ecmd.wolopts = 0;
+                        need_update = true;
+                }
+                break;
+        default:
+                break;
         }
 
         if (need_update) {
@@ -216,7 +265,7 @@ int ethtool_set_wol(int *fd, const char *ifname, WakeOnLan wol) {
         return 0;
 }
 
-static int ethtool_get_stringset(int *fd, struct ifreq *ifr, int stringset_id, struct ethtool_gstrings **gstrings) {
+static int get_stringset(int fd, struct ifreq *ifr, int stringset_id, struct ethtool_gstrings **gstrings) {
         _cleanup_free_ struct ethtool_gstrings *strings = NULL;
         struct {
                 struct ethtool_sset_info info;
@@ -232,7 +281,7 @@ static int ethtool_get_stringset(int *fd, struct ifreq *ifr, int stringset_id, s
 
         ifr->ifr_data = (void *) &buffer.info;
 
-        r = ioctl(*fd, SIOCETHTOOL, ifr);
+        r = ioctl(fd, SIOCETHTOOL, ifr);
         if (r < 0)
                 return -errno;
 
@@ -251,12 +300,11 @@ static int ethtool_get_stringset(int *fd, struct ifreq *ifr, int stringset_id, s
 
         ifr->ifr_data = (void *) strings;
 
-        r = ioctl(*fd, SIOCETHTOOL, ifr);
+        r = ioctl(fd, SIOCETHTOOL, ifr);
         if (r < 0)
                 return -errno;
 
-        *gstrings = strings;
-        strings = NULL;
+        *gstrings = TAKE_PTR(strings);
 
         return 0;
 }
@@ -286,7 +334,7 @@ int ethtool_set_features(int *fd, const char *ifname, NetDevFeature *features) {
 
         strscpy(ifr.ifr_name, IFNAMSIZ, ifname);
 
-        r = ethtool_get_stringset(fd, &ifr, ETH_SS_FEATURES, &strings);
+        r = get_stringset(*fd, &ifr, ETH_SS_FEATURES, &strings);
         if (r < 0)
                 return log_warning_errno(r, "link_config: could not get ethtool features for %s", ifname);
 
@@ -325,7 +373,7 @@ int ethtool_set_features(int *fd, const char *ifname, NetDevFeature *features) {
         return 0;
 }
 
-static int get_glinksettings(int *fd, struct ifreq *ifr, struct ethtool_link_usettings **g) {
+static int get_glinksettings(int fd, struct ifreq *ifr, struct ethtool_link_usettings **g) {
         struct ecmd {
                 struct ethtool_link_settings req;
                 __u32 link_mode_data[3 * ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32];
@@ -346,29 +394,29 @@ static int get_glinksettings(int *fd, struct ifreq *ifr, struct ethtool_link_use
 
         ifr->ifr_data = (void *) &ecmd;
 
-        r = ioctl(*fd, SIOCETHTOOL, ifr);
+        r = ioctl(fd, SIOCETHTOOL, ifr);
         if (r < 0)
                 return -errno;
 
         if (ecmd.req.link_mode_masks_nwords >= 0 || ecmd.req.cmd != ETHTOOL_GLINKSETTINGS)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         ecmd.req.link_mode_masks_nwords = -ecmd.req.link_mode_masks_nwords;
 
         ifr->ifr_data = (void *) &ecmd;
 
-        r = ioctl(*fd, SIOCETHTOOL, ifr);
+        r = ioctl(fd, SIOCETHTOOL, ifr);
         if (r < 0)
                 return -errno;
 
         if (ecmd.req.link_mode_masks_nwords <= 0 || ecmd.req.cmd != ETHTOOL_GLINKSETTINGS)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         u = new0(struct ethtool_link_usettings , 1);
         if (!u)
                 return -ENOMEM;
 
-        memcpy(&u->base, &ecmd.req, sizeof(struct ethtool_link_settings));
+        ecmd.req = u->base;
 
         offset = 0;
         memcpy(u->link_modes.supported, &ecmd.link_mode_data[offset], 4 * ecmd.req.link_mode_masks_nwords);
@@ -384,7 +432,7 @@ static int get_glinksettings(int *fd, struct ifreq *ifr, struct ethtool_link_use
         return 0;
 }
 
-static int get_gset(int *fd, struct ifreq *ifr, struct ethtool_link_usettings **u) {
+static int get_gset(int fd, struct ifreq *ifr, struct ethtool_link_usettings **u) {
         struct ethtool_link_usettings *e;
         struct ethtool_cmd ecmd = {
                 .cmd = ETHTOOL_GSET,
@@ -393,7 +441,7 @@ static int get_gset(int *fd, struct ifreq *ifr, struct ethtool_link_usettings **
 
         ifr->ifr_data = (void *) &ecmd;
 
-        r = ioctl(*fd, SIOCETHTOOL, ifr);
+        r = ioctl(fd, SIOCETHTOOL, ifr);
         if (r < 0)
                 return -errno;
 
@@ -420,19 +468,19 @@ static int get_gset(int *fd, struct ifreq *ifr, struct ethtool_link_usettings **
         return 0;
 }
 
-static int set_slinksettings(int *fd, struct ifreq *ifr, const struct ethtool_link_usettings *u) {
+static int set_slinksettings(int fd, struct ifreq *ifr, const struct ethtool_link_usettings *u) {
         struct {
                 struct ethtool_link_settings req;
                 __u32 link_mode_data[3 * ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32];
-        } ecmd = {
-                .req.cmd = ETHTOOL_SLINKSETTINGS,
-        };
+        } ecmd = {};
         unsigned int offset;
         int r;
 
         if (u->base.cmd != ETHTOOL_GLINKSETTINGS || u->base.link_mode_masks_nwords <= 0)
                 return -EINVAL;
 
+        ecmd.req = u->base;
+        ecmd.req.cmd = ETHTOOL_SLINKSETTINGS;
         offset = 0;
         memcpy(&ecmd.link_mode_data[offset], u->link_modes.supported, 4 * ecmd.req.link_mode_masks_nwords);
 
@@ -444,14 +492,14 @@ static int set_slinksettings(int *fd, struct ifreq *ifr, const struct ethtool_li
 
         ifr->ifr_data = (void *) &ecmd;
 
-        r = ioctl(*fd, SIOCETHTOOL, ifr);
+        r = ioctl(fd, SIOCETHTOOL, ifr);
         if (r < 0)
                 return -errno;
 
         return 0;
 }
 
-static int set_sset(int *fd, struct ifreq *ifr, const struct ethtool_link_usettings *u) {
+static int set_sset(int fd, struct ifreq *ifr, const struct ethtool_link_usettings *u) {
         struct ethtool_cmd ecmd = {
                 .cmd = ETHTOOL_SSET,
         };
@@ -474,7 +522,7 @@ static int set_sset(int *fd, struct ifreq *ifr, const struct ethtool_link_usetti
 
         ifr->ifr_data = (void *) &ecmd;
 
-        r = ioctl(*fd, SIOCETHTOOL, ifr);
+        r = ioctl(fd, SIOCETHTOOL, ifr);
         if (r < 0)
                 return -errno;
 
@@ -488,12 +536,12 @@ static int set_sset(int *fd, struct ifreq *ifr, const struct ethtool_link_usetti
  * enabled speed and @duplex is %DUPLEX_UNKNOWN or the best enabled duplex mode.
  */
 
-int ethtool_set_glinksettings(int *fd, const char *ifname, unsigned int speed, Duplex duplex, int autonegotiation) {
+int ethtool_set_glinksettings(int *fd, const char *ifname, struct link_config *link) {
         _cleanup_free_ struct ethtool_link_usettings *u = NULL;
         struct ifreq ifr = {};
         int r;
 
-        if (autonegotiation != 0) {
+        if (link->autonegotiation != 0) {
                 log_info("link_config: autonegotiation is unset or enabled, the speed and duplex are not writable.");
                 return 0;
         }
@@ -506,27 +554,28 @@ int ethtool_set_glinksettings(int *fd, const char *ifname, unsigned int speed, D
 
         strscpy(ifr.ifr_name, IFNAMSIZ, ifname);
 
-        r = get_glinksettings(fd, &ifr, &u);
+        r = get_glinksettings(*fd, &ifr, &u);
         if (r < 0) {
-
-                r = get_gset(fd, &ifr, &u);
+                r = get_gset(*fd, &ifr, &u);
                 if (r < 0)
                         return log_warning_errno(r, "link_config: Cannot get device settings for %s : %m", ifname);
         }
 
-        if (speed)
-                u->base.speed = speed;
+        if (link->speed)
+                u->base.speed = DIV_ROUND_UP(link->speed, 1000000);
 
-        if (duplex != _DUP_INVALID)
-                u->base.duplex = duplex;
+        if (link->duplex != _DUP_INVALID)
+                u->base.duplex = link->duplex;
 
-        u->base.autoneg = autonegotiation;
+        if (link->port != _NET_DEV_PORT_INVALID)
+                u->base.port = link->port;
+
+        u->base.autoneg = link->autonegotiation;
 
         if (u->base.cmd == ETHTOOL_GLINKSETTINGS)
-                r = set_slinksettings(fd, &ifr, u);
+                r = set_slinksettings(*fd, &ifr, u);
         else
-                r = set_sset(fd, &ifr, u);
-
+                r = set_sset(*fd, &ifr, u);
         if (r < 0)
                 return log_warning_errno(r, "link_config: Cannot set device settings for %s : %m", ifname);
 

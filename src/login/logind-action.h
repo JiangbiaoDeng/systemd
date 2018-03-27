@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -28,6 +29,7 @@ typedef enum HandleAction {
         HANDLE_SUSPEND,
         HANDLE_HIBERNATE,
         HANDLE_HYBRID_SLEEP,
+        HANDLE_SUSPEND_TO_HIBERNATE,
         HANDLE_LOCK,
         _HANDLE_ACTION_MAX,
         _HANDLE_ACTION_INVALID = -1

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -45,6 +46,7 @@
 #include "terminal-util.h"
 #include "user-util.h"
 #include "util.h"
+#include "process-util.h"
 
 #define RELEASE_USEC (20*USEC_PER_SEC)
 
@@ -82,6 +84,7 @@ Session* session_new(Manager *m, const char *id) {
         s->manager = m;
         s->fifo_fd = -1;
         s->vtfd = -1;
+        s->audit_id = AUDIT_SESSION_INVALID;
 
         return s;
 }
@@ -152,6 +155,18 @@ void session_set_user(Session *s, User *u) {
         LIST_PREPEND(sessions_by_user, u->sessions, s);
 }
 
+static void session_save_devices(Session *s, FILE *f) {
+        SessionDevice *sd;
+        Iterator i;
+
+        if (!hashmap_isempty(s->devices)) {
+                fprintf(f, "DEVICES=");
+                HASHMAP_FOREACH(sd, s->devices, i)
+                        fprintf(f, "%u:%u ", major(sd->dev), minor(sd->dev));
+                fprintf(f, "\n");
+        }
+}
+
 int session_save(Session *s) {
         _cleanup_free_ char *temp_path = NULL;
         _cleanup_fclose_ FILE *f = NULL;
@@ -165,7 +180,7 @@ int session_save(Session *s) {
         if (!s->started)
                 return 0;
 
-        r = mkdir_safe_label("/run/systemd/sessions", 0755, 0, 0);
+        r = mkdir_safe_label("/run/systemd/sessions", 0755, 0, 0, MKDIR_WARN_MODE);
         if (r < 0)
                 goto fail;
 
@@ -268,10 +283,10 @@ int session_save(Session *s) {
         if (!s->vtnr)
                 fprintf(f, "POSITION=%u\n", s->position);
 
-        if (s->leader > 0)
+        if (pid_is_valid(s->leader))
                 fprintf(f, "LEADER="PID_FMT"\n", s->leader);
 
-        if (s->audit_id > 0)
+        if (audit_session_is_valid(s->audit_id))
                 fprintf(f, "AUDIT=%"PRIu32"\n", s->audit_id);
 
         if (dual_timestamp_is_set(&s->timestamp))
@@ -281,8 +296,10 @@ int session_save(Session *s) {
                         s->timestamp.realtime,
                         s->timestamp.monotonic);
 
-        if (s->controller)
+        if (s->controller) {
                 fprintf(f, "CONTROLLER=%s\n", s->controller);
+                session_save_devices(s, f);
+        }
 
         r = fflush_and_check(f);
         if (r < 0)
@@ -304,6 +321,43 @@ fail:
         return log_error_errno(r, "Failed to save session data %s: %m", s->state_file);
 }
 
+static int session_load_devices(Session *s, const char *devices) {
+        const char *p;
+        int r = 0;
+
+        assert(s);
+
+        for (p = devices;;) {
+                _cleanup_free_ char *word = NULL;
+                SessionDevice *sd;
+                dev_t dev;
+                int k;
+
+                k = extract_first_word(&p, &word, NULL, 0);
+                if (k == 0)
+                        break;
+                if (k < 0) {
+                        r = k;
+                        break;
+                }
+
+                k = parse_dev(word, &dev);
+                if (k < 0) {
+                        r = k;
+                        continue;
+                }
+
+                /* The file descriptors for loaded devices will be reattached later. */
+                k = session_device_new(s, dev, false, &sd);
+                if (k < 0)
+                        r = k;
+        }
+
+        if (r < 0)
+                log_error_errno(r, "Loading session devices for session %s failed: %m", s->id);
+
+        return r;
+}
 
 int session_load(Session *s) {
         _cleanup_free_ char *remote = NULL,
@@ -317,7 +371,9 @@ int session_load(Session *s) {
                 *uid = NULL,
                 *realtime = NULL,
                 *monotonic = NULL,
-                *controller = NULL;
+                *controller = NULL,
+                *active = NULL,
+                *devices = NULL;
 
         int k, r;
 
@@ -345,6 +401,8 @@ int session_load(Session *s) {
                            "REALTIME",       &realtime,
                            "MONOTONIC",      &monotonic,
                            "CONTROLLER",     &controller,
+                           "ACTIVE",         &active,
+                           "DEVICES",        &devices,
                            NULL);
 
         if (r < 0)
@@ -404,9 +462,8 @@ int session_load(Session *s) {
         }
 
         if (leader) {
-                k = parse_pid(leader, &s->leader);
-                if (k >= 0)
-                        audit_session_from_pid(s->leader, &s->audit_id);
+                if (parse_pid(leader, &s->leader) >= 0)
+                        (void) audit_session_from_pid(s->leader, &s->audit_id);
         }
 
         if (type) {
@@ -447,10 +504,17 @@ int session_load(Session *s) {
         if (monotonic)
                 timestamp_deserialize(monotonic, &s->timestamp.monotonic);
 
+        if (active) {
+                k = parse_boolean(active);
+                if (k >= 0)
+                        s->was_active = k;
+        }
+
         if (controller) {
-                if (bus_name_has_owner(s->manager->bus, controller, NULL) > 0)
-                        session_set_controller(s, controller, false);
-                else
+                if (bus_name_has_owner(s->manager->bus, controller, NULL) > 0) {
+                        session_set_controller(s, controller, false, false);
+                        session_load_devices(s, devices);
+                } else
                         session_restore_vt(s);
         }
 
@@ -561,7 +625,7 @@ int session_start(Session *s) {
                 return r;
 
         log_struct(s->class == SESSION_BACKGROUND ? LOG_DEBUG : LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_SESSION_START),
+                   "MESSAGE_ID=" SD_MESSAGE_SESSION_START_STR,
                    "SESSION_ID=%s", s->id,
                    "USER_ID=%s", s->user->name,
                    "LEADER="PID_FMT, s->leader,
@@ -586,12 +650,10 @@ int session_start(Session *s) {
 
         /* Send signals */
         session_send_signal(s, true);
-        user_send_changed(s->user, "Sessions", "Display", NULL);
+        user_send_changed(s->user, "Display", NULL);
         if (s->seat) {
                 if (s->seat->active == s)
-                        seat_send_changed(s->seat, "Sessions", "ActiveSession", NULL);
-                else
-                        seat_send_changed(s->seat, "Sessions", NULL);
+                        seat_send_changed(s->seat, "ActiveSession", NULL);
         }
 
         return 0;
@@ -668,7 +730,7 @@ int session_finalize(Session *s) {
 
         if (s->started)
                 log_struct(s->class == SESSION_BACKGROUND ? LOG_DEBUG : LOG_INFO,
-                           LOG_MESSAGE_ID(SD_MESSAGE_SESSION_STOP),
+                           "MESSAGE_ID=" SD_MESSAGE_SESSION_STOP_STR,
                            "SESSION_ID=%s", s->id,
                            "USER_ID=%s", s->user->name,
                            "LEADER="PID_FMT, s->leader,
@@ -698,11 +760,10 @@ int session_finalize(Session *s) {
                         seat_set_active(s->seat, NULL);
 
                 seat_save(s->seat);
-                seat_send_changed(s->seat, "Sessions", NULL);
         }
 
         user_save(s->user);
-        user_send_changed(s->user, "Sessions", "Display", NULL);
+        user_send_changed(s->user, "Display", NULL);
 
         return 0;
 }
@@ -888,7 +949,7 @@ int session_create_fifo(Session *s) {
 
         /* Create FIFO */
         if (!s->fifo_path) {
-                r = mkdir_safe_label("/run/systemd/sessions", 0755, 0, 0);
+                r = mkdir_safe_label("/run/systemd/sessions", 0755, 0, 0, MKDIR_WARN_MODE);
                 if (r < 0)
                         return r;
 
@@ -901,7 +962,7 @@ int session_create_fifo(Session *s) {
 
         /* Open reading side */
         if (s->fifo_fd < 0) {
-                s->fifo_fd = open(s->fifo_path, O_RDONLY|O_CLOEXEC|O_NDELAY);
+                s->fifo_fd = open(s->fifo_path, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
                 if (s->fifo_fd < 0)
                         return -errno;
 
@@ -920,7 +981,7 @@ int session_create_fifo(Session *s) {
         }
 
         /* Open writing side */
-        r = open(s->fifo_path, O_WRONLY|O_CLOEXEC|O_NDELAY);
+        r = open(s->fifo_path, O_WRONLY|O_CLOEXEC|O_NONBLOCK);
         if (r < 0)
                 return -errno;
 
@@ -939,27 +1000,27 @@ static void session_remove_fifo(Session *s) {
         }
 }
 
-bool session_check_gc(Session *s, bool drop_not_started) {
+bool session_may_gc(Session *s, bool drop_not_started) {
         assert(s);
 
         if (drop_not_started && !s->started)
-                return false;
+                return true;
 
         if (!s->user)
-                return false;
+                return true;
 
         if (s->fifo_fd >= 0) {
                 if (pipe_eof(s->fifo_fd) <= 0)
-                        return true;
+                        return false;
         }
 
         if (s->scope_job && manager_job_is_active(s->manager, s->scope_job))
-                return true;
+                return false;
 
         if (s->scope && manager_unit_is_active(s->manager, s->scope))
-                return true;
+                return false;
 
-        return false;
+        return true;
 }
 
 void session_add_to_gc_queue(Session *s) {
@@ -1076,8 +1137,7 @@ void session_restore_vt(Session *s) {
                 .mode = VT_AUTO,
         };
 
-        _cleanup_free_ char *utf8 = NULL;
-        int vt, kb, old_fd;
+        int vt, old_fd;
 
         /* We need to get a fresh handle to the virtual terminal,
          * since the old file-descriptor is potentially in a hung-up
@@ -1085,8 +1145,7 @@ void session_restore_vt(Session *s) {
          * little dance to avoid having the terminal be available
          * for reuse before we've cleaned it up.
          */
-        old_fd = s->vtfd;
-        s->vtfd = -1;
+        old_fd = TAKE_FD(s->vtfd);
 
         vt = session_open_vt(s);
         safe_close(old_fd);
@@ -1096,12 +1155,7 @@ void session_restore_vt(Session *s) {
 
         (void) ioctl(vt, KDSETMODE, KD_TEXT);
 
-        if (read_one_line_file("/sys/module/vt/parameters/default_utf8", &utf8) >= 0 && *utf8 == '1')
-                kb = K_UNICODE;
-        else
-                kb = K_XLATE;
-
-        (void) ioctl(vt, KDSKBMODE, kb);
+        (void) vt_reset_keyboard(vt);
 
         (void) ioctl(vt, VT_SETMODE, &mode);
         (void) fchown(vt, 0, (gid_t) -1);
@@ -1173,7 +1227,7 @@ static int on_bus_track(sd_bus_track *track, void *userdata) {
         return 0;
 }
 
-int session_set_controller(Session *s, const char *sender, bool force) {
+int session_set_controller(Session *s, const char *sender, bool force, bool prepare) {
         _cleanup_free_ char *name = NULL;
         int r;
 
@@ -1205,16 +1259,18 @@ int session_set_controller(Session *s, const char *sender, bool force) {
          * Note that we reset the VT on ReleaseControl() and if the controller
          * exits.
          * If logind crashes/restarts, we restore the controller during restart
-         * or reset the VT in case it crashed/exited, too. */
-        r = session_prepare_vt(s);
-        if (r < 0) {
-                s->track = sd_bus_track_unref(s->track);
-                return r;
+         * (without preparing the VT since the controller has probably overridden
+         * VT state by now) or reset the VT in case it crashed/exited, too. */
+        if (prepare) {
+                r = session_prepare_vt(s);
+                if (r < 0) {
+                        s->track = sd_bus_track_unref(s->track);
+                        return r;
+                }
         }
 
         session_release_controller(s, true);
-        s->controller = name;
-        name = NULL;
+        s->controller = TAKE_PTR(name);
         session_save(s);
 
         return 0;

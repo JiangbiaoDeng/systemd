@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -23,6 +24,10 @@
 
 #include "sd-ndisc.h"
 
+#define NDISC_ROUTER_SOLICITATION_INTERVAL (4U * USEC_PER_SEC)
+#define NDISC_MAX_ROUTER_SOLICITATION_INTERVAL (3600U * USEC_PER_SEC)
+#define NDISC_MAX_ROUTER_SOLICITATIONS 3U
+
 struct sd_ndisc {
         unsigned n_ref;
 
@@ -38,8 +43,9 @@ struct sd_ndisc {
 
         sd_event_source *recv_event_source;
         sd_event_source *timeout_event_source;
+        sd_event_source *timeout_no_ra;
 
-        unsigned nd_sent;
+        usec_t retransmit_time;
 
         sd_ndisc_callback_t callback;
         void *userdata;

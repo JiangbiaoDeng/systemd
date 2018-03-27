@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -78,6 +79,8 @@ struct DnsTransaction {
 
         bool clamp_ttl:1;
 
+        bool probing:1;
+
         DnsPacket *sent, *received;
 
         DnsAnswer *answer;
@@ -105,6 +108,8 @@ struct DnsTransaction {
         usec_t next_attempt_after;
         sd_event_source *timeout_event_source;
         unsigned n_attempts;
+
+        unsigned n_picked_servers;
 
         /* UDP connection logic, if we need it */
         int dns_udp_fd;
@@ -172,10 +177,20 @@ DnsTransactionSource dns_transaction_source_from_string(const char *s) _pure_;
 #define MDNS_JITTER_MIN_USEC   (20 * USEC_PER_MSEC)
 #define MDNS_JITTER_RANGE_USEC (100 * USEC_PER_MSEC)
 
+/* mDNS probing interval, see RFC 6762 Section 8.1 */
+#define MDNS_PROBING_INTERVAL_USEC (250 * USEC_PER_MSEC)
+
 /* Maximum attempts to send DNS requests, across all DNS servers */
-#define DNS_TRANSACTION_ATTEMPTS_MAX 16
+#define DNS_TRANSACTION_ATTEMPTS_MAX 24
 
 /* Maximum attempts to send LLMNR requests, see RFC 4795 Section 2.7 */
 #define LLMNR_TRANSACTION_ATTEMPTS_MAX 3
 
-#define TRANSACTION_ATTEMPTS_MAX(p) ((p) == DNS_PROTOCOL_LLMNR ? LLMNR_TRANSACTION_ATTEMPTS_MAX : DNS_TRANSACTION_ATTEMPTS_MAX)
+/* Maximum attempts to send MDNS requests, see RFC 6762 Section 8.1 */
+#define MDNS_TRANSACTION_ATTEMPTS_MAX 3
+
+#define TRANSACTION_ATTEMPTS_MAX(p) (((p) == DNS_PROTOCOL_LLMNR) ? \
+                                         LLMNR_TRANSACTION_ATTEMPTS_MAX : \
+                                         (((p) == DNS_PROTOCOL_MDNS) ? \
+                                             MDNS_TRANSACTION_ATTEMPTS_MAX : \
+                                             DNS_TRANSACTION_ATTEMPTS_MAX))

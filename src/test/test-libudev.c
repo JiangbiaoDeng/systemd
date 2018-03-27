@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -371,7 +372,7 @@ int main(int argc, char *argv[]) {
                 return 1;
         }
 
-        while ((c = getopt_long(argc, argv, "p:s:dhV", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "p:s:dhVm", options, NULL)) >= 0)
                 switch (c) {
 
                 case 'p':
@@ -392,7 +393,7 @@ int main(int argc, char *argv[]) {
                         return EXIT_SUCCESS;
 
                 case 'V':
-                        printf("%s\n", VERSION);
+                        printf("%s\n", PACKAGE_VERSION);
                         return EXIT_SUCCESS;
 
                 case 'm':

@@ -3,6 +3,8 @@
 "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2014 Zbigniew Jędrzejewski-Szmek
@@ -153,7 +155,7 @@
   <refsect1>
     <title>Return Value</title>
 
-    <para>On success, this functions return 0 or a positive
+    <para>On success, these functions return 0 or a positive
     integer. On failure, they return a negative errno-style error
     code.</para>
   </refsect1>

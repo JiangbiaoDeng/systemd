@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -524,8 +525,6 @@ int main(int argc, char *argv[]) {
         pthread_t s;
         void *p;
         int r, q;
-
-        zero(c);
 
         c.automatic_integer_property = 4711;
         assert_se(c.automatic_string_property = strdup("dudeldu"));

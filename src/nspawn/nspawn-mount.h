@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -22,6 +23,7 @@
 #include <stdbool.h>
 
 #include "cgroup-util.h"
+#include "volatile-util.h"
 
 typedef enum MountSettingsMask {
         MOUNT_FATAL              = 1 << 0, /* if set, a mount error is considered fatal */
@@ -31,14 +33,6 @@ typedef enum MountSettingsMask {
         MOUNT_APPLY_APIVFS_NETNS = 1 << 4, /* if set, /proc/sys/net will be mounted read-write.
                                               Works only if MOUNT_APPLY_APIVFS_RO is also set. */
 } MountSettingsMask;
-
-typedef enum VolatileMode {
-        VOLATILE_NO,
-        VOLATILE_YES,
-        VOLATILE_STATE,
-        _VOLATILE_MODE_MAX,
-        _VOLATILE_MODE_INVALID = -1
-} VolatileMode;
 
 typedef enum CustomMountType {
         CUSTOM_MOUNT_BIND,
@@ -56,15 +50,16 @@ typedef struct CustomMount {
         char *options;
         char *work_dir;
         char **lower;
+        char *rm_rf_tmpdir;
 } CustomMount;
 
 CustomMount* custom_mount_add(CustomMount **l, unsigned *n, CustomMountType t);
-
 void custom_mount_free_all(CustomMount *l, unsigned n);
+int custom_mount_prepare_all(const char *dest, CustomMount *l, unsigned n);
+
 int bind_mount_parse(CustomMount **l, unsigned *n, const char *s, bool read_only);
 int tmpfs_mount_parse(CustomMount **l, unsigned *n, const char *s);
-
-int custom_mount_compare(const void *a, const void *b);
+int overlay_mount_parse(CustomMount **l, unsigned *n, const char *s, bool read_only);
 
 int mount_all(const char *dest, MountSettingsMask mount_settings, uid_t uid_shift, uid_t uid_range, const char *selinux_apifs_context);
 int mount_sysfs(const char *dest, MountSettingsMask mount_settings);
@@ -77,4 +72,5 @@ int mount_custom(const char *dest, CustomMount *mounts, unsigned n, bool userns,
 int setup_volatile(const char *directory, VolatileMode mode, bool userns, uid_t uid_shift, uid_t uid_range, const char *selinux_apifs_context);
 int setup_volatile_state(const char *directory, VolatileMode mode, bool userns, uid_t uid_shift, uid_t uid_range, const char *selinux_apifs_context);
 
-VolatileMode volatile_mode_from_string(const char *s);
+int pivot_root_parse(char **pivot_root_new, char **pivot_root_old, const char *s);
+int setup_pivot_root(const char *directory, const char *pivot_root_new, const char *pivot_root_old);

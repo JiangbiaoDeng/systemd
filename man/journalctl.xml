@@ -3,6 +3,8 @@
         "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2012 Lennart Poettering
@@ -272,11 +274,21 @@
 
             <varlistentry>
               <term>
+                <option>short-iso-precise</option>
+              </term>
+              <listitem>
+                <para>as for <option>short-iso</option> but includes full
+                microsecond precision.</para>
+              </listitem>
+            </varlistentry>
+
+            <varlistentry>
+              <term>
                 <option>short-precise</option>
               </term>
               <listitem>
-                <para>is very similar, but shows timestamps with full
-                microsecond precision.</para>
+                <para>is very similar, but shows classic syslog timestamps
+                with full microsecond precision.</para>
               </listitem>
             </varlistentry>
 
@@ -318,8 +330,10 @@
                 <para>serializes the journal into a binary (but mostly
                 text-based) stream suitable for backups and network
                 transfer (see
-                <ulink url="http://www.freedesktop.org/wiki/Software/systemd/export">Journal Export Format</ulink>
-                for more information).</para>
+                <ulink url="https://www.freedesktop.org/wiki/Software/systemd/export">Journal Export Format</ulink>
+                for more information). To import the binary stream back
+                into native journald format use
+                <citerefentry><refentrytitle>systemd-journal-remote</refentrytitle><manvolnum>8</manvolnum></citerefentry>.</para>
               </listitem>
             </varlistentry>
 
@@ -330,7 +344,7 @@
               <listitem>
                 <para>formats entries as JSON data structures, one per
                 line (see
-                <ulink url="http://www.freedesktop.org/wiki/Software/systemd/json">Journal JSON Format</ulink>
+                <ulink url="https://www.freedesktop.org/wiki/Software/systemd/json">Journal JSON Format</ulink>
                 for more information).</para>
               </listitem>
             </varlistentry>
@@ -373,6 +387,20 @@
       </varlistentry>
 
       <varlistentry>
+        <term><option>--output-fields=</option></term>
+
+        <listitem><para>A comma separated list of the fields which should
+        be included in the output. This only has an effect for the output modes
+        which would normally show all fields (<option>verbose</option>,
+        <option>export</option>, <option>json</option>,
+        <option>json-pretty</option>, and <option>json-sse</option>). The
+        <literal>__CURSOR</literal>, <literal>__REALTIME_TIMESTAMP</literal>,
+        <literal>__MONOTONIC_TIMESTAMP</literal>, and
+        <literal>_BOOT_ID</literal> fields are always
+        printed.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><option>--utc</option></term>
 
         <listitem><para>Express time in Coordinated Universal Time
@@ -399,7 +427,7 @@
         manuals. Note that help texts are not available for all
         messages, but only for selected ones. For more information on
         the message catalog, please refer to the
-        <ulink url="http://www.freedesktop.org/wiki/Software/systemd/catalog">Message Catalog Developer Documentation</ulink>.</para>
+        <ulink url="https://www.freedesktop.org/wiki/Software/systemd/catalog">Message Catalog Developer Documentation</ulink>.</para>
 
         <para>Note: when attaching <command>journalctl</command>
         output to bug reports, please do <emphasis>not</emphasis> use
@@ -411,8 +439,8 @@
         <term><option>-q</option></term>
         <term><option>--quiet</option></term>
 
-        <listitem><para>Suppresses all info messages
-        (i.e. "-- Logs begin at ...", "-- Reboot --"),
+        <listitem><para>Suppresses all informational messages
+        (i.e. "-- Logs begin at …", "-- Reboot --"),
         any warning messages regarding
         inaccessible system journals when run as a normal
         user.</para></listitem>
@@ -551,6 +579,29 @@
       </varlistentry>
 
       <varlistentry>
+        <term><option>-g</option></term>
+        <term><option>--grep=</option></term>
+
+        <listitem><para>Filter output to entries where the <varname>MESSAGE=</varname>
+        field matches the specified regular expression. PERL-compatible regular expressions
+        are used, see
+        <citerefentry><refentrytitle>pcre2pattern</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+        for a detailed description of the syntax.</para>
+
+        <para>If the pattern is all lowercase, matching is case insensitive.
+        Otherwise, matching is case sensitive. This can be overridden with the
+        <option>--case-sensitive</option> option, see below.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--case-sensitive<optional>=BOOLEAN</optional></option></term>
+
+        <listitem><para>Make pattern matching case sensitive or case insenstive.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><option>-c</option></term>
         <term><option>--cursor=</option></term>
 
@@ -573,7 +624,7 @@
 
         <listitem><para>The cursor is shown after the last entry after
         two dashes:</para>
-        <programlisting>-- cursor: s=0639...</programlisting>
+        <programlisting>-- cursor: s=0639…</programlisting>
         <para>The format of the cursor is private
         and subject to change.</para></listitem>
       </varlistentry>
@@ -675,7 +726,7 @@
         a new 128-bit ID suitable for identifying messages. This is
         intended for usage by developers who need a new identifier for
         a new message they introduce and want to make
-        recognizable. This will print the new ID in three different
+        recognizable. This will print the new ID in four different
         formats which can be copied into source code or similar.
         </para></listitem>
       </varlistentry>
@@ -701,7 +752,7 @@
         <term><option>--vacuum-time=</option></term>
         <term><option>--vacuum-files=</option></term>
 
-        <listitem><para>Removes archived journal files until the disk
+        <listitem><para>Removes the oldest archived journal files until the disk
         space they use falls below the specified size (specified with
         the usual <literal>K</literal>, <literal>M</literal>,
         <literal>G</literal> and <literal>T</literal> suffixes), or all
@@ -731,7 +782,7 @@
 
       <varlistentry>
         <term><option>--list-catalog
-        <optional><replaceable>128-bit-ID...</replaceable></optional>
+        <optional><replaceable>128-bit-ID…</replaceable></optional>
         </option></term>
 
         <listitem><para>List the contents of the message catalog as a
@@ -745,7 +796,7 @@
 
       <varlistentry>
         <term><option>--dump-catalog
-        <optional><replaceable>128-bit-ID...</replaceable></optional>
+        <optional><replaceable>128-bit-ID…</replaceable></optional>
         </option></term>
 
         <listitem><para>Show the contents of the message catalog, with
@@ -879,7 +930,8 @@
     <para>With one match specified, all entries with a field matching
     the expression are shown:</para>
 
-    <programlisting>journalctl _SYSTEMD_UNIT=avahi-daemon.service</programlisting>
+    <programlisting>journalctl _SYSTEMD_UNIT=avahi-daemon.service
+journalctl _SYSTEMD_CGROUP=/user.slice/user-42.slice/session-c1.scope</programlisting>
 
     <para>If two different fields are matched, only entries matching
     both expressions at the same time are shown:</para>
@@ -898,6 +950,19 @@
     processes):</para>
 
     <programlisting>journalctl _SYSTEMD_UNIT=avahi-daemon.service _PID=28097 + _SYSTEMD_UNIT=dbus.service</programlisting>
+
+    <para>To show all fields emited <emphasis>by</emphasis> a unit and <emphasis>about</emphasis>
+    the unit, option <option>-u</option>/<option>--unit=</option> should be used.
+    <command>journalctl -u <replaceable>name</replaceable></command>
+    expands to a complex filter similar to
+    <programlisting>_SYSTEMD_UNIT=<replaceable>name</replaceable>.service
+  + UNIT=<replaceable>name</replaceable>.service _PID=1
+  + OBJECT_SYSTEMD_UNIT=<replaceable>name</replaceable>.service _UID=0
+  + COREDUMP_UNIT=<replaceable>name</replaceable>.service _UID=0 MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1
+    </programlisting>
+    (see <citerefentry><refentrytitle>systemd.journal-fields</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+    for an explanation of those patterns).
+    </para>
 
     <para>Show all logs generated by the D-Bus executable:</para>
 
@@ -923,7 +988,9 @@
       <citerefentry><refentrytitle>coredumpctl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.journal-fields</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>journald.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+      <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>systemd-journal-remote</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>systemd-journal-upload</refentrytitle><manvolnum>8</manvolnum></citerefentry>
     </para>
   </refsect1>
 </refentry>

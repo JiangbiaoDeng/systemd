@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright (C) 2004-2012 Kay Sievers <kay@vrfy.org>
  * Copyright (C) 2009 Canonical Ltd.
@@ -17,13 +18,13 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <dirent.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/inotify.h>
 #include <unistd.h>
 
+#include "dirent-util.h"
 #include "stdio-util.h"
 #include "udev.h"
 
@@ -57,7 +58,7 @@ void udev_watch_restore(struct udev *udev) {
                         return;
                 }
 
-                for (ent = readdir(dir); ent != NULL; ent = readdir(dir)) {
+                FOREACH_DIRENT_ALL(ent, dir, break) {
                         char device[UTIL_PATH_SIZE];
                         ssize_t len;
                         struct udev_device *dev;
@@ -78,7 +79,7 @@ void udev_watch_restore(struct udev *udev) {
                         udev_watch_begin(udev, dev);
                         udev_device_unref(dev);
 unlink:
-                        unlinkat(dirfd(dir), ent->d_name, 0);
+                        (void) unlinkat(dirfd(dir), ent->d_name, 0);
                 }
 
                 closedir(dir);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,7 +20,12 @@
 
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdio_ext.h>
 #include <sys/ioctl.h>
+
+#if HAVE_LIBIDN2
+#include <idn2.h>
+#endif
 
 #include "af-list.h"
 #include "alloc-util.h"
@@ -36,6 +42,7 @@
 #include "random-util.h"
 #include "resolved-bus.h"
 #include "resolved-conf.h"
+#include "resolved-dnssd.h"
 #include "resolved-dns-stub.h"
 #include "resolved-etc-hosts.h"
 #include "resolved-llmnr.h"
@@ -322,32 +329,46 @@ static int manager_network_monitor_listen(Manager *m) {
         return 0;
 }
 
-static int determine_hostname(char **llmnr_hostname, char **mdns_hostname) {
+static int determine_hostname(char **full_hostname, char **llmnr_hostname, char **mdns_hostname) {
         _cleanup_free_ char *h = NULL, *n = NULL;
+#if HAVE_LIBIDN2
+        _cleanup_free_ char *utf8 = NULL;
+#elif HAVE_LIBIDN
+        int k;
+#endif
         char label[DNS_LABEL_MAX];
-        const char *p;
-        int r, k;
+        const char *p, *decoded;
+        int r;
 
+        assert(full_hostname);
         assert(llmnr_hostname);
         assert(mdns_hostname);
 
-        /* Extract and normalize the first label of the locally
-         * configured hostname, and check it's not "localhost". */
+        /* Extract and normalize the first label of the locally configured hostname, and check it's not "localhost". */
 
-        h = gethostname_malloc();
-        if (!h)
-                return log_oom();
+        r = gethostname_strict(&h);
+        if (r < 0)
+                return log_debug_errno(r, "Can't determine system hostname: %m");
 
         p = h;
-        r = dns_label_unescape(&p, label, sizeof(label));
+        r = dns_label_unescape(&p, label, sizeof label);
         if (r < 0)
                 return log_error_errno(r, "Failed to unescape host name: %m");
         if (r == 0) {
-                log_error("Couldn't find a single label in hosntame.");
+                log_error("Couldn't find a single label in hostname.");
                 return -EINVAL;
         }
 
-        k = dns_label_undo_idna(label, r, label, sizeof(label));
+#if HAVE_LIBIDN2
+        r = idn2_to_unicode_8z8z(label, &utf8, 0);
+        if (r != IDN2_OK)
+                return log_error("Failed to undo IDNA: %s", idn2_strerror(r));
+        assert(utf8_is_valid(utf8));
+
+        r = strlen(utf8);
+        decoded = utf8;
+#elif HAVE_LIBIDN
+        k = dns_label_undo_idna(label, r, label, sizeof label);
         if (k < 0)
                 return log_error_errno(k, "Failed to undo IDNA: %m");
         if (k > 0)
@@ -357,8 +378,12 @@ static int determine_hostname(char **llmnr_hostname, char **mdns_hostname) {
                 log_error("System hostname is not UTF-8 clean.");
                 return -EINVAL;
         }
+        decoded = label;
+#else
+        decoded = label; /* no decoding */
+#endif
 
-        r = dns_label_escape_new(label, r, &n);
+        r = dns_label_escape_new(decoded, r, &n);
         if (r < 0)
                 return log_error_errno(r, "Failed to escape host name: %m");
 
@@ -371,35 +396,81 @@ static int determine_hostname(char **llmnr_hostname, char **mdns_hostname) {
         if (r < 0)
                 return log_error_errno(r, "Failed to determine mDNS hostname: %m");
 
-        *llmnr_hostname = n;
-        n = NULL;
+        *llmnr_hostname = TAKE_PTR(n);
+        *full_hostname = TAKE_PTR(h);
+
+        return 0;
+}
+
+static const char *fallback_hostname(void) {
+
+        /* Determine the fall back hostname. For exposing this system to the outside world, we cannot have it to be
+         * "localhost" even if that's the compiled in hostname. In this case, let's revert to "linux" instead. */
+
+        if (is_localhost(FALLBACK_HOSTNAME))
+                return "linux";
+
+        return FALLBACK_HOSTNAME;
+}
+
+static int make_fallback_hostnames(char **full_hostname, char **llmnr_hostname, char **mdns_hostname) {
+        _cleanup_free_ char *n = NULL, *m = NULL;
+        char label[DNS_LABEL_MAX], *h;
+        const char *p;
+        int r;
+
+        assert(full_hostname);
+        assert(llmnr_hostname);
+        assert(mdns_hostname);
+
+        p = fallback_hostname();
+        r = dns_label_unescape(&p, label, sizeof(label));
+        if (r < 0)
+                return log_error_errno(r, "Failed to unescape fallback host name: %m");
+
+        assert(r > 0); /* The fallback hostname must have at least one label */
+
+        r = dns_label_escape_new(label, r, &n);
+        if (r < 0)
+                return log_error_errno(r, "Failed to escape fallback hostname: %m");
+
+        r = dns_name_concat(n, "local", &m);
+        if (r < 0)
+                return log_error_errno(r, "Failed to concatenate mDNS hostname: %m");
+
+        h = strdup(fallback_hostname());
+        if (!h)
+                return log_oom();
+
+        *llmnr_hostname = TAKE_PTR(n);
+        *mdns_hostname = TAKE_PTR(m);
+
+        *full_hostname = h;
 
         return 0;
 }
 
 static int on_hostname_change(sd_event_source *es, int fd, uint32_t revents, void *userdata) {
-        _cleanup_free_ char *llmnr_hostname = NULL, *mdns_hostname = NULL;
+        _cleanup_free_ char *full_hostname = NULL, *llmnr_hostname = NULL, *mdns_hostname = NULL;
         Manager *m = userdata;
         int r;
 
         assert(m);
 
-        r = determine_hostname(&llmnr_hostname, &mdns_hostname);
+        r = determine_hostname(&full_hostname, &llmnr_hostname, &mdns_hostname);
         if (r < 0)
                 return 0; /* ignore invalid hostnames */
 
-        if (streq(llmnr_hostname, m->llmnr_hostname) && streq(mdns_hostname, m->mdns_hostname))
+        if (streq(full_hostname, m->full_hostname) &&
+            streq(llmnr_hostname, m->llmnr_hostname) &&
+            streq(mdns_hostname, m->mdns_hostname))
                 return 0;
 
-        log_info("System hostname changed to '%s'.", llmnr_hostname);
+        log_info("System hostname changed to '%s'.", full_hostname);
 
-        free(m->llmnr_hostname);
-        free(m->mdns_hostname);
-
-        m->llmnr_hostname = llmnr_hostname;
-        m->mdns_hostname = mdns_hostname;
-
-        llmnr_hostname = mdns_hostname = NULL;
+        free_and_replace(m->full_hostname, full_hostname);
+        free_and_replace(m->llmnr_hostname, llmnr_hostname);
+        free_and_replace(m->mdns_hostname, mdns_hostname);
 
         manager_refresh_rrs(m);
 
@@ -411,7 +482,8 @@ static int manager_watch_hostname(Manager *m) {
 
         assert(m);
 
-        m->hostname_fd = open("/proc/sys/kernel/hostname", O_RDONLY|O_CLOEXEC|O_NDELAY|O_NOCTTY);
+        m->hostname_fd = open("/proc/sys/kernel/hostname",
+                              O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
         if (m->hostname_fd < 0) {
                 log_warning_errno(errno, "Failed to watch hostname: %m");
                 return 0;
@@ -428,18 +500,15 @@ static int manager_watch_hostname(Manager *m) {
 
         (void) sd_event_source_set_description(m->hostname_event_source, "hostname");
 
-        r = determine_hostname(&m->llmnr_hostname, &m->mdns_hostname);
+        r = determine_hostname(&m->full_hostname, &m->llmnr_hostname, &m->mdns_hostname);
         if (r < 0) {
-                log_info("Defaulting to hostname 'linux'.");
-                m->llmnr_hostname = strdup("linux");
-                if (!m->llmnr_hostname)
-                        return log_oom();
+                log_info("Defaulting to hostname '%s'.", fallback_hostname());
 
-                m->mdns_hostname = strdup("linux.local");
-                if (!m->mdns_hostname)
-                        return log_oom();
+                r = make_fallback_hostnames(&m->full_hostname, &m->llmnr_hostname, &m->mdns_hostname);
+                if (r < 0)
+                        return r;
         } else
-                log_info("Using system hostname '%s'.", m->llmnr_hostname);
+                log_info("Using system hostname '%s'.", m->full_hostname);
 
         return 0;
 }
@@ -448,8 +517,11 @@ static int manager_sigusr1(sd_event_source *s, const struct signalfd_siginfo *si
         _cleanup_free_ char *buffer = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         Manager *m = userdata;
+        DnsServer *server;
         size_t size = 0;
         DnsScope *scope;
+        Iterator i;
+        Link *l;
 
         assert(s);
         assert(si);
@@ -459,8 +531,18 @@ static int manager_sigusr1(sd_event_source *s, const struct signalfd_siginfo *si
         if (!f)
                 return log_oom();
 
+        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+
         LIST_FOREACH(scopes, scope, m->dns_scopes)
                 dns_scope_dump(scope, f);
+
+        LIST_FOREACH(servers, server, m->dns_servers)
+                dns_server_dump(server, f);
+        LIST_FOREACH(servers, server, m->fallback_dns_servers)
+                dns_server_dump(server, f);
+        HASHMAP_FOREACH(l, m->links, i)
+                LIST_FOREACH(servers, server, l->dns_servers)
+                        dns_server_dump(server, f);
 
         if (fflush_and_check(f) < 0)
                 return log_oom();
@@ -481,6 +563,17 @@ static int manager_sigusr2(sd_event_source *s, const struct signalfd_siginfo *si
         return 0;
 }
 
+static int manager_sigrtmin1(sd_event_source *s, const struct signalfd_siginfo *si, void *userdata) {
+        Manager *m = userdata;
+
+        assert(s);
+        assert(si);
+        assert(m);
+
+        manager_reset_server_features(m);
+        return 0;
+}
+
 int manager_new(Manager **ret) {
         _cleanup_(manager_freep) Manager *m = NULL;
         int r;
@@ -498,7 +591,7 @@ int manager_new(Manager **ret) {
         m->hostname_fd = -1;
 
         m->llmnr_support = RESOLVE_SUPPORT_YES;
-        m->mdns_support = RESOLVE_SUPPORT_NO;
+        m->mdns_support = RESOLVE_SUPPORT_YES;
         m->dnssec_mode = DEFAULT_DNSSEC_MODE;
         m->enable_cache = true;
         m->dns_stub_listener_mode = DNS_STUB_LISTENER_UDP;
@@ -512,7 +605,7 @@ int manager_new(Manager **ret) {
 
         r = manager_parse_config_file(m);
         if (r < 0)
-                return r;
+                log_warning_errno(r, "Failed to parse configuration file: %m");
 
         r = sd_event_default(&m->event);
         if (r < 0)
@@ -526,6 +619,10 @@ int manager_new(Manager **ret) {
         r = manager_watch_hostname(m);
         if (r < 0)
                 return r;
+
+        r = dnssd_load(m);
+        if (r < 0)
+                log_warning_errno(r, "Failed to load DNS-SD configuration files: %m");
 
         r = dns_scope_new(m, &m->unicast_scope, NULL, DNS_PROTOCOL_DNS, AF_UNSPEC);
         if (r < 0)
@@ -545,6 +642,7 @@ int manager_new(Manager **ret) {
 
         (void) sd_event_add_signal(m->event, &m->sigusr1_event_source, SIGUSR1, manager_sigusr1, m);
         (void) sd_event_add_signal(m->event, &m->sigusr2_event_source, SIGUSR2, manager_sigusr2, m);
+        (void) sd_event_add_signal(m->event, &m->sigrtmin1_event_source, SIGRTMIN+1, manager_sigrtmin1, m);
 
         manager_cleanup_saved_user(m);
 
@@ -563,19 +661,12 @@ int manager_start(Manager *m) {
         if (r < 0)
                 return r;
 
-        r = manager_llmnr_start(m);
-        if (r < 0)
-                return r;
-
-        r = manager_mdns_start(m);
-        if (r < 0)
-                return r;
-
         return 0;
 }
 
 Manager *manager_free(Manager *m) {
         Link *l;
+        DnssdService *s;
 
         if (!m)
                 return NULL;
@@ -616,16 +707,25 @@ Manager *manager_free(Manager *m) {
 
         sd_event_source_unref(m->sigusr1_event_source);
         sd_event_source_unref(m->sigusr2_event_source);
+        sd_event_source_unref(m->sigrtmin1_event_source);
 
         sd_event_unref(m->event);
 
         dns_resource_key_unref(m->llmnr_host_ipv4_key);
         dns_resource_key_unref(m->llmnr_host_ipv6_key);
+        dns_resource_key_unref(m->mdns_host_ipv4_key);
+        dns_resource_key_unref(m->mdns_host_ipv6_key);
 
         sd_event_source_unref(m->hostname_event_source);
         safe_close(m->hostname_fd);
+
+        free(m->full_hostname);
         free(m->llmnr_hostname);
         free(m->mdns_hostname);
+
+        while ((s = hashmap_first(m->dnssd_services)))
+               dnssd_service_free(s);
+        hashmap_free(m->dnssd_services);
 
         dns_trust_anchor_flush(&m->trust_anchor);
         manager_etc_hosts_flush(m);
@@ -656,7 +756,7 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
         if (ms < 0)
                 return ms;
 
-        r = dns_packet_new(&p, protocol, ms);
+        r = dns_packet_new(&p, protocol, ms, DNS_PACKET_SIZE_MAX);
         if (r < 0)
                 return r;
 
@@ -674,7 +774,7 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
         if (l == 0)
                 return 0;
         if (l < 0) {
-                if (errno == EAGAIN || errno == EINTR)
+                if (IN_SET(errno, EAGAIN, EINTR))
                         return 0;
 
                 return -errno;
@@ -1002,11 +1102,19 @@ int manager_find_ifindex(Manager *m, int family, const union in_addr_union *in_a
 void manager_refresh_rrs(Manager *m) {
         Iterator i;
         Link *l;
+        DnssdService *s;
 
         assert(m);
 
         m->llmnr_host_ipv4_key = dns_resource_key_unref(m->llmnr_host_ipv4_key);
         m->llmnr_host_ipv6_key = dns_resource_key_unref(m->llmnr_host_ipv6_key);
+        m->mdns_host_ipv4_key = dns_resource_key_unref(m->mdns_host_ipv4_key);
+        m->mdns_host_ipv6_key = dns_resource_key_unref(m->mdns_host_ipv6_key);
+
+        if (m->mdns_support == RESOLVE_SUPPORT_YES)
+                HASHMAP_FOREACH(s, m->dnssd_services, i)
+                        if (dnssd_update_rrs(s) < 0)
+                                log_warning("Failed to refresh DNS-SD service '%s'", s->name);
 
         HASHMAP_FOREACH(l, m->links, i) {
                 link_add_rrs(l, true);
@@ -1014,19 +1122,16 @@ void manager_refresh_rrs(Manager *m) {
         }
 }
 
-int manager_next_hostname(Manager *m) {
+static int manager_next_random_name(const char *old, char **ret_new) {
         const char *p;
         uint64_t u, a;
-        char *h, *k;
-        int r;
+        char *n;
 
-        assert(m);
-
-        p = strchr(m->llmnr_hostname, 0);
+        p = strchr(old, 0);
         assert(p);
 
-        while (p > m->llmnr_hostname) {
-                if (!strchr("0123456789", p[-1]))
+        while (p > old) {
+                if (!strchr(DIGITS, p[-1]))
                         break;
 
                 p--;
@@ -1045,22 +1150,32 @@ int manager_next_hostname(Manager *m) {
         random_bytes(&a, sizeof(a));
         u += 1 + a % 10;
 
-        if (asprintf(&h, "%.*s%" PRIu64, (int) (p - m->llmnr_hostname), m->llmnr_hostname, u) < 0)
+        if (asprintf(&n, "%.*s%" PRIu64, (int) (p - old), old, u) < 0)
                 return -ENOMEM;
 
-        r = dns_name_concat(h, "local", &k);
-        if (r < 0) {
-                free(h);
+        *ret_new = n;
+
+        return 0;
+}
+
+int manager_next_hostname(Manager *m) {
+        _cleanup_free_ char *h = NULL, *k = NULL;
+        int r;
+
+        assert(m);
+
+        r = manager_next_random_name(m->llmnr_hostname, &h);
+        if (r < 0)
                 return r;
-        }
+
+        r = dns_name_concat(h, "local", &k);
+        if (r < 0)
+                return r;
 
         log_info("Hostname conflict, changing published hostname from '%s' to '%s'.", m->llmnr_hostname, h);
 
-        free(m->llmnr_hostname);
-        m->llmnr_hostname = h;
-
-        free(m->mdns_hostname);
-        m->mdns_hostname = k;
+        free_and_replace(m->llmnr_hostname, h);
+        free_and_replace(m->mdns_hostname, k);
 
         manager_refresh_rrs(m);
 
@@ -1146,8 +1261,14 @@ int manager_is_own_hostname(Manager *m, const char *name) {
                         return r;
         }
 
-        if (m->mdns_hostname)
-                return dns_name_equal(name, m->mdns_hostname);
+        if (m->mdns_hostname) {
+                r = dns_name_equal(name, m->mdns_hostname);
+                if (r != 0)
+                        return r;
+        }
+
+        if (m->full_hostname)
+                return dns_name_equal(name, m->full_hostname);
 
         return 0;
 }
@@ -1284,7 +1405,7 @@ void manager_dnssec_verdict(Manager *m, DnssecVerdict verdict, const DnsResource
         assert(verdict >= 0);
         assert(verdict < _DNSSEC_VERDICT_MAX);
 
-        if (log_get_max_level() >= LOG_DEBUG) {
+        if (DEBUG_LOGGING) {
                 char s[DNS_RESOURCE_KEY_STRING_MAX];
 
                 log_debug("Found verdict for lookup %s: %s",
@@ -1321,6 +1442,19 @@ void manager_flush_caches(Manager *m) {
         log_info("Flushed all caches.");
 }
 
+void manager_reset_server_features(Manager *m) {
+        Iterator i;
+        Link *l;
+
+        dns_server_reset_features_all(m->dns_servers);
+        dns_server_reset_features_all(m->fallback_dns_servers);
+
+        HASHMAP_FOREACH(l, m->links, i)
+                dns_server_reset_features_all(l->dns_servers);
+
+        log_info("Resetting learnt feature levels on all servers.");
+}
+
 void manager_cleanup_saved_user(Manager *m) {
         _cleanup_closedir_ DIR *d = NULL;
         struct dirent *de;
@@ -1349,7 +1483,7 @@ void manager_cleanup_saved_user(Manager *m) {
                 if (!IN_SET(de->d_type, DT_UNKNOWN, DT_REG))
                         continue;
 
-                if (STR_IN_SET(de->d_name, ".", ".."))
+                if (dot_or_dot_dot(de->d_name))
                         continue;
 
                 r = parse_ifindex(de->d_name, &ifindex);
@@ -1374,4 +1508,37 @@ void manager_cleanup_saved_user(Manager *m) {
 
                 (void) unlink(p);
         }
+}
+
+bool manager_next_dnssd_names(Manager *m) {
+        Iterator i;
+        DnssdService *s;
+        bool tried = false;
+        int r;
+
+        assert(m);
+
+        HASHMAP_FOREACH(s, m->dnssd_services, i) {
+                _cleanup_free_ char * new_name = NULL;
+
+                if (!s->withdrawn)
+                        continue;
+
+                r = manager_next_random_name(s->name_template, &new_name);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to get new name for service '%s': %m", s->name);
+                        continue;
+                }
+
+                free_and_replace(s->name_template, new_name);
+
+                s->withdrawn = false;
+
+                tried = true;
+        }
+
+        if (tried)
+                manager_refresh_rrs(m);
+
+        return tried;
 }

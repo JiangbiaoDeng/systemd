@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -34,18 +35,43 @@
 #include "strv.h"
 #include "util.h"
 
-bool fstab_is_mount_point(const char *mount) {
+int fstab_has_fstype(const char *fstype) {
         _cleanup_endmntent_ FILE *f = NULL;
         struct mntent *m;
 
-        f = setmntent("/etc/fstab", "r");
+        f = setmntent("/etc/fstab", "re");
         if (!f)
-                return false;
+                return errno == ENOENT ? false : -errno;
 
-        while ((m = getmntent(f)))
+        for (;;) {
+                errno = 0;
+                m = getmntent(f);
+                if (!m)
+                        return errno != 0 ? -errno : false;
+
+                if (streq(m->mnt_type, fstype))
+                        return true;
+        }
+        return false;
+}
+
+int fstab_is_mount_point(const char *mount) {
+        _cleanup_endmntent_ FILE *f = NULL;
+        struct mntent *m;
+
+        f = setmntent("/etc/fstab", "re");
+        if (!f)
+                return errno == ENOENT ? false : -errno;
+
+        for (;;) {
+                errno = 0;
+                m = getmntent(f);
+                if (!m)
+                        return errno != 0 ? -errno : false;
+
                 if (path_equal(m->mnt_dir, mount))
                         return true;
-
+        }
         return false;
 }
 
@@ -143,10 +169,8 @@ answer:
 
                 *filtered = f;
         }
-        if (value) {
-                *value = v;
-                v = NULL;
-        }
+        if (value)
+                *value = TAKE_PTR(v);
 
         return !!n;
 }
@@ -175,8 +199,7 @@ int fstab_extract_values(const char *opts, const char *name, char ***values) {
                         return r;
         }
 
-        *values = res;
-        res = NULL;
+        *values = TAKE_PTR(res);
 
         return !!*values;
 }
@@ -213,7 +236,7 @@ static char *unquote(const char *s, const char* quotes) {
          * trailing quotes if there is one. Doesn't care about
          * escaping or anything.
          *
-         * DON'T USE THIS FOR NEW CODE ANYMORE!*/
+         * DON'T USE THIS FOR NEW CODE ANYMORE! */
 
         l = strlen(s);
         if (l < 2)

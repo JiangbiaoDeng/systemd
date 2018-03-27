@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -27,6 +28,11 @@ struct VLan {
         NetDev meta;
 
         uint16_t id;
+
+        int gvrp;
+        int mvrp;
+        int loose_binding;
+        int reorder_hdr;
 };
 
 DEFINE_NETDEV_CAST(VLAN, VLan);

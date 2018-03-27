@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -107,6 +108,7 @@ static int bus_error_name_to_errno(const char *name) {
                         }
 
         m = __start_BUS_ERROR_MAP;
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
         while (m < __stop_BUS_ERROR_MAP) {
                 /* For magic ELF error maps, the end marker might
                  * appear in the middle of things, since multiple maps
@@ -124,6 +126,7 @@ static int bus_error_name_to_errno(const char *name) {
 
                 m++;
         }
+#endif
 
         return EIO;
 }
@@ -594,7 +597,7 @@ _public_ int sd_bus_error_add_map(const sd_bus_error_map *map) {
                         if (additional_error_maps[n] == map)
                                 return 0;
 
-        maps = realloc_multiply(additional_error_maps, sizeof(struct sd_bus_error_map*), n + 2);
+        maps = reallocarray(additional_error_maps, n + 2, sizeof(struct sd_bus_error_map*));
         if (!maps)
                 return -ENOMEM;
 

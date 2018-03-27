@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -36,6 +37,7 @@
 #include "import-common.h"
 #include "missing.h"
 #include "ratelimit.h"
+#include "stat-util.h"
 #include "string-util.h"
 #include "util.h"
 
@@ -318,18 +320,16 @@ int raw_export_start(RawExport *e, const char *path, int fd, ImportCompressType 
 
         if (fstat(sfd, &e->st) < 0)
                 return -errno;
-        if (!S_ISREG(e->st.st_mode))
-                return -ENOTTY;
+        r = stat_verify_regular(&e->st);
+        if (r < 0)
+                return r;
 
         /* Try to take a reflink snapshot of the file, if we can t make the export atomic */
         tfd = reflink_snapshot(sfd, path);
-        if (tfd >= 0) {
-                e->input_fd = tfd;
-                tfd = -1;
-        } else {
-                e->input_fd = sfd;
-                sfd = -1;
-        }
+        if (tfd >= 0)
+                e->input_fd = TAKE_FD(tfd);
+        else
+                e->input_fd = TAKE_FD(sfd);
 
         r = import_compress_init(&e->compress, compress);
         if (r < 0)

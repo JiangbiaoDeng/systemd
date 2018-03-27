@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /*
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published by
@@ -28,5 +29,13 @@
 #define KEYCHAR(k) ((k) & 0xffff)
 #define CHAR_CTRL(c) ((c) - 'a' + 1)
 
+enum console_mode_change_type {
+        CONSOLE_MODE_KEEP = 0,
+        CONSOLE_MODE_SET,
+        CONSOLE_MODE_AUTO,
+        CONSOLE_MODE_MAX,
+};
+
 EFI_STATUS console_key_read(UINT64 *key, BOOLEAN wait);
+EFI_STATUS console_set_mode(UINTN *mode, enum console_mode_change_type how);
 #endif

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -16,6 +17,8 @@
   You should have received a copy of the GNU Lesser General Public License
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
+
+#include <sys/wait.h>
 
 #include "alloc-util.h"
 #include "fd-util.h"
@@ -61,8 +64,10 @@ static int operation_done(sd_event_source *s, const siginfo_t *si, void *userdat
         } else {
                 /* The default operation when done is to simply return an error on failure or an empty success
                  * message on success. */
-                if (r < 0)
+                if (r < 0) {
+                        sd_bus_error_set_errno(&error, r);
                         goto fail;
+                }
 
                 r = sd_bus_reply_method_return(o->message, NULL);
                 if (r < 0)

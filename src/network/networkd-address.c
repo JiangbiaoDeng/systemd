@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -53,15 +54,21 @@ int address_new(Address **ret) {
         return 0;
 }
 
-int address_new_static(Network *network, unsigned section, Address **ret) {
+int address_new_static(Network *network, const char *filename, unsigned section_line, Address **ret) {
+        _cleanup_network_config_section_free_ NetworkConfigSection *n = NULL;
         _cleanup_address_free_ Address *address = NULL;
         int r;
 
         assert(network);
         assert(ret);
+        assert(!!filename == (section_line > 0));
 
-        if (section) {
-                address = hashmap_get(network->addresses_by_section, UINT_TO_PTR(section));
+        if (filename) {
+                r = network_config_section_new(filename, section_line, &n);
+                if (r < 0)
+                        return r;
+
+                address = hashmap_get(network->addresses_by_section, n);
                 if (address) {
                         *ret = address;
                         address = NULL;
@@ -77,9 +84,13 @@ int address_new_static(Network *network, unsigned section, Address **ret) {
         if (r < 0)
                 return r;
 
-        if (section) {
-                address->section = section;
-                hashmap_put(network->addresses_by_section, UINT_TO_PTR(address->section), address);
+        if (filename) {
+                address->section = n;
+                n = NULL;
+
+                r = hashmap_put(network->addresses_by_section, address->section, address);
+                if (r < 0)
+                        return r;
         }
 
         address->network = network;
@@ -101,8 +112,10 @@ void address_free(Address *address) {
                 assert(address->network->n_static_addresses > 0);
                 address->network->n_static_addresses--;
 
-                if (address->section)
-                        hashmap_remove(address->network->addresses_by_section, UINT_TO_PTR(address->section));
+                if (address->section) {
+                        hashmap_remove(address->network->addresses_by_section, address->section);
+                        network_config_section_free(address->section);
+                }
         }
 
         if (address->link) {
@@ -139,7 +152,7 @@ static void address_hash_func(const void *b, struct siphash *state) {
                         siphash24_compress(&prefix, sizeof(prefix), state);
                 }
 
-                /* fallthrough */
+                _fallthrough_;
         case AF_INET6:
                 /* local address */
                 siphash24_compress(&a->in_addr, FAMILY_ADDRESS_SIZE(a->family), state);
@@ -189,7 +202,7 @@ static int address_compare_func(const void *c1, const void *c2) {
                                 return 1;
                 }
 
-                /* fall-through */
+                _fallthrough_;
         case AF_INET6:
                 return memcmp(&a1->in_addr, &a2->in_addr, FAMILY_ADDRESS_SIZE(a1->family));
         default:
@@ -441,7 +454,7 @@ int address_remove(
         int r;
 
         assert(address);
-        assert(address->family == AF_INET || address->family == AF_INET6);
+        assert(IN_SET(address->family, AF_INET, AF_INET6));
         assert(link);
         assert(link->ifindex > 0);
         assert(link->manager);
@@ -501,7 +514,10 @@ static int address_acquire(Link *link, Address *original, Address **ret) {
                 in_addr.in.s_addr = in_addr.in.s_addr | htobe32(1);
 
                 /* .. and use last as broadcast address */
-                broadcast.s_addr = in_addr.in.s_addr | htobe32(0xFFFFFFFFUL >> original->prefixlen);
+                if (original->prefixlen > 30)
+                        broadcast.s_addr = 0;
+                else
+                        broadcast.s_addr = in_addr.in.s_addr | htobe32(0xFFFFFFFFUL >> original->prefixlen);
         } else if (original->family == AF_INET6)
                 in_addr.in6.s6_addr[15] |= 1;
 
@@ -541,7 +557,7 @@ int address_configure(
         int r;
 
         assert(address);
-        assert(address->family == AF_INET || address->family == AF_INET6);
+        assert(IN_SET(address->family, AF_INET, AF_INET6));
         assert(link);
         assert(link->ifindex > 0);
         assert(link->manager);
@@ -616,9 +632,11 @@ int address_configure(
                         return log_error_errno(r, "Could not append IFA_ADDRESS attribute: %m");
         } else {
                 if (address->family == AF_INET) {
-                        r = sd_netlink_message_append_in_addr(req, IFA_BROADCAST, &address->broadcast);
-                        if (r < 0)
-                                return log_error_errno(r, "Could not append IFA_BROADCAST attribute: %m");
+                        if (address->prefixlen <= 30) {
+                                r = sd_netlink_message_append_in_addr(req, IFA_BROADCAST, &address->broadcast);
+                                if (r < 0)
+                                        return log_error_errno(r, "Could not append IFA_BROADCAST attribute: %m");
+                        }
                 }
         }
 
@@ -676,7 +694,7 @@ int config_parse_broadcast(
         assert(rvalue);
         assert(data);
 
-        r = address_new_static(network, section_line, &n);
+        r = address_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -723,10 +741,10 @@ int config_parse_address(const char *unit,
         if (streq(section, "Network")) {
                 /* we are not in an Address section, so treat
                  * this as the special '0' section */
-                section_line = 0;
-        }
+                r = address_new_static(network, NULL, 0, &n);
+        } else
+                r = address_new_static(network, filename, section_line, &n);
 
-        r = address_new_static(network, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -756,9 +774,9 @@ int config_parse_address(const char *unit,
         }
 
         if (!e && f == AF_INET) {
-                r = in_addr_default_prefixlen(&buffer.in, &n->prefixlen);
+                r = in4_addr_default_prefixlen(&buffer.in, &n->prefixlen);
                 if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Prefix length not specified, and a default one can not be deduced for '%s', ignoring assignment", address);
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Prefix length not specified, and a default one cannot be deduced for '%s', ignoring assignment", address);
                         return 0;
                 }
         }
@@ -805,12 +823,12 @@ int config_parse_label(
         assert(rvalue);
         assert(data);
 
-        r = address_new_static(network, section_line, &n);
+        r = address_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
-        if (!ifname_valid(rvalue)) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Interface label is not valid or too long, ignoring assignment: %s", rvalue);
+        if (!address_label_valid(rvalue)) {
+                log_syntax(unit, LOG_ERR, filename, line, 0, "Interface label is too long or invalid, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
@@ -844,7 +862,7 @@ int config_parse_lifetime(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = address_new_static(network, section_line, &n);
+        r = address_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -891,7 +909,7 @@ int config_parse_address_flags(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = address_new_static(network, section_line, &n);
+        r = address_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -915,8 +933,54 @@ int config_parse_address_flags(const char *unit,
         return 0;
 }
 
+int config_parse_address_scope(const char *unit,
+                               const char *filename,
+                               unsigned line,
+                               const char *section,
+                               unsigned section_line,
+                               const char *lvalue,
+                               int ltype,
+                               const char *rvalue,
+                               void *data,
+                               void *userdata) {
+        Network *network = userdata;
+        _cleanup_address_free_ Address *n = NULL;
+        int r;
+
+        assert(filename);
+        assert(section);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        r = address_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        if (streq(rvalue, "host"))
+                n->scope = RT_SCOPE_HOST;
+        else if (streq(rvalue, "link"))
+                n->scope = RT_SCOPE_LINK;
+        else if (streq(rvalue, "global"))
+                n->scope = RT_SCOPE_UNIVERSE;
+        else {
+                r = safe_atou8(rvalue , &n->scope);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Could not parse address scope \"%s\", ignoring assignment: %m", rvalue);
+                        return 0;
+                }
+        }
+
+        n = NULL;
+
+        return 0;
+}
+
 bool address_is_ready(const Address *a) {
         assert(a);
 
-        return !(a->flags & (IFA_F_TENTATIVE | IFA_F_DEPRECATED));
+        if (a->family == AF_INET6)
+                return !(a->flags & IFA_F_TENTATIVE);
+        else
+                return !(a->flags & (IFA_F_TENTATIVE | IFA_F_DEPRECATED));
 }

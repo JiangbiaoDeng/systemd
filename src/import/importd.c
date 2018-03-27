@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -18,6 +19,7 @@
 ***/
 
 #include <sys/prctl.h>
+#include <sys/wait.h>
 
 #include "sd-bus.h"
 
@@ -250,7 +252,7 @@ static void transfer_send_logs(Transfer *t, bool flush) {
                 n = strndup(t->log_message, e - t->log_message);
 
                 /* Skip over NUL and newlines */
-                while ((e < t->log_message + t->log_message_size) && (*e == 0 || *e == '\n'))
+                while (e < t->log_message + t->log_message_size && (*e == 0 || *e == '\n'))
                         e++;
 
                 memmove(t->log_message, e, t->log_message + sizeof(t->log_message) - e);
@@ -321,8 +323,7 @@ static int transfer_on_pid(sd_event_source *s, const siginfo_t *si, void *userda
                         success = true;
                 }
 
-        } else if (si->si_code == CLD_KILLED ||
-                   si->si_code == CLD_DUMPED)
+        } else if (IN_SET(si->si_code, CLD_KILLED, CLD_DUMPED))
 
                 log_error("Import process terminated by signal %s.", signal_to_string(si->si_status));
         else
@@ -370,10 +371,10 @@ static int transfer_start(Transfer *t) {
         if (pipe2(pipefd, O_CLOEXEC) < 0)
                 return -errno;
 
-        t->pid = fork();
-        if (t->pid < 0)
-                return -errno;
-        if (t->pid == 0) {
+        r = safe_fork("(sd-transfer)", FORK_RESET_SIGNALS|FORK_DEATHSIG, &t->pid);
+        if (r < 0)
+                return r;
+        if (r == 0) {
                 const char *cmd[] = {
                         NULL, /* systemd-import, systemd-export or systemd-pull */
                         NULL, /* tar, raw  */
@@ -392,65 +393,21 @@ static int transfer_start(Transfer *t) {
 
                 /* Child */
 
-                (void) reset_all_signal_handlers();
-                (void) reset_signal_mask();
-                assert_se(prctl(PR_SET_PDEATHSIG, SIGTERM) == 0);
-
                 pipefd[0] = safe_close(pipefd[0]);
 
-                if (dup2(pipefd[1], STDERR_FILENO) != STDERR_FILENO) {
-                        log_error_errno(errno, "Failed to dup2() fd: %m");
+                r = rearrange_stdio(t->stdin_fd,
+                                    t->stdout_fd < 0 ? pipefd[1] : t->stdout_fd,
+                                    pipefd[1]);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to set stdin/stdout/stderr: %m");
                         _exit(EXIT_FAILURE);
                 }
 
-                if (t->stdout_fd >= 0) {
-                        if (dup2(t->stdout_fd, STDOUT_FILENO) != STDOUT_FILENO) {
-                                log_error_errno(errno, "Failed to dup2() fd: %m");
-                                _exit(EXIT_FAILURE);
-                        }
-
-                        if (t->stdout_fd != STDOUT_FILENO)
-                                safe_close(t->stdout_fd);
-                } else {
-                        if (dup2(pipefd[1], STDOUT_FILENO) != STDOUT_FILENO) {
-                                log_error_errno(errno, "Failed to dup2() fd: %m");
-                                _exit(EXIT_FAILURE);
-                        }
+                if (setenv("SYSTEMD_LOG_TARGET", "console-prefixed", 1) < 0 ||
+                    setenv("NOTIFY_SOCKET", "/run/systemd/import/notify", 1) < 0) {
+                        log_error_errno(errno, "setenv() failed: %m");
+                        _exit(EXIT_FAILURE);
                 }
-
-                if (pipefd[1] != STDOUT_FILENO && pipefd[1] != STDERR_FILENO)
-                        pipefd[1] = safe_close(pipefd[1]);
-
-                if (t->stdin_fd >= 0) {
-                        if (dup2(t->stdin_fd, STDIN_FILENO) != STDIN_FILENO) {
-                                log_error_errno(errno, "Failed to dup2() fd: %m");
-                                _exit(EXIT_FAILURE);
-                        }
-
-                        if (t->stdin_fd != STDIN_FILENO)
-                                safe_close(t->stdin_fd);
-                } else {
-                        int null_fd;
-
-                        null_fd = open("/dev/null", O_RDONLY|O_NOCTTY);
-                        if (null_fd < 0) {
-                                log_error_errno(errno, "Failed to open /dev/null: %m");
-                                _exit(EXIT_FAILURE);
-                        }
-
-                        if (dup2(null_fd, STDIN_FILENO) != STDIN_FILENO) {
-                                log_error_errno(errno, "Failed to dup2() fd: %m");
-                                _exit(EXIT_FAILURE);
-                        }
-
-                        if (null_fd != STDIN_FILENO)
-                                safe_close(null_fd);
-                }
-
-                stdio_unset_cloexec();
-
-                setenv("SYSTEMD_LOG_TARGET", "console-prefixed", 1);
-                setenv("NOTIFY_SOCKET", "/run/systemd/import/notify", 1);
 
                 if (IN_SET(t->type, TRANSFER_IMPORT_TAR, TRANSFER_IMPORT_RAW))
                         cmd[k++] = SYSTEMD_IMPORT_PATH;
@@ -496,8 +453,7 @@ static int transfer_start(Transfer *t) {
         }
 
         pipefd[1] = safe_close(pipefd[1]);
-        t->log_fd = pipefd[0];
-        pipefd[0] = -1;
+        t->log_fd = TAKE_FD(pipefd[0]);
 
         t->stdin_fd = safe_close(t->stdin_fd);
 
@@ -582,7 +538,7 @@ static int manager_on_notify(sd_event_source *s, int fd, uint32_t revents, void 
 
         n = recvmsg(fd, &msghdr, MSG_DONTWAIT|MSG_CMSG_CLOEXEC);
         if (n < 0) {
-                if (errno == EAGAIN || errno == EINTR)
+                if (IN_SET(errno, EAGAIN, EINTR))
                         return 0;
 
                 return -errno;
@@ -1126,8 +1082,7 @@ static int transfer_node_enumerator(sd_bus *bus, const char *path, void *userdat
                 k++;
         }
 
-        *nodes = l;
-        l = NULL;
+        *nodes = TAKE_PTR(l);
 
         return 1;
 }
@@ -1149,9 +1104,9 @@ static int manager_add_bus_objects(Manager *m) {
         if (r < 0)
                 return log_error_errno(r, "Failed to add transfer enumerator: %m");
 
-        r = sd_bus_request_name(m->bus, "org.freedesktop.import1", 0);
+        r = sd_bus_request_name_async(m->bus, NULL, "org.freedesktop.import1", 0, NULL, NULL);
         if (r < 0)
-                return log_error_errno(r, "Failed to register name: %m");
+                return log_error_errno(r, "Failed to request name: %m");
 
         r = sd_bus_attach_event(m->bus, m->event, 0);
         if (r < 0)

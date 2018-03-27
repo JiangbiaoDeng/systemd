@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -31,6 +32,7 @@
 #include "fd-util.h"
 #include "log.h"
 #include "macro.h"
+#include "process-util.h"
 #include "signal-util.h"
 #include "socket-util.h"
 #include "string-util.h"
@@ -197,15 +199,10 @@ static int exec_process(const char* name, char **argv, char **env, int start_fd,
         if (arg_inetd) {
                 assert(n_fds == 1);
 
-                r = dup2(start_fd, STDIN_FILENO);
+                r = rearrange_stdio(start_fd, start_fd, STDERR_FILENO); /* invalidates start_fd on success + error */
                 if (r < 0)
-                        return log_error_errno(errno, "Failed to dup connection to stdin: %m");
+                        return log_error_errno(errno, "Failed to move fd to stdin+stdout: %m");
 
-                r = dup2(start_fd, STDOUT_FILENO);
-                if (r < 0)
-                        return log_error_errno(errno, "Failed to dup connection to stdout: %m");
-
-                start_fd = safe_close(start_fd);
         } else {
                 if (start_fd != SD_LISTEN_FDS_START) {
                         assert(n_fds == 1);
@@ -221,7 +218,7 @@ static int exec_process(const char* name, char **argv, char **env, int start_fd,
                 if (asprintf((char**)(envp + n_env++), "LISTEN_FDS=%i", n_fds) < 0)
                         return log_oom();
 
-                if (asprintf((char**)(envp + n_env++), "LISTEN_PID=" PID_FMT, getpid()) < 0)
+                if (asprintf((char**)(envp + n_env++), "LISTEN_PID=" PID_FMT, getpid_cached()) < 0)
                         return log_oom();
 
                 if (arg_fdnames) {
@@ -265,38 +262,23 @@ static int exec_process(const char* name, char **argv, char **env, int start_fd,
 
 static int fork_and_exec_process(const char* child, char** argv, char **env, int fd) {
         _cleanup_free_ char *joined = NULL;
-        pid_t parent_pid, child_pid;
+        pid_t child_pid;
+        int r;
 
         joined = strv_join(argv, " ");
         if (!joined)
                 return log_oom();
 
-        parent_pid = getpid();
-
-        child_pid = fork();
-        if (child_pid < 0)
-                return log_error_errno(errno, "Failed to fork: %m");
-
-        /* In the child */
-        if (child_pid == 0) {
-
-                (void) reset_all_signal_handlers();
-                (void) reset_signal_mask();
-
-                /* Make sure the child goes away when the parent dies */
-                if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0)
-                        _exit(EXIT_FAILURE);
-
-                /* Check whether our parent died before we were able
-                 * to set the death signal */
-                if (getppid() != parent_pid)
-                        _exit(EXIT_SUCCESS);
-
+        r = safe_fork("(activate)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &child_pid);
+        if (r < 0)
+                return r;
+        if (r == 0) {
+                /* In the child */
                 exec_process(child, argv, env, fd, 1);
                 _exit(EXIT_FAILURE);
         }
 
-        log_info("Spawned %s (%s) as PID %d", child, joined, child_pid);
+        log_info("Spawned %s (%s) as PID " PID_FMT ".", child, joined, child_pid);
         return 0;
 }
 
@@ -339,7 +321,7 @@ static void sigchld_hdl(int sig) {
 
 static int install_chld_handler(void) {
         static const struct sigaction act = {
-                .sa_flags = SA_NOCLDSTOP,
+                .sa_flags = SA_NOCLDSTOP|SA_RESTART,
                 .sa_handler = sigchld_hdl,
         };
 

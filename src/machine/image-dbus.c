@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,14 +18,24 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include <sys/file.h>
+#include <sys/mount.h>
+
 #include "alloc-util.h"
 #include "bus-label.h"
 #include "bus-util.h"
+#include "copy.h"
+#include "dissect-image.h"
 #include "fd-util.h"
+#include "fileio.h"
+#include "fs-util.h"
 #include "image-dbus.h"
 #include "io-util.h"
+#include "loop-util.h"
 #include "machine-image.h"
+#include "mount-util.h"
 #include "process-util.h"
+#include "raw-clone.h"
 #include "strv.h"
 #include "user-util.h"
 
@@ -64,10 +75,10 @@ int bus_image_method_remove(
         if (pipe2(errno_pipe_fd, O_CLOEXEC|O_NONBLOCK) < 0)
                 return sd_bus_error_set_errnof(error, errno, "Failed to create pipe: %m");
 
-        child = fork();
-        if (child < 0)
-                return sd_bus_error_set_errnof(error, errno, "Failed to fork(): %m");
-        if (child == 0) {
+        r = safe_fork("(sd-imgrm)", FORK_RESET_SIGNALS, &child);
+        if (r < 0)
+                return sd_bus_error_set_errnof(error, r, "Failed to fork(): %m");
+        if (r == 0) {
                 errno_pipe_fd[0] = safe_close(errno_pipe_fd[0]);
 
                 r = image_remove(image);
@@ -176,10 +187,10 @@ int bus_image_method_clone(
         if (pipe2(errno_pipe_fd, O_CLOEXEC|O_NONBLOCK) < 0)
                 return sd_bus_error_set_errnof(error, errno, "Failed to create pipe: %m");
 
-        child = fork();
-        if (child < 0)
-                return sd_bus_error_set_errnof(error, errno, "Failed to fork(): %m");
-        if (child == 0) {
+        r = safe_fork("(imgclone)", FORK_RESET_SIGNALS, &child);
+        if (r < 0)
+                return sd_bus_error_set_errnof(error, r, "Failed to fork(): %m");
+        if (r == 0) {
                 errno_pipe_fd[0] = safe_close(errno_pipe_fd[0]);
 
                 r = image_clone(image, new_name, read_only);
@@ -279,6 +290,86 @@ int bus_image_method_set_limit(
         return sd_bus_reply_method_return(message, NULL);
 }
 
+int bus_image_method_get_hostname(
+                sd_bus_message *message,
+                void *userdata,
+                sd_bus_error *error) {
+
+        Image *image = userdata;
+        int r;
+
+        if (!image->metadata_valid) {
+                r = image_read_metadata(image);
+                if (r < 0)
+                        return sd_bus_error_set_errnof(error, r, "Failed to read image metadata: %m");
+        }
+
+        return sd_bus_reply_method_return(message, "s", image->hostname);
+}
+
+int bus_image_method_get_machine_id(
+                sd_bus_message *message,
+                void *userdata,
+                sd_bus_error *error) {
+
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        Image *image = userdata;
+        int r;
+
+        if (!image->metadata_valid) {
+                r = image_read_metadata(image);
+                if (r < 0)
+                        return sd_bus_error_set_errnof(error, r, "Failed to read image metadata: %m");
+        }
+
+        r = sd_bus_message_new_method_return(message, &reply);
+        if (r < 0)
+                return r;
+
+        if (sd_id128_is_null(image->machine_id)) /* Add an empty array if the ID is zero */
+                r = sd_bus_message_append(reply, "ay", 0);
+        else
+                r = sd_bus_message_append_array(reply, 'y', image->machine_id.bytes, 16);
+        if (r < 0)
+                return r;
+
+        return sd_bus_send(NULL, reply, NULL);
+}
+
+int bus_image_method_get_machine_info(
+                sd_bus_message *message,
+                void *userdata,
+                sd_bus_error *error) {
+
+        Image *image = userdata;
+        int r;
+
+        if (!image->metadata_valid) {
+                r = image_read_metadata(image);
+                if (r < 0)
+                        return sd_bus_error_set_errnof(error, r, "Failed to read image metadata: %m");
+        }
+
+        return bus_reply_pair_array(message, image->machine_info);
+}
+
+int bus_image_method_get_os_release(
+                sd_bus_message *message,
+                void *userdata,
+                sd_bus_error *error) {
+
+        Image *image = userdata;
+        int r;
+
+        if (!image->metadata_valid) {
+                r = image_read_metadata(image);
+                if (r < 0)
+                        return sd_bus_error_set_errnof(error, r, "Failed to read image metadata: %m");
+        }
+
+        return bus_reply_pair_array(message, image->os_release);
+}
+
 const sd_bus_vtable image_vtable[] = {
         SD_BUS_VTABLE_START(0),
         SD_BUS_PROPERTY("Name", "s", NULL, offsetof(Image, name), 0),
@@ -296,19 +387,20 @@ const sd_bus_vtable image_vtable[] = {
         SD_BUS_METHOD("Clone", "sb", NULL, bus_image_method_clone, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("MarkReadOnly", "b", NULL, bus_image_method_mark_read_only, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("SetLimit", "t", NULL, bus_image_method_set_limit, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetHostname", NULL, "s", bus_image_method_get_hostname, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetMachineID", NULL, "ay", bus_image_method_get_machine_id, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetMachineInfo", NULL, "a{ss}", bus_image_method_get_machine_info, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetOSRelease", NULL, "a{ss}", bus_image_method_get_os_release, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_VTABLE_END
 };
 
 static int image_flush_cache(sd_event_source *s, void *userdata) {
         Manager *m = userdata;
-        Image *i;
 
         assert(s);
         assert(m);
 
-        while ((i = hashmap_steal_first(m->image_cache)))
-                image_unref(i);
-
+        hashmap_clear_with_destructor(m->image_cache, image_unref);
         return 0;
 }
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
  This file is part of systemd.
 
@@ -58,7 +59,7 @@ static const char* const link_dirs[] = {
         "/etc/systemd/network",
         "/run/systemd/network",
         "/usr/lib/systemd/network",
-#ifdef HAVE_SPLIT_USR
+#if HAVE_SPLIT_USR
         "/lib/systemd/network",
 #endif
         NULL};
@@ -76,7 +77,8 @@ static void link_config_free(link_config *link) {
         free(link->match_name);
         free(link->match_host);
         free(link->match_virt);
-        free(link->match_kernel);
+        free(link->match_kernel_cmdline);
+        free(link->match_kernel_version);
         free(link->match_arch);
 
         free(link->description);
@@ -167,14 +169,15 @@ static int load_link(link_config_ctx *ctx, const char *filename) {
         link->mac_policy = _MACPOLICY_INVALID;
         link->wol = _WOL_INVALID;
         link->duplex = _DUP_INVALID;
+        link->port = _NET_DEV_PORT_INVALID;
         link->autonegotiation = -1;
 
-        memset(&link->features, -1, sizeof(link->features));
+        memset(&link->features, 0xFF, sizeof(link->features));
 
         r = config_parse(NULL, filename, file,
                          "Match\0Link\0Ethernet\0",
                          config_item_perf_lookup, link_config_gperf_lookup,
-                         false, false, true, link);
+                         CONFIG_PARSE_WARN, link);
         if (r < 0)
                 return r;
         else
@@ -184,6 +187,8 @@ static int load_link(link_config_ctx *ctx, const char *filename) {
                 return -ERANGE;
 
         link->filename = strdup(filename);
+        if (!link->filename)
+                return log_oom();
 
         LIST_PREPEND(links, ctx->links, link);
         link = NULL;
@@ -192,14 +197,9 @@ static int load_link(link_config_ctx *ctx, const char *filename) {
 }
 
 static bool enable_name_policy(void) {
-        _cleanup_free_ char *value = NULL;
-        int r;
+        bool b;
 
-        r = get_proc_cmdline_key("net.ifnames=", &value);
-        if (r > 0 && streq(value, "0"))
-            return false;
-
-        return true;
+        return proc_cmdline_get_bool("net.ifnames", &b) <= 0 || b;
 }
 
 int link_config_load(link_config_ctx *ctx) {
@@ -217,7 +217,7 @@ int link_config_load(link_config_ctx *ctx) {
         /* update timestamp */
         paths_check_timestamp(link_dirs, &ctx->link_dirs_ts_usec, true);
 
-        r = conf_files_list_strv(&files, ".link", NULL, link_dirs);
+        r = conf_files_list_strv(&files, ".link", NULL, 0, link_dirs);
         if (r < 0)
                 return log_error_errno(r, "failed to enumerate link files: %m");
 
@@ -249,7 +249,8 @@ int link_config_get(link_config_ctx *ctx, struct udev_device *device,
 
                 if (net_match_config(link->match_mac, link->match_path, link->match_driver,
                                      link->match_type, link->match_name, link->match_host,
-                                     link->match_virt, link->match_kernel, link->match_arch,
+                                     link->match_virt, link->match_kernel_cmdline,
+                                     link->match_kernel_version, link->match_arch,
                                      attr_value ? ether_aton(attr_value) : NULL,
                                      udev_device_get_property_value(device, "ID_PATH"),
                                      udev_device_get_driver(udev_device_get_parent(device)),
@@ -331,7 +332,7 @@ static bool should_rename(struct udev_device *device, bool respect_predictable) 
                 /* the kernel claims to have given a predictable name */
                 if (respect_predictable)
                         return false;
-                /* fall through */
+                _fallthrough_;
         case NET_NAME_ENUM:
         default:
                 /* the name is known to be bad, or of an unknown type */
@@ -382,12 +383,13 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
         if (!old_name)
                 return -EINVAL;
 
-
-        speed = DIV_ROUND_UP(config->speed, 1000000);
-
-        r = ethtool_set_glinksettings(&ctx->ethtool_fd, old_name, speed, config->duplex, config->autonegotiation);
+        r = ethtool_set_glinksettings(&ctx->ethtool_fd, old_name, config);
         if (r < 0) {
 
+                if (config->port != _NET_DEV_PORT_INVALID)
+                        log_warning_errno(r,  "Could not set port (%s) of %s: %m", port_to_string(config->port), old_name);
+
+                speed = DIV_ROUND_UP(config->speed, 1000000);
                 if (r == -EOPNOTSUPP)
                         r = ethtool_set_speed(&ctx->ethtool_fd, old_name, speed, config->duplex);
 

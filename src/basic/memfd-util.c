@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -21,7 +22,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifdef HAVE_LINUX_MEMFD_H
+#if HAVE_LINUX_MEMFD_H
 #include <linux/memfd.h>
 #endif
 #include <stdio.h>
@@ -167,8 +168,5 @@ int memfd_new_and_map(const char *name, size_t sz, void **p) {
         if (r < 0)
                 return r;
 
-        r = fd;
-        fd = -1;
-
-        return r;
+        return TAKE_FD(fd);
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,9 +18,11 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
  ***/
 
-#ifdef HAVE_LIBIDN
-#include <idna.h>
-#include <stringprep.h>
+#if HAVE_LIBIDN2
+#  include <idn2.h>
+#elif HAVE_LIBIDN
+#  include <idna.h>
+#  include <stringprep.h>
 #endif
 
 #include <endian.h>
@@ -74,7 +77,7 @@ int dns_label_unescape(const char **name, char *dest, size_t sz) {
                                 /* Ending NUL */
                                 return -EINVAL;
 
-                        else if (*n == '\\' || *n == '.') {
+                        else if (IN_SET(*n, '\\', '.')) {
                                 /* Escaped backslash or dot */
 
                                 if (d)
@@ -162,7 +165,7 @@ int dns_label_unescape_suffix(const char *name, const char **label_terminal, cha
         }
 
         terminal = *label_terminal;
-        assert(*terminal == '.' || *terminal == 0);
+        assert(IN_SET(*terminal, 0, '.'));
 
         /* Skip current terminal character (and accept domain names ending it ".") */
         if (*terminal == 0)
@@ -226,7 +229,7 @@ int dns_label_escape(const char *p, size_t l, char *dest, size_t sz) {
         q = dest;
         while (l > 0) {
 
-                if (*p == '.' || *p == '\\') {
+                if (IN_SET(*p, '.', '\\')) {
 
                         /* Dot or backslash */
 
@@ -238,8 +241,7 @@ int dns_label_escape(const char *p, size_t l, char *dest, size_t sz) {
 
                         sz -= 2;
 
-                } else if (*p == '_' ||
-                           *p == '-' ||
+                } else if (IN_SET(*p, '_', '-') ||
                            (*p >= '0' && *p <= '9') ||
                            (*p >= 'a' && *p <= 'z') ||
                            (*p >= 'A' && *p <= 'Z')) {
@@ -293,14 +295,13 @@ int dns_label_escape_new(const char *p, size_t l, char **ret) {
         if (r < 0)
                 return r;
 
-        *ret = s;
-        s = NULL;
+        *ret = TAKE_PTR(s);
 
         return r;
 }
 
+#if HAVE_LIBIDN
 int dns_label_apply_idna(const char *encoded, size_t encoded_size, char *decoded, size_t decoded_max) {
-#ifdef HAVE_LIBIDN
         _cleanup_free_ uint32_t *input = NULL;
         size_t input_size, l;
         const char *p;
@@ -348,13 +349,9 @@ int dns_label_apply_idna(const char *encoded, size_t encoded_size, char *decoded
                 decoded[l] = 0;
 
         return (int) l;
-#else
-        return 0;
-#endif
 }
 
 int dns_label_undo_idna(const char *encoded, size_t encoded_size, char *decoded, size_t decoded_max) {
-#ifdef HAVE_LIBIDN
         size_t input_size, output_size;
         _cleanup_free_ uint32_t *input = NULL;
         _cleanup_free_ char *result = NULL;
@@ -399,10 +396,8 @@ int dns_label_undo_idna(const char *encoded, size_t encoded_size, char *decoded,
                 decoded[w] = 0;
 
         return w;
-#else
-        return 0;
-#endif
 }
+#endif
 
 int dns_name_concat(const char *a, const char *b, char **_ret) {
         _cleanup_free_ char *ret = NULL;
@@ -605,8 +600,7 @@ int dns_name_endswith(const char *name, const char *suffix) {
 
                         /* Not the same, let's jump back, and try with the next label again */
                         s = suffix;
-                        n = saved_n;
-                        saved_n = NULL;
+                        n = TAKE_PTR(saved_n);
                 }
         }
 }
@@ -697,23 +691,26 @@ int dns_name_change_suffix(const char *name, const char *old_suffix, const char 
 }
 
 int dns_name_between(const char *a, const char *b, const char *c) {
-        int n;
-
         /* Determine if b is strictly greater than a and strictly smaller than c.
            We consider the order of names to be circular, so that if a is
            strictly greater than c, we consider b to be between them if it is
            either greater than a or smaller than c. This is how the canonical
            DNS name order used in NSEC records work. */
 
-        n = dns_name_compare_func(a, c);
-        if (n == 0)
-                return -EINVAL;
-        else if (n < 0)
-                /*       a<---b--->c       */
+        if (dns_name_compare_func(a, c) < 0)
+                /*
+                   a and c are properly ordered:
+                   a<---b--->c
+                */
                 return dns_name_compare_func(a, b) < 0 &&
                        dns_name_compare_func(b, c) < 0;
         else
-                /* <--b--c         a--b--> */
+                /*
+                   a and c are equal or 'reversed':
+                   <--b--c         a----->
+                   or:
+                   <-----c         a--b-->
+                */
                 return dns_name_compare_func(b, c) < 0 ||
                        dns_name_compare_func(a, b) < 0;
 }
@@ -961,6 +958,12 @@ bool dns_srv_type_is_valid(const char *name) {
         }
 
         return c == 2; /* exactly two labels */
+}
+
+bool dnssd_srv_type_is_valid(const char *name) {
+        return dns_srv_type_is_valid(name) &&
+                ((dns_name_endswith(name, "_tcp") > 0) ||
+                 (dns_name_endswith(name, "_udp") > 0)); /* Specific to DNS-SD. RFC 6763, Section 7 */
 }
 
 bool dns_service_name_is_valid(const char *name) {
@@ -1274,6 +1277,49 @@ int dns_name_common_suffix(const char *a, const char *b, const char **ret) {
 }
 
 int dns_name_apply_idna(const char *name, char **ret) {
+        /* Return negative on error, 0 if not implemented, positive on success. */
+
+#if HAVE_LIBIDN2
+        int r;
+        _cleanup_free_ char *t = NULL;
+
+        assert(name);
+        assert(ret);
+
+        r = idn2_lookup_u8((uint8_t*) name, (uint8_t**) &t,
+                           IDN2_NFC_INPUT | IDN2_NONTRANSITIONAL);
+        log_debug("idn2_lookup_u8: %s → %s", name, t);
+        if (r == IDN2_OK) {
+                if (!startswith(name, "xn--")) {
+                        _cleanup_free_ char *s = NULL;
+
+                        r = idn2_to_unicode_8z8z(t, &s, 0);
+                        if (r != IDN2_OK) {
+                                log_debug("idn2_to_unicode_8z8z(\"%s\") failed: %d/%s",
+                                          t, r, idn2_strerror(r));
+                                return 0;
+                        }
+
+                        if (!streq_ptr(name, s)) {
+                                log_debug("idn2 roundtrip failed: \"%s\" → \"%s\" → \"%s\", ignoring.",
+                                          name, t, s);
+                                return 0;
+                        }
+                }
+
+                *ret = t;
+                t = NULL;
+                return 1; /* *ret has been written */
+        }
+
+        log_debug("idn2_lookup_u8(\"%s\") failed: %d/%s", name, r, idn2_strerror(r));
+        if (r == IDN2_2HYPHEN)
+                /* The name has two hypens — forbidden by IDNA2008 in some cases */
+                return 0;
+        if (IN_SET(r, IDN2_TOO_BIG_DOMAIN, IDN2_TOO_BIG_LABEL))
+                return -ENOSPC;
+        return -EINVAL;
+#elif HAVE_LIBIDN
         _cleanup_free_ char *buf = NULL;
         size_t n = 0, allocated = 0;
         bool first = true;
@@ -1309,7 +1355,7 @@ int dns_name_apply_idna(const char *name, char **ret) {
                 else
                         buf[n++] = '.';
 
-                n +=r;
+                n += r;
         }
 
         if (n > DNS_HOSTNAME_MAX)
@@ -1322,7 +1368,10 @@ int dns_name_apply_idna(const char *name, char **ret) {
         *ret = buf;
         buf = NULL;
 
-        return (int) n;
+        return 1;
+#else
+        return 0;
+#endif
 }
 
 int dns_name_is_valid_or_address(const char *name) {

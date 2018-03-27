@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -56,59 +57,73 @@
  */
 
 _public_ int sd_pid_get_session(pid_t pid, char **session) {
+        int r;
 
         assert_return(pid >= 0, -EINVAL);
         assert_return(session, -EINVAL);
 
-        return cg_pid_get_session(pid, session);
+        r = cg_pid_get_session(pid, session);
+        return IN_SET(r, -ENXIO, -ENOMEDIUM) ? -ENODATA : r;
 }
 
 _public_ int sd_pid_get_unit(pid_t pid, char **unit) {
+        int r;
 
         assert_return(pid >= 0, -EINVAL);
         assert_return(unit, -EINVAL);
 
-        return cg_pid_get_unit(pid, unit);
+        r = cg_pid_get_unit(pid, unit);
+        return IN_SET(r, -ENXIO, -ENOMEDIUM) ? -ENODATA : r;
 }
 
 _public_ int sd_pid_get_user_unit(pid_t pid, char **unit) {
+        int r;
 
         assert_return(pid >= 0, -EINVAL);
         assert_return(unit, -EINVAL);
 
-        return cg_pid_get_user_unit(pid, unit);
+        r = cg_pid_get_user_unit(pid, unit);
+        return IN_SET(r, -ENXIO, -ENOMEDIUM) ? -ENODATA : r;
 }
 
 _public_ int sd_pid_get_machine_name(pid_t pid, char **name) {
+        int r;
 
         assert_return(pid >= 0, -EINVAL);
         assert_return(name, -EINVAL);
 
-        return cg_pid_get_machine_name(pid, name);
+        r = cg_pid_get_machine_name(pid, name);
+        return IN_SET(r, -ENXIO, -ENOMEDIUM) ? -ENODATA : r;
 }
 
 _public_ int sd_pid_get_slice(pid_t pid, char **slice) {
+        int r;
 
         assert_return(pid >= 0, -EINVAL);
         assert_return(slice, -EINVAL);
 
-        return cg_pid_get_slice(pid, slice);
+        r = cg_pid_get_slice(pid, slice);
+        return IN_SET(r, -ENXIO, -ENOMEDIUM) ? -ENODATA : r;
 }
 
 _public_ int sd_pid_get_user_slice(pid_t pid, char **slice) {
+        int r;
 
         assert_return(pid >= 0, -EINVAL);
         assert_return(slice, -EINVAL);
 
-        return cg_pid_get_user_slice(pid, slice);
+        r = cg_pid_get_user_slice(pid, slice);
+        return IN_SET(r, -ENXIO, -ENOMEDIUM) ? -ENODATA : r;
 }
 
 _public_ int sd_pid_get_owner_uid(pid_t pid, uid_t *uid) {
+        int r;
 
         assert_return(pid >= 0, -EINVAL);
         assert_return(uid, -EINVAL);
 
-        return cg_pid_get_owner_uid(pid, uid);
+        r = cg_pid_get_owner_uid(pid, uid);
+        return IN_SET(r, -ENXIO, -ENOMEDIUM) ? -ENODATA : r;
 }
 
 _public_ int sd_pid_get_cgroup(pid_t pid, char **cgroup) {
@@ -279,7 +294,7 @@ _public_ int sd_uid_get_state(uid_t uid, char**state) {
                         return -ENOMEM;
 
         }
-        if (r < 0) {
+        else if (r < 0) {
                 free(s);
                 return r;
         }
@@ -310,8 +325,7 @@ _public_ int sd_uid_get_display(uid_t uid, char **session) {
         if (isempty(s))
                 return -ENODATA;
 
-        *session = s;
-        s = NULL;
+        *session = TAKE_PTR(s);
 
         return 0;
 }
@@ -340,8 +354,7 @@ static int file_of_seat(const char *seat, char **_p) {
         if (!p)
                 return -ENOMEM;
 
-        *_p = p;
-        p = NULL;
+        *_p = TAKE_PTR(p);
         return 0;
 }
 
@@ -514,8 +527,7 @@ _public_ int sd_session_get_state(const char *session, char **state) {
         if (isempty(s))
                 return -EIO;
 
-        *state = s;
-        s = NULL;
+        *state = TAKE_PTR(s);
 
         return 0;
 }
@@ -560,8 +572,7 @@ static int session_get_string(const char *session, const char *field, char **val
         if (isempty(s))
                 return -ENODATA;
 
-        *value = s;
-        s = NULL;
+        *value = TAKE_PTR(s);
         return 0;
 }
 
@@ -666,10 +677,8 @@ _public_ int sd_seat_get_active(const char *seat, char **session, uid_t *uid) {
                         return r;
         }
 
-        if (session && s) {
-                *session = s;
-                s = NULL;
-        }
+        if (session && s)
+                *session = TAKE_PTR(s);
 
         return 0;
 }
@@ -687,7 +696,7 @@ _public_ int sd_seat_get_sessions(const char *seat, char ***sessions, uid_t **ui
 
         r = parse_env_file(p, NEWLINE,
                            "SESSIONS", &s,
-                           "ACTIVE_SESSIONS", &t,
+                           "UIDS", &t,
                            NULL);
         if (r == -ENOENT)
                 return -ENXIO;
@@ -723,7 +732,7 @@ _public_ int sd_seat_get_sessions(const char *seat, char ***sessions, uid_t **ui
 
                                 r = parse_uid(k, b + i);
                                 if (r < 0)
-                                        continue;
+                                        return r;
 
                                 i++;
                         }
@@ -784,35 +793,49 @@ _public_ int sd_seat_can_graphical(const char *seat) {
 }
 
 _public_ int sd_get_seats(char ***seats) {
-        return get_files_in_directory("/run/systemd/seats/", seats);
+        int r;
+
+        r = get_files_in_directory("/run/systemd/seats/", seats);
+        if (r == -ENOENT) {
+                if (seats)
+                        *seats = NULL;
+                return 0;
+        }
+        return r;
 }
 
 _public_ int sd_get_sessions(char ***sessions) {
-        return get_files_in_directory("/run/systemd/sessions/", sessions);
+        int r;
+
+        r = get_files_in_directory("/run/systemd/sessions/", sessions);
+        if (r == -ENOENT) {
+                if (sessions)
+                        *sessions = NULL;
+                return 0;
+        }
+        return r;
 }
 
 _public_ int sd_get_uids(uid_t **users) {
         _cleanup_closedir_ DIR *d;
+        struct dirent *de;
         int r = 0;
         unsigned n = 0;
         _cleanup_free_ uid_t *l = NULL;
 
         d = opendir("/run/systemd/users/");
-        if (!d)
+        if (!d) {
+                if (errno == ENOENT) {
+                        if (users)
+                                *users = NULL;
+                        return 0;
+                }
                 return -errno;
+        }
 
-        for (;;) {
-                struct dirent *de;
+        FOREACH_DIRENT_ALL(de, d, return -errno) {
                 int k;
                 uid_t uid;
-
-                errno = 0;
-                de = readdir(d);
-                if (!de && errno > 0)
-                        return -errno;
-
-                if (!de)
-                        break;
 
                 dirent_ensure_type(d, de);
 
@@ -850,12 +873,16 @@ _public_ int sd_get_uids(uid_t **users) {
 }
 
 _public_ int sd_get_machine_names(char ***machines) {
-        char **l = NULL, **a, **b;
+        _cleanup_strv_free_ char **l = NULL;
+        char **a, **b;
         int r;
 
-        assert_return(machines, -EINVAL);
-
         r = get_files_in_directory("/run/systemd/machines/", &l);
+        if (r == -ENOENT) {
+                if (machines)
+                        *machines = NULL;
+                return 0;
+        }
         if (r < 0)
                 return r;
 
@@ -863,7 +890,7 @@ _public_ int sd_get_machine_names(char ***machines) {
                 r = 0;
 
                 /* Filter out the unit: symlinks */
-                for (a = l, b = l; *a; a++) {
+                for (a = b = l; *a; a++) {
                         if (startswith(*a, "unit:") || !machine_name_is_valid(*a))
                                 free(*a);
                         else {
@@ -876,7 +903,9 @@ _public_ int sd_get_machine_names(char ***machines) {
                 *b = NULL;
         }
 
-        *machines = l;
+        if (machines)
+                *machines = TAKE_PTR(l);
+
         return r;
 }
 
@@ -897,8 +926,7 @@ _public_ int sd_machine_get_class(const char *machine, char **class) {
         if (!c)
                 return -EIO;
 
-        *class = c;
-        c = NULL;
+        *class = TAKE_PTR(c);
 
         return 0;
 }
@@ -954,8 +982,9 @@ static inline sd_login_monitor* FD_TO_MONITOR(int fd) {
 }
 
 _public_ int sd_login_monitor_new(const char *category, sd_login_monitor **m) {
-        int fd, k;
+        _cleanup_close_ int fd = -1;
         bool good = false;
+        int k;
 
         assert_return(m, -EINVAL);
 
@@ -965,50 +994,42 @@ _public_ int sd_login_monitor_new(const char *category, sd_login_monitor **m) {
 
         if (!category || streq(category, "seat")) {
                 k = inotify_add_watch(fd, "/run/systemd/seats/", IN_MOVED_TO|IN_DELETE);
-                if (k < 0) {
-                        safe_close(fd);
+                if (k < 0)
                         return -errno;
-                }
 
                 good = true;
         }
 
         if (!category || streq(category, "session")) {
                 k = inotify_add_watch(fd, "/run/systemd/sessions/", IN_MOVED_TO|IN_DELETE);
-                if (k < 0) {
-                        safe_close(fd);
+                if (k < 0)
                         return -errno;
-                }
 
                 good = true;
         }
 
         if (!category || streq(category, "uid")) {
                 k = inotify_add_watch(fd, "/run/systemd/users/", IN_MOVED_TO|IN_DELETE);
-                if (k < 0) {
-                        safe_close(fd);
+                if (k < 0)
                         return -errno;
-                }
 
                 good = true;
         }
 
         if (!category || streq(category, "machine")) {
                 k = inotify_add_watch(fd, "/run/systemd/machines/", IN_MOVED_TO|IN_DELETE);
-                if (k < 0) {
-                        safe_close(fd);
+                if (k < 0)
                         return -errno;
-                }
 
                 good = true;
         }
 
-        if (!good) {
-                close_nointr(fd);
+        if (!good)
                 return -EINVAL;
-        }
 
         *m = FD_TO_MONITOR(fd);
+        fd = -1;
+
         return 0;
 }
 
@@ -1025,10 +1046,15 @@ _public_ sd_login_monitor* sd_login_monitor_unref(sd_login_monitor *m) {
 }
 
 _public_ int sd_login_monitor_flush(sd_login_monitor *m) {
+        int r;
 
         assert_return(m, -EINVAL);
 
-        return flush_fd(MONITOR_TO_FD(m));
+        r = flush_fd(MONITOR_TO_FD(m));
+        if (r < 0)
+                return r;
+
+        return 0;
 }
 
 _public_ int sd_login_monitor_get_fd(sd_login_monitor *m) {

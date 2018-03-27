@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -33,10 +34,11 @@ typedef struct Address Address;
 
 typedef struct Network Network;
 typedef struct Link Link;
+typedef struct NetworkConfigSection NetworkConfigSection;
 
 struct Address {
         Network *network;
-        unsigned section;
+        NetworkConfigSection *section;
 
         Link *link;
 
@@ -62,7 +64,7 @@ struct Address {
         LIST_FIELDS(Address, addresses);
 };
 
-int address_new_static(Network *network, unsigned section, Address **ret);
+int address_new_static(Network *network, const char *filename, unsigned section, Address **ret);
 int address_new(Address **ret);
 void address_free(Address *address);
 int address_add_foreign(Link *link, int family, const union in_addr_union *in_addr, unsigned char prefixlen, Address **ret);
@@ -83,3 +85,4 @@ int config_parse_broadcast(const char *unit, const char *filename, unsigned line
 int config_parse_label(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_lifetime(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_address_flags(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_address_scope(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);

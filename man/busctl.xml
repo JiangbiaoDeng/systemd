@@ -3,6 +3,8 @@
 "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2014 Zbigniew Jędrzejewski-Szmek
@@ -145,6 +147,7 @@
       </varlistentry>
 
       <varlistentry>
+        <term><option>-q</option></term>
         <term><option>--quiet</option></term>
 
         <listitem>
@@ -238,6 +241,16 @@
         </listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><option>--watch-bind=</option><replaceable>BOOL</replaceable></term>
+
+        <listitem>
+          <para>Controls whether to wait for the specified <constant>AF_UNIX</constant> bus socket to appear in the
+          file system before connecting to it. Defaults to off. When enabled, the tool will watch the file system until
+          the socket is created and then connect to it.</para>
+        </listitem>
+      </varlistentry>
+
       <xi:include href="user-system-options.xml" xpointer="user" />
       <xi:include href="user-system-options.xml" xpointer="system" />
       <xi:include href="user-system-options.xml" xpointer="host" />
@@ -291,11 +304,11 @@
 
         <listitem><para>Similar to <command>monitor</command> but
         writes the output in pcap format (for details, see the <ulink
-        url="http://wiki.wireshark.org/Development/LibpcapFileFormat">Libpcap
-        File Format</ulink> description. Make sure to redirect the
-        output to STDOUT to a file. Tools like
+        url="https://wiki.wireshark.org/Development/LibpcapFileFormat">Libpcap
+        File Format</ulink> description). Make sure to redirect
+        standard output to a file. Tools like
         <citerefentry project='die-net'><refentrytitle>wireshark</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-        may be used to dissect and view the generated
+        may be used to dissect and view the resulting
         files.</para></listitem>
       </varlistentry>
 
@@ -472,7 +485,7 @@ o "/org/freedesktop/systemd1/job/42684"</programlisting>
 
     <para>
       <citerefentry project='dbus'><refentrytitle>dbus-daemon</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <ulink url="http://freedesktop.org/wiki/Software/dbus">D-Bus</ulink>,
+      <ulink url="https://www.freedesktop.org/wiki/Software/dbus">D-Bus</ulink>,
       <citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>machinectl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,

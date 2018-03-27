@@ -1,4 +1,7 @@
 %{
+#if __GNUC__ >= 7
+_Pragma("GCC diagnostic ignored \"-Wimplicit-fallthrough\"")
+#endif
 #include <stddef.h>
 #include "conf-parser.h"
 #include "network-internal.h"
@@ -23,7 +26,8 @@ Match.Driver,                    config_parse_strv,          0,                 
 Match.Type,                      config_parse_strv,          0,                             offsetof(link_config, match_type)
 Match.Host,                      config_parse_net_condition, CONDITION_HOST,                offsetof(link_config, match_host)
 Match.Virtualization,            config_parse_net_condition, CONDITION_VIRTUALIZATION,      offsetof(link_config, match_virt)
-Match.KernelCommandLine,         config_parse_net_condition, CONDITION_KERNEL_COMMAND_LINE, offsetof(link_config, match_kernel)
+Match.KernelCommandLine,         config_parse_net_condition, CONDITION_KERNEL_COMMAND_LINE, offsetof(link_config, match_kernel_cmdline)
+Match.KernelVersion,             config_parse_net_condition, CONDITION_KERNEL_VERSION,      offsetof(link_config, match_kernel_version)
 Match.Architecture,              config_parse_net_condition, CONDITION_ARCHITECTURE,        offsetof(link_config, match_arch)
 Link.Description,                config_parse_string,        0,                             offsetof(link_config, description)
 Link.MACAddressPolicy,           config_parse_mac_policy,    0,                             offsetof(link_config, mac_policy)
@@ -36,8 +40,10 @@ Link.BitsPerSecond,              config_parse_si_size,       0,                 
 Link.Duplex,                     config_parse_duplex,        0,                             offsetof(link_config, duplex)
 Link.AutoNegotiation,            config_parse_tristate,      0,                             offsetof(link_config, autonegotiation)
 Link.WakeOnLan,                  config_parse_wol,           0,                             offsetof(link_config, wol)
+Link.Port,                       config_parse_port,          0,                             offsetof(link_config, port)
 Link.GenericSegmentationOffload, config_parse_tristate,      0,                             offsetof(link_config, features[NET_DEV_FEAT_GSO])
 Link.TCPSegmentationOffload,     config_parse_tristate,      0,                             offsetof(link_config, features[NET_DEV_FEAT_TSO])
-Link.UDPSegmentationOffload,     config_parse_tristate,      0,                             offsetof(link_config, features[NET_DEV_FEAT_UFO])
+Link.TCP6SegmentationOffload,    config_parse_tristate,      0,                             offsetof(link_config, features[NET_DEV_FEAT_TSO6])
+Link.UDPSegmentationOffload,     config_parse_warn_compat,   DISABLED_LEGACY,               0
 Link.GenericReceiveOffload,      config_parse_tristate,      0,                             offsetof(link_config, features[NET_DEV_FEAT_GRO])
 Link.LargeReceiveOffload,        config_parse_tristate,      0,                             offsetof(link_config, features[NET_DEV_FEAT_LRO])

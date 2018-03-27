@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,7 +18,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -28,6 +28,7 @@
 
 #include "btrfs-util.h"
 #include "cgroup-util.h"
+#include "dirent-util.h"
 #include "fd-util.h"
 #include "log.h"
 #include "macro.h"
@@ -43,6 +44,7 @@ static bool is_physical_fs(const struct statfs *sfs) {
 
 int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
         _cleanup_closedir_ DIR *d = NULL;
+        struct dirent *de;
         int ret = 0, r;
         struct statfs sfs;
 
@@ -78,20 +80,11 @@ int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
                 return errno == ENOENT ? 0 : -errno;
         }
 
-        for (;;) {
-                struct dirent *de;
+        FOREACH_DIRENT_ALL(de, d, return -errno) {
                 bool is_dir;
                 struct stat st;
 
-                errno = 0;
-                de = readdir(d);
-                if (!de) {
-                        if (errno > 0 && ret == 0)
-                                ret = -errno;
-                        return ret;
-                }
-
-                if (streq(de->d_name, ".") || streq(de->d_name, ".."))
+                if (dot_or_dot_dot(de->d_name))
                         continue;
 
                 if (de->d_type == DT_UNKNOWN ||
@@ -140,7 +133,7 @@ int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
 
                                 r = btrfs_subvol_remove_fd(fd, de->d_name, BTRFS_REMOVE_RECURSIVE|BTRFS_REMOVE_QUOTA);
                                 if (r < 0) {
-                                        if (r != -ENOTTY && r != -EINVAL) {
+                                        if (!IN_SET(r, -ENOTTY, -EINVAL)) {
                                                 if (ret == 0)
                                                         ret = r;
 
@@ -178,6 +171,7 @@ int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
                         }
                 }
         }
+        return ret;
 }
 
 int rm_rf(const char *path, RemoveFlags flags) {
@@ -189,7 +183,7 @@ int rm_rf(const char *path, RemoveFlags flags) {
         /* We refuse to clean the root file system with this
          * call. This is extra paranoia to never cause a really
          * seriously broken system. */
-        if (path_equal(path, "/")) {
+        if (path_equal_or_files_same(path, "/", AT_SYMLINK_NOFOLLOW)) {
                 log_error("Attempted to remove entire root file system, and we can't allow that.");
                 return -EPERM;
         }
@@ -200,7 +194,7 @@ int rm_rf(const char *path, RemoveFlags flags) {
                 if (r >= 0)
                         return r;
 
-                if (r != -ENOTTY && r != -EINVAL && r != -ENOTDIR)
+                if (!IN_SET(r, -ENOTTY, -EINVAL, -ENOTDIR))
                         return r;
 
                 /* Not btrfs or not a subvolume */
@@ -209,7 +203,7 @@ int rm_rf(const char *path, RemoveFlags flags) {
         fd = open(path, O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW|O_NOATIME);
         if (fd < 0) {
 
-                if (errno != ENOTDIR && errno != ELOOP)
+                if (!IN_SET(errno, ENOTDIR, ELOOP))
                         return -errno;
 
                 if (!(flags & REMOVE_PHYSICAL)) {

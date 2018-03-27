@@ -3,6 +3,8 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2012 Lennart Poettering
@@ -224,6 +226,12 @@
         <listitem><para>Perform only this many iterations. A value of
         0 indicates that the program should run
         indefinitely.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-1</option></term>
+
+        <listitem><para>A shortcut for <option>--iterations=1</option>.</para></listitem>
       </varlistentry>
 
       <varlistentry>

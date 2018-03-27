@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -23,10 +24,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <xlocale.h>
 
 #include "alloc-util.h"
+#include "errno-list.h"
 #include "extract-word.h"
+#include "locale-util.h"
 #include "macro.h"
 #include "parse-util.h"
 #include "process-util.h"
@@ -60,7 +62,7 @@ int parse_pid(const char *s, pid_t* ret_pid) {
         if ((unsigned long) pid != ul)
                 return -ERANGE;
 
-        if (pid <= 0)
+        if (!pid_is_valid(pid))
                 return -ERANGE;
 
         *ret_pid = pid;
@@ -82,7 +84,7 @@ int parse_mode(const char *s, mode_t *ret) {
         l = strtol(s, &x, 8);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
         if (l < 0 || l  > 07777)
                 return -ERANGE;
@@ -153,7 +155,7 @@ int parse_size(const char *t, uint64_t base, uint64_t *size) {
         unsigned n_entries, start_pos = 0;
 
         assert(t);
-        assert(base == 1000 || base == 1024);
+        assert(IN_SET(base, 1000, 1024));
         assert(size);
 
         if (base == 1000) {
@@ -269,6 +271,64 @@ int parse_range(const char *t, unsigned *lower, unsigned *upper) {
         return 0;
 }
 
+int parse_errno(const char *t) {
+        int r, e;
+
+        assert(t);
+
+        r = errno_from_name(t);
+        if (r > 0)
+                return r;
+
+        r = safe_atoi(t, &e);
+        if (r < 0)
+                return r;
+
+        /* 0 is also allowed here */
+        if (!errno_is_valid(e) && e != 0)
+                return -ERANGE;
+
+        return e;
+}
+
+int parse_syscall_and_errno(const char *in, char **name, int *error) {
+        _cleanup_free_ char *n = NULL;
+        char *p;
+        int e = -1;
+
+        assert(in);
+        assert(name);
+        assert(error);
+
+        /*
+         * This parse "syscall:errno" like "uname:EILSEQ", "@sync:255".
+         * If errno is omitted, then error is set to -1.
+         * Empty syscall name is not allowed.
+         * Here, we do not check that the syscall name is valid or not.
+         */
+
+        p = strchr(in, ':');
+        if (p) {
+                e = parse_errno(p + 1);
+                if (e < 0)
+                        return e;
+
+                n = strndup(in, p - in);
+        } else
+                n = strdup(in);
+
+        if (!n)
+                return -ENOMEM;
+
+        if (isempty(n))
+                return -EINVAL;
+
+        *error = e;
+        *name = TAKE_PTR(n);
+
+        return 0;
+}
+
 char *format_bytes(char *buf, size_t l, uint64_t t) {
         unsigned i;
 
@@ -310,12 +370,13 @@ finish:
 
 }
 
-int safe_atou(const char *s, unsigned *ret_u) {
+int safe_atou_full(const char *s, unsigned base, unsigned *ret_u) {
         char *x = NULL;
         unsigned long l;
 
         assert(s);
         assert(ret_u);
+        assert(base <= 16);
 
         /* strtoul() is happy to parse negative values, and silently
          * converts them to unsigned values without generating an
@@ -328,10 +389,10 @@ int safe_atou(const char *s, unsigned *ret_u) {
         s += strspn(s, WHITESPACE);
 
         errno = 0;
-        l = strtoul(s, &x, 0);
+        l = strtoul(s, &x, base);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
         if (s[0] == '-')
                 return -ERANGE;
@@ -353,7 +414,7 @@ int safe_atoi(const char *s, int *ret_i) {
         l = strtol(s, &x, 0);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
         if ((long) (int) l != l)
                 return -ERANGE;
@@ -375,7 +436,7 @@ int safe_atollu(const char *s, long long unsigned *ret_llu) {
         l = strtoull(s, &x, 0);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
         if (*s == '-')
                 return -ERANGE;
@@ -395,7 +456,7 @@ int safe_atolli(const char *s, long long int *ret_lli) {
         l = strtoll(s, &x, 0);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
 
         *ret_lli = l;
@@ -415,7 +476,7 @@ int safe_atou8(const char *s, uint8_t *ret) {
         l = strtoul(s, &x, 0);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
         if (s[0] == '-')
                 return -ERANGE;
@@ -426,20 +487,21 @@ int safe_atou8(const char *s, uint8_t *ret) {
         return 0;
 }
 
-int safe_atou16(const char *s, uint16_t *ret) {
+int safe_atou16_full(const char *s, unsigned base, uint16_t *ret) {
         char *x = NULL;
         unsigned long l;
 
         assert(s);
         assert(ret);
+        assert(base <= 16);
 
         s += strspn(s, WHITESPACE);
 
         errno = 0;
-        l = strtoul(s, &x, 0);
+        l = strtoul(s, &x, base);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
         if (s[0] == '-')
                 return -ERANGE;
@@ -461,7 +523,7 @@ int safe_atoi16(const char *s, int16_t *ret) {
         l = strtol(s, &x, 0);
         if (errno > 0)
                 return -errno;
-        if (!x || x == s || *x)
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
         if ((long) (int16_t) l != l)
                 return -ERANGE;
@@ -471,9 +533,9 @@ int safe_atoi16(const char *s, int16_t *ret) {
 }
 
 int safe_atod(const char *s, double *ret_d) {
+        _cleanup_(freelocalep) locale_t loc = (locale_t) 0;
         char *x = NULL;
         double d = 0;
-        locale_t loc;
 
         assert(s);
         assert(ret_d);
@@ -484,16 +546,11 @@ int safe_atod(const char *s, double *ret_d) {
 
         errno = 0;
         d = strtod_l(s, &x, loc);
-        if (errno > 0) {
-                freelocale(loc);
+        if (errno > 0)
                 return -errno;
-        }
-        if (!x || x == s || *x) {
-                freelocale(loc);
+        if (!x || x == s || *x != 0)
                 return -EINVAL;
-        }
 
-        freelocale(loc);
         *ret_d = (double) d;
         return 0;
 }
@@ -536,19 +593,20 @@ int parse_fractional_part_u(const char **p, size_t digits, unsigned *res) {
 
 int parse_percent_unbounded(const char *p) {
         const char *pc, *n;
-        unsigned v;
-        int r;
+        int r, v;
 
         pc = endswith(p, "%");
         if (!pc)
                 return -EINVAL;
 
         n = strndupa(p, pc - p);
-        r = safe_atou(n, &v);
+        r = safe_atoi(n, &v);
         if (r < 0)
                 return r;
+        if (v < 0)
+                return -ERANGE;
 
-        return (int) v;
+        return v;
 }
 
 int parse_percent(const char *p) {
@@ -572,5 +630,36 @@ int parse_nice(const char *p, int *ret) {
                 return -ERANGE;
 
         *ret = n;
+        return 0;
+}
+
+int parse_ip_port(const char *s, uint16_t *ret) {
+        uint16_t l;
+        int r;
+
+        r = safe_atou16(s, &l);
+        if (r < 0)
+                return r;
+
+        if (l == 0)
+                return -EINVAL;
+
+        *ret = (uint16_t) l;
+
+        return 0;
+}
+
+int parse_dev(const char *s, dev_t *ret) {
+        unsigned x, y;
+        dev_t d;
+
+        if (sscanf(s, "%u:%u", &x, &y) != 2)
+                return -EINVAL;
+
+        d = makedev(x, y);
+        if ((unsigned) major(d) != x || (unsigned) minor(d) != y)
+                return -EINVAL;
+
+        *ret = d;
         return 0;
 }

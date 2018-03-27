@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -30,9 +31,12 @@
 #include "macro.h"
 #include "manager.h"
 #include "path-util.h"
+#include "rm-rf.h"
+#include "special.h"
 #include "specifier.h"
 #include "string-util.h"
 #include "test-helper.h"
+#include "tests.h"
 #include "unit-name.h"
 #include "unit-printf.h"
 #include "unit.h"
@@ -158,10 +162,10 @@ static void test_unit_name_to_path(void) {
         test_unit_name_to_path_one("home/foo", NULL, -EINVAL);
 }
 
-static void test_unit_name_mangle_one(UnitNameMangle allow_globs, const char *pattern, const char *expect, int ret) {
+static void test_unit_name_mangle_one(bool allow_globs, const char *pattern, const char *expect, int ret) {
         _cleanup_free_ char *t = NULL;
 
-        assert_se(unit_name_mangle(pattern, allow_globs, &t) == ret);
+        assert_se(unit_name_mangle(pattern, (allow_globs * UNIT_NAME_MANGLE_GLOB) | UNIT_NAME_MANGLE_WARN, &t) == ret);
         puts(strna(t));
         assert_se(streq_ptr(t, expect));
 
@@ -169,49 +173,48 @@ static void test_unit_name_mangle_one(UnitNameMangle allow_globs, const char *pa
                 _cleanup_free_ char *k = NULL;
 
                 assert_se(unit_name_is_valid(t, UNIT_NAME_ANY) ||
-                          (allow_globs == UNIT_NAME_GLOB && string_is_glob(t)));
+                          (allow_globs && string_is_glob(t)));
 
-                assert_se(unit_name_mangle(t, allow_globs, &k) == 0);
+                assert_se(unit_name_mangle(t, (allow_globs * UNIT_NAME_MANGLE_GLOB) | UNIT_NAME_MANGLE_WARN, &k) == 0);
                 assert_se(streq_ptr(t, k));
         }
 }
 
 static void test_unit_name_mangle(void) {
         puts("-------------------------------------------------");
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "foo.service", "foo.service", 0);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "/home", "home.mount", 1);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "/dev/sda", "dev-sda.device", 1);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "üxknürz.service", "\\xc3\\xbcxkn\\xc3\\xbcrz.service", 1);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "foobar-meh...waldi.service", "foobar-meh...waldi.service", 0);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "_____####----.....service", "_____\\x23\\x23\\x23\\x23----.....service", 1);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "_____##@;;;,,,##----.....service", "_____\\x23\\x23@\\x3b\\x3b\\x3b\\x2c\\x2c\\x2c\\x23\\x23----.....service", 1);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "xxx@@@@/////\\\\\\\\\\yyy.service", "xxx@@@@-----\\\\\\\\\\yyy.service", 1);
-        test_unit_name_mangle_one(UNIT_NAME_NOGLOB, "", NULL, -EINVAL);
+        test_unit_name_mangle_one(false, "foo.service", "foo.service", 0);
+        test_unit_name_mangle_one(false, "/home", "home.mount", 1);
+        test_unit_name_mangle_one(false, "/dev/sda", "dev-sda.device", 1);
+        test_unit_name_mangle_one(false, "üxknürz.service", "\\xc3\\xbcxkn\\xc3\\xbcrz.service", 1);
+        test_unit_name_mangle_one(false, "foobar-meh...waldi.service", "foobar-meh...waldi.service", 0);
+        test_unit_name_mangle_one(false, "_____####----.....service", "_____\\x23\\x23\\x23\\x23----.....service", 1);
+        test_unit_name_mangle_one(false, "_____##@;;;,,,##----.....service", "_____\\x23\\x23@\\x3b\\x3b\\x3b\\x2c\\x2c\\x2c\\x23\\x23----.....service", 1);
+        test_unit_name_mangle_one(false, "xxx@@@@/////\\\\\\\\\\yyy.service", "xxx@@@@-----\\\\\\\\\\yyy.service", 1);
+        test_unit_name_mangle_one(false, "", NULL, -EINVAL);
 
-        test_unit_name_mangle_one(UNIT_NAME_GLOB, "foo.service", "foo.service", 0);
-        test_unit_name_mangle_one(UNIT_NAME_GLOB, "foo", "foo.service", 1);
-        test_unit_name_mangle_one(UNIT_NAME_GLOB, "foo*", "foo*", 0);
-        test_unit_name_mangle_one(UNIT_NAME_GLOB, "ü*", "\\xc3\\xbc*", 1);
+        test_unit_name_mangle_one(true, "foo.service", "foo.service", 0);
+        test_unit_name_mangle_one(true, "foo", "foo.service", 1);
+        test_unit_name_mangle_one(true, "foo*", "foo*", 0);
+        test_unit_name_mangle_one(true, "ü*", "\\xc3\\xbc*", 1);
 }
 
 static int test_unit_printf(void) {
-        Manager *m = NULL;
+        _cleanup_free_ char *mid = NULL, *bid = NULL, *host = NULL, *uid = NULL, *user = NULL, *shell = NULL, *home = NULL;
+        _cleanup_(manager_freep) Manager *m = NULL;
         Unit *u, *u2;
         int r;
-
-        _cleanup_free_ char *mid = NULL, *bid = NULL, *host = NULL, *uid = NULL, *user = NULL, *shell = NULL, *home = NULL;
 
         assert_se(specifier_machine_id('m', NULL, NULL, &mid) >= 0 && mid);
         assert_se(specifier_boot_id('b', NULL, NULL, &bid) >= 0 && bid);
         assert_se(host = gethostname_malloc());
-        assert_se(user = getusername_malloc());
+        assert_se(user = uid_to_name(getuid()));
         assert_se(asprintf(&uid, UID_FMT, getuid()));
         assert_se(get_home_dir(&home) >= 0);
         assert_se(get_shell(&shell) >= 0);
 
-        r = manager_new(UNIT_FILE_USER, true, &m);
-        if (r == -EPERM || r == -EACCES || r == -EADDRINUSE) {
-                puts("manager_new: Permission denied. Skipping test.");
+        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_MINIMAL, &m);
+        if (MANAGER_SKIP_TEST(r)) {
+                log_notice_errno(r, "Skipping test: manager_new: %m");
                 return EXIT_TEST_SKIP;
         }
         assert_se(r == 0);
@@ -228,8 +231,6 @@ static int test_unit_printf(void) {
                         assert_se(streq(t, expected));                     \
         }
 
-        assert_se(setenv("XDG_RUNTIME_DIR", "/run/user/1/", 1) == 0);
-
         assert_se(u = unit_new(m, sizeof(Service)));
         assert_se(unit_add_name(u, "blah.service") == 0);
         assert_se(unit_add_name(u, "blah.service") == 0);
@@ -237,7 +238,8 @@ static int test_unit_printf(void) {
         /* general tests */
         expect(u, "%%", "%");
         expect(u, "%%s", "%s");
-        expect(u, "%", "");    // REALLY?
+        expect(u, "%,", "%,");
+        expect(u, "%", "%");
 
         /* normal unit */
         expect(u, "%n", "blah.service");
@@ -273,8 +275,6 @@ static int test_unit_printf(void) {
         expect(u2, "%b", bid);
         expect(u2, "%H", host);
         expect(u2, "%t", "/run/user/*");
-
-        manager_free(m);
 #undef expect
 
         return 0;
@@ -336,7 +336,7 @@ static void test_unit_name_build(void) {
 }
 
 static void test_slice_name_is_valid(void) {
-        assert_se(slice_name_is_valid("-.slice"));
+        assert_se(slice_name_is_valid(SPECIAL_ROOT_SLICE));
         assert_se(slice_name_is_valid("foo.slice"));
         assert_se(slice_name_is_valid("foo-bar.slice"));
         assert_se(slice_name_is_valid("foo-bar-baz.slice"));
@@ -354,7 +354,7 @@ static void test_build_subslice(void) {
         char *a;
         char *b;
 
-        assert_se(slice_build_subslice("-.slice", "foo", &a) >= 0);
+        assert_se(slice_build_subslice(SPECIAL_ROOT_SLICE, "foo", &a) >= 0);
         assert_se(slice_build_subslice(a, "bar", &b) >= 0);
         free(a);
         assert_se(slice_build_subslice(b, "barfoo", &a) >= 0);
@@ -376,8 +376,8 @@ static void test_build_parent_slice_one(const char *name, const char *expect, in
 }
 
 static void test_build_parent_slice(void) {
-        test_build_parent_slice_one("-.slice", NULL, 0);
-        test_build_parent_slice_one("foo.slice", "-.slice", 1);
+        test_build_parent_slice_one(SPECIAL_ROOT_SLICE, NULL, 0);
+        test_build_parent_slice_one("foo.slice", SPECIAL_ROOT_SLICE, 1);
         test_build_parent_slice_one("foo-bar.slice", "foo.slice", 1);
         test_build_parent_slice_one("foo-bar-baz.slice", "foo-bar.slice", 1);
         test_build_parent_slice_one("foo-bar--baz.slice", NULL, -EINVAL);
@@ -463,7 +463,20 @@ static void test_unit_name_path_unescape(void) {
 }
 
 int main(int argc, char* argv[]) {
-        int rc = 0;
+        _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
+        int r, rc = 0;
+
+        log_parse_environment();
+        log_open();
+
+        r = enter_cgroup_subroot();
+        if (r == -ENOMEDIUM) {
+                log_notice_errno(r, "Skipping test: cgroupfs not available");
+                return EXIT_TEST_SKIP;
+        }
+
+        assert_se(runtime_dir = setup_fake_runtime_dir());
+
         test_unit_name_is_valid();
         test_unit_name_replace_instance();
         test_unit_name_from_path();

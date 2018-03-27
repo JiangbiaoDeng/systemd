@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -25,6 +26,7 @@ typedef enum OutputMode {
         OUTPUT_SHORT,
         OUTPUT_SHORT_FULL,
         OUTPUT_SHORT_ISO,
+        OUTPUT_SHORT_ISO_PRECISE,
         OUTPUT_SHORT_PRECISE,
         OUTPUT_SHORT_MONOTONIC,
         OUTPUT_SHORT_UNIX,

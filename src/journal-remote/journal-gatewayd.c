@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -225,7 +226,8 @@ static ssize_t request_reader_entries(
                         return MHD_CONTENT_READER_END_WITH_ERROR;
                 }
 
-                r = output_journal(m->tmp, m->journal, m->mode, 0, OUTPUT_FULL_WIDTH, NULL);
+                r = output_journal(m->tmp, m->journal, m->mode, 0, OUTPUT_FULL_WIDTH,
+                                   NULL, NULL, NULL);
                 if (r < 0) {
                         log_error_errno(r, "Failed to serialize item: %m");
                         return MHD_CONTENT_READER_END_WITH_ERROR;
@@ -905,14 +907,14 @@ static int parse_argv(int argc, char *argv[]) {
                 { "key",       required_argument, NULL, ARG_KEY       },
                 { "cert",      required_argument, NULL, ARG_CERT      },
                 { "trust",     required_argument, NULL, ARG_TRUST     },
-                { "directory", required_argument, NULL, 'D' },
+                { "directory", required_argument, NULL, 'D'           },
                 {}
         };
 
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "hD:", options, NULL)) >= 0)
 
                 switch(c) {
 
@@ -946,7 +948,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_TRUST:
-#ifdef HAVE_GNUTLS
+#if HAVE_GNUTLS
                         if (arg_trust_pem) {
                                 log_error("CA certificate file specified twice");
                                 return -EINVAL;
@@ -958,6 +960,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 #else
                         log_error("Option --trust is not available.");
+                        return -EINVAL;
 #endif
                 case 'D':
                         arg_directory = optarg;
@@ -1028,10 +1031,9 @@ int main(int argc, char *argv[]) {
                         { MHD_OPTION_END, 0, NULL }};
                 int opts_pos = 2;
 
-                /* We force MHD_USE_PIPE_FOR_SHUTDOWN here, in order
-                 * to make sure libmicrohttpd doesn't use shutdown()
-                 * on our listening socket, which would break socket
-                 * re-activation. See
+                /* We force MHD_USE_ITC here, in order to make sure
+                 * libmicrohttpd doesn't use shutdown() on our listening
+                 * socket, which would break socket re-activation. See
                  *
                  * https://lists.gnu.org/archive/html/libmicrohttpd/2015-09/msg00014.html
                  * https://github.com/systemd/systemd/pull/1286
@@ -1040,8 +1042,8 @@ int main(int argc, char *argv[]) {
                 int flags =
                         MHD_USE_DEBUG |
                         MHD_USE_DUAL_STACK |
-                        MHD_USE_PIPE_FOR_SHUTDOWN |
-                        MHD_USE_POLL |
+                        MHD_USE_ITC |
+                        MHD_USE_POLL_INTERNAL_THREAD |
                         MHD_USE_THREAD_PER_CONNECTION;
 
                 if (n > 0)
@@ -1053,10 +1055,10 @@ int main(int argc, char *argv[]) {
                                 {MHD_OPTION_HTTPS_MEM_KEY, 0, arg_key_pem};
                         opts[opts_pos++] = (struct MHD_OptionItem)
                                 {MHD_OPTION_HTTPS_MEM_CERT, 0, arg_cert_pem};
-                        flags |= MHD_USE_SSL;
+                        flags |= MHD_USE_TLS;
                 }
                 if (arg_trust_pem) {
-                        assert(flags & MHD_USE_SSL);
+                        assert(flags & MHD_USE_TLS);
                         opts[opts_pos++] = (struct MHD_OptionItem)
                                 {MHD_OPTION_HTTPS_MEM_TRUST, 0, arg_trust_pem};
                 }

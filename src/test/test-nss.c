@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -71,9 +72,11 @@ static void* open_handle(const char* dir, const char* module, int flags) {
         const char *path;
         void *handle;
 
-        if (dir)
-                path = strjoina(dir, "/.libs/libnss_", module, ".so.2");
-        else
+        if (dir) {
+                path = strjoina(dir, "/libnss_", module, ".so.2");
+                if (access(path, F_OK) < 0)
+                        path = strjoina(dir, "/.libs/libnss_", module, ".so.2");
+        } else
                 path = strjoina("libnss_", module, ".so.2");
 
         handle = dlopen(path, flags);
@@ -95,7 +98,7 @@ static int print_gaih_addrtuples(const struct gaih_addrtuple *tuples) {
 
                 memcpy(&u, it->addr, 16);
                 r = in_addr_to_string(it->family, &u, &a);
-                assert_se(r == 0 || r == -EAFNOSUPPORT);
+                assert_se(IN_SET(r, 0, -EAFNOSUPPORT));
                 if (r == -EAFNOSUPPORT)
                         assert_se((a = hexmem(it->addr, 16)));
 
@@ -103,7 +106,7 @@ static int print_gaih_addrtuples(const struct gaih_addrtuple *tuples) {
                         goto numerical_index;
 
                 if (if_indextoname(it->scopeid, ifname) == NULL) {
-                        log_warning("if_indextoname(%d) failed: %m", it->scopeid);
+                        log_warning_errno(errno, "if_indextoname(%d) failed: %m", it->scopeid);
                 numerical_index:
                         xsprintf(ifname, "%i", it->scopeid);
                 };
@@ -448,13 +451,13 @@ static int parse_argv(int argc, char **argv,
                 modules = strv_new(argv[1], NULL);
         else
                 modules = strv_new(
-#ifdef HAVE_MYHOSTNAME
+#if ENABLE_MYHOSTNAME
                                 "myhostname",
 #endif
-#ifdef HAVE_RESOLVED
+#if ENABLE_RESOLVE
                                 "resolve",
 #endif
-#ifdef HAVE_MACHINED
+#if ENABLE_MACHINED
                                 "mymachines",
 #endif
                                 "dns",
@@ -489,7 +492,7 @@ static int parse_argv(int argc, char **argv,
                 if (!hostname)
                         return -ENOMEM;
 
-                names = strv_new("localhost", "gateway", "foo_no_such_host", hostname, NULL);
+                names = strv_new("localhost", "_gateway", "foo_no_such_host", hostname, NULL);
                 if (!names)
                         return -ENOMEM;
 
@@ -511,7 +514,7 @@ int main(int argc, char **argv) {
         _cleanup_free_ char *dir = NULL;
         _cleanup_strv_free_ char **modules = NULL, **names = NULL;
         _cleanup_free_ struct local_address *addresses = NULL;
-        int n_addresses;
+        int n_addresses = 0;
         char **module;
         int r;
 

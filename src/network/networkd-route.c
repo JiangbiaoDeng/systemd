@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -16,6 +17,8 @@
   You should have received a copy of the GNU Lesser General Public License
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
+
+#include <linux/icmpv6.h>
 
 #include "alloc-util.h"
 #include "conf-parser.h"
@@ -68,8 +71,10 @@ int route_new(Route **ret) {
         route->family = AF_UNSPEC;
         route->scope = RT_SCOPE_UNIVERSE;
         route->protocol = RTPROT_UNSPEC;
+        route->type = RTN_UNICAST;
         route->table = RT_TABLE_MAIN;
         route->lifetime = USEC_INFINITY;
+        route->quickack = -1;
 
         *ret = route;
         route = NULL;
@@ -77,15 +82,21 @@ int route_new(Route **ret) {
         return 0;
 }
 
-int route_new_static(Network *network, unsigned section, Route **ret) {
+int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret) {
+        _cleanup_network_config_section_free_ NetworkConfigSection *n = NULL;
         _cleanup_route_free_ Route *route = NULL;
         int r;
 
         assert(network);
         assert(ret);
+        assert(!!filename == (section_line > 0));
 
-        if (section) {
-                route = hashmap_get(network->routes_by_section, UINT_TO_PTR(section));
+        if (filename) {
+                r = network_config_section_new(filename, section_line, &n);
+                if (r < 0)
+                        return r;
+
+                route = hashmap_get(network->routes_by_section, n);
                 if (route) {
                         *ret = route;
                         route = NULL;
@@ -103,10 +114,11 @@ int route_new_static(Network *network, unsigned section, Route **ret) {
 
         route->protocol = RTPROT_STATIC;
 
-        if (section) {
-                route->section = section;
+        if (filename) {
+                route->section = n;
+                n = NULL;
 
-                r = hashmap_put(network->routes_by_section, UINT_TO_PTR(route->section), route);
+                r = hashmap_put(network->routes_by_section, route->section, route);
                 if (r < 0)
                         return r;
         }
@@ -132,8 +144,10 @@ void route_free(Route *route) {
                 route->network->n_static_routes--;
 
                 if (route->section)
-                        hashmap_remove(route->network->routes_by_section, UINT_TO_PTR(route->section));
+                        hashmap_remove(route->network->routes_by_section, route->section);
         }
+
+        network_config_section_free(route->section);
 
         if (route->link) {
                 set_remove(route->link->routes, route);
@@ -219,7 +233,7 @@ int route_get(Link *link,
               unsigned char dst_prefixlen,
               unsigned char tos,
               uint32_t priority,
-              unsigned char table,
+              uint32_t table,
               Route **ret) {
 
         Route route, *existing;
@@ -261,7 +275,7 @@ static int route_add_internal(
                 unsigned char dst_prefixlen,
                 unsigned char tos,
                 uint32_t priority,
-                unsigned char table,
+                uint32_t table,
                 Route **ret) {
 
         _cleanup_route_free_ Route *route = NULL;
@@ -307,7 +321,7 @@ int route_add_foreign(
                 unsigned char dst_prefixlen,
                 unsigned char tos,
                 uint32_t priority,
-                unsigned char table,
+                uint32_t table,
                 Route **ret) {
 
         return route_add_internal(link, &link->routes_foreign, family, dst, dst_prefixlen, tos, priority, table, ret);
@@ -320,7 +334,7 @@ int route_add(
               unsigned char dst_prefixlen,
               unsigned char tos,
               uint32_t priority,
-              unsigned char table,
+              uint32_t table,
               Route **ret) {
 
         Route *route;
@@ -355,13 +369,14 @@ int route_add(
         return 0;
 }
 
-int route_update(Route *route,
+void route_update(Route *route,
                  const union in_addr_union *src,
                  unsigned char src_prefixlen,
                  const union in_addr_union *gw,
                  const union in_addr_union *prefsrc,
                  unsigned char scope,
-                 unsigned char protocol) {
+                 unsigned char protocol,
+                 unsigned char type) {
 
         assert(route);
         assert(src);
@@ -374,8 +389,7 @@ int route_update(Route *route,
         route->prefsrc = *prefsrc;
         route->scope = scope;
         route->protocol = protocol;
-
-        return 0;
+        route->type = type;
 }
 
 int route_remove(Route *route, Link *link,
@@ -387,7 +401,7 @@ int route_remove(Route *route, Link *link,
         assert(link->manager);
         assert(link->manager->rtnl);
         assert(link->ifindex > 0);
-        assert(route->family == AF_INET || route->family == AF_INET6);
+        assert(IN_SET(route->family, AF_INET, AF_INET6));
 
         r = sd_rtnl_message_new_route(link->manager->rtnl, &req,
                                       RTM_DELROUTE, route->family,
@@ -447,9 +461,11 @@ int route_remove(Route *route, Link *link,
         if (r < 0)
                 return log_error_errno(r, "Could not append RTA_PRIORITY attribute: %m");
 
-        r = sd_netlink_message_append_u32(req, RTA_OIF, link->ifindex);
-        if (r < 0)
-                return log_error_errno(r, "Could not append RTA_OIF attribute: %m");
+        if (!IN_SET(route->type, RTN_UNREACHABLE, RTN_PROHIBIT, RTN_BLACKHOLE)) {
+                r = sd_netlink_message_append_u32(req, RTA_OIF, link->ifindex);
+                if (r < 0)
+                        return log_error_errno(r, "Could not append RTA_OIF attribute: %m");
+        }
 
         r = sd_netlink_call_async(link->manager->rtnl, req, callback, link, 0, NULL);
         if (r < 0)
@@ -508,7 +524,7 @@ int route_configure(
         assert(link->manager);
         assert(link->manager->rtnl);
         assert(link->ifindex > 0);
-        assert(route->family == AF_INET || route->family == AF_INET6);
+        assert(IN_SET(route->family, AF_INET, AF_INET6));
 
         if (route_get(link, route->family, &route->dst, route->dst_prefixlen, route->tos, route->priority, route->table, NULL) <= 0 &&
             set_size(link->routes) >= routes_max())
@@ -601,9 +617,22 @@ int route_configure(
         if (r < 0)
                 return log_error_errno(r, "Could not append RTA_PREF attribute: %m");
 
-        r = sd_netlink_message_append_u32(req, RTA_OIF, link->ifindex);
+        if (route->lifetime != USEC_INFINITY && kernel_route_expiration_supported()) {
+                r = sd_netlink_message_append_u32(req, RTA_EXPIRES,
+                        DIV_ROUND_UP(usec_sub_unsigned(route->lifetime, now(clock_boottime_or_monotonic())), USEC_PER_SEC));
+                if (r < 0)
+                        return log_error_errno(r, "Could not append RTA_EXPIRES attribute: %m");
+        }
+
+        r = sd_rtnl_message_route_set_type(req, route->type);
         if (r < 0)
-                return log_error_errno(r, "Could not append RTA_OIF attribute: %m");
+                return log_error_errno(r, "Could not set route type: %m");
+
+        if (!IN_SET(route->type, RTN_UNREACHABLE, RTN_PROHIBIT, RTN_BLACKHOLE)) {
+                r = sd_netlink_message_append_u32(req, RTA_OIF, link->ifindex);
+                if (r < 0)
+                        return log_error_errno(r, "Could not append RTA_OIF attribute: %m");
+        }
 
         r = sd_netlink_message_open_container(req, RTA_METRICS);
         if (r < 0)
@@ -613,6 +642,24 @@ int route_configure(
                 r = sd_netlink_message_append_u32(req, RTAX_MTU, route->mtu);
                 if (r < 0)
                         return log_error_errno(r, "Could not append RTAX_MTU attribute: %m");
+        }
+
+        if (route->initcwnd > 0) {
+                r = sd_netlink_message_append_u32(req, RTAX_INITCWND, route->initcwnd);
+                if (r < 0)
+                        return log_error_errno(r, "Could not append RTAX_INITCWND attribute: %m");
+        }
+
+        if (route->initrwnd > 0) {
+                r = sd_netlink_message_append_u32(req, RTAX_INITRWND, route->initrwnd);
+                if (r < 0)
+                        return log_error_errno(r, "Could not append RTAX_INITRWND attribute: %m");
+        }
+
+        if (route->quickack != -1) {
+                r = sd_netlink_message_append_u32(req, RTAX_QUICKACK, route->quickack);
+                if (r < 0)
+                        return log_error_errno(r, "Could not append RTAX_QUICKACK attribute: %m");
         }
 
         r = sd_netlink_message_close_container(req);
@@ -634,7 +681,7 @@ int route_configure(
         /* TODO: drop expiration handling once it can be pushed into the kernel */
         route->lifetime = lifetime;
 
-        if (route->lifetime != USEC_INFINITY) {
+        if (route->lifetime != USEC_INFINITY && !kernel_route_expiration_supported()) {
                 r = sd_event_add_time(link->manager->event, &expire, clock_boottime_or_monotonic(),
                                       route->lifetime, 0, route_expire_handler, route);
                 if (r < 0)
@@ -673,10 +720,10 @@ int config_parse_gateway(const char *unit,
         if (streq(section, "Network")) {
                 /* we are not in an Route section, so treat
                  * this as the special '0' section */
-                section_line = 0;
-        }
+                r = route_new_static(network, NULL, 0, &n);
+        } else
+                r = route_new_static(network, filename, section_line, &n);
 
-        r = route_new_static(network, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -715,7 +762,7 @@ int config_parse_preferred_src(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, section_line, &n);
+        r = route_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -746,10 +793,9 @@ int config_parse_destination(const char *unit,
 
         Network *network = userdata;
         _cleanup_route_free_ Route *n = NULL;
-        const char *address, *e;
         union in_addr_union buffer;
         unsigned char prefixlen;
-        int r, f;
+        int r;
 
         assert(filename);
         assert(section);
@@ -757,49 +803,24 @@ int config_parse_destination(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, section_line, &n);
+        r = route_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
-        /* Destination|Source=address/prefixlen */
-
-        /* address */
-        e = strchr(rvalue, '/');
-        if (e)
-                address = strndupa(rvalue, e - rvalue);
-        else
-                address = rvalue;
-
-        r = in_addr_from_string_auto(address, &f, &buffer);
+        r = in_addr_prefix_from_string(rvalue, AF_INET, &buffer, &prefixlen);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, r, "Destination is invalid, ignoring assignment: %s", address);
-                return 0;
-        }
-
-        if (f != AF_INET && f != AF_INET6) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Unknown address family, ignoring assignment: %s", address);
-                return 0;
-        }
-
-        /* prefixlen */
-        if (e) {
-                r = safe_atou8(e + 1, &prefixlen);
+                r = in_addr_prefix_from_string(rvalue, AF_INET6, &buffer, &prefixlen);
                 if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Route destination prefix length is invalid, ignoring assignment: %s", e + 1);
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "Route %s= prefix is invalid, ignoring assignment: %s",
+                                   lvalue, rvalue);
                         return 0;
                 }
-        } else {
-                switch (f) {
-                        case AF_INET:
-                                prefixlen = 32;
-                                break;
-                        case AF_INET6:
-                                prefixlen = 128;
-                                break;
-                }
-        }
 
-        n->family = f;
+                n->family = AF_INET6;
+        } else
+                n->family = AF_INET;
+
         if (streq(lvalue, "Destination")) {
                 n->dst = buffer;
                 n->dst_prefixlen = prefixlen;
@@ -835,7 +856,7 @@ int config_parse_route_priority(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, section_line, &n);
+        r = route_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -872,7 +893,7 @@ int config_parse_route_scope(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, section_line, &n);
+        r = route_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -913,7 +934,7 @@ int config_parse_route_table(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = route_new_static(network, section_line, &n);
+        r = route_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -926,6 +947,232 @@ int config_parse_route_table(const char *unit,
 
         n->table = k;
 
+        n = NULL;
+
+        return 0;
+}
+
+int config_parse_gateway_onlink(const char *unit,
+                                const char *filename,
+                                unsigned line,
+                                const char *section,
+                                unsigned section_line,
+                                const char *lvalue,
+                                int ltype,
+                                const char *rvalue,
+                                void *data,
+                                void *userdata) {
+        Network *network = userdata;
+        _cleanup_route_free_ Route *n = NULL;
+        int r;
+
+        assert(filename);
+        assert(section);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        r = route_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        r = parse_boolean(rvalue);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r,
+                           "Could not parse gateway onlink \"%s\", ignoring assignment: %m", rvalue);
+                return 0;
+        }
+
+        SET_FLAG(n->flags, RTNH_F_ONLINK, r);
+        n = NULL;
+
+        return 0;
+}
+
+int config_parse_ipv6_route_preference(const char *unit,
+                                       const char *filename,
+                                       unsigned line,
+                                       const char *section,
+                                       unsigned section_line,
+                                       const char *lvalue,
+                                       int ltype,
+                                       const char *rvalue,
+                                       void *data,
+                                       void *userdata) {
+        Network *network = userdata;
+        _cleanup_route_free_ Route *n = NULL;
+        int r;
+
+        r = route_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        if (streq(rvalue, "low"))
+                n->pref = ICMPV6_ROUTER_PREF_LOW;
+        else if (streq(rvalue, "medium"))
+                n->pref = ICMPV6_ROUTER_PREF_MEDIUM;
+        else if (streq(rvalue, "high"))
+                n->pref = ICMPV6_ROUTER_PREF_HIGH;
+        else {
+                log_syntax(unit, LOG_ERR, filename, line, 0, "Unknown route preference: %s", rvalue);
+                return 0;
+        }
+
+        n = NULL;
+
+        return 0;
+}
+
+int config_parse_route_protocol(const char *unit,
+                                const char *filename,
+                                unsigned line,
+                                const char *section,
+                                unsigned section_line,
+                                const char *lvalue,
+                                int ltype,
+                                const char *rvalue,
+                                void *data,
+                                void *userdata) {
+        Network *network = userdata;
+        _cleanup_route_free_ Route *n = NULL;
+        int r;
+
+        r = route_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        if (streq(rvalue, "kernel"))
+                n->protocol = RTPROT_KERNEL;
+        else if (streq(rvalue, "boot"))
+                n->protocol = RTPROT_BOOT;
+        else if (streq(rvalue, "static"))
+                n->protocol = RTPROT_STATIC;
+        else {
+                r = safe_atou8(rvalue , &n->protocol);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Could not parse route protocol \"%s\", ignoring assignment: %m", rvalue);
+                        return 0;
+                }
+        }
+
+        n = NULL;
+
+        return 0;
+}
+
+int config_parse_route_type(const char *unit,
+                            const char *filename,
+                            unsigned line,
+                            const char *section,
+                            unsigned section_line,
+                            const char *lvalue,
+                            int ltype,
+                            const char *rvalue,
+                            void *data,
+                            void *userdata) {
+        Network *network = userdata;
+        _cleanup_route_free_ Route *n = NULL;
+        int r;
+
+        r = route_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        if (streq(rvalue, "unicast"))
+                n->type = RTN_UNICAST;
+        else if (streq(rvalue, "blackhole"))
+                n->type = RTN_BLACKHOLE;
+        else if (streq(rvalue, "unreachable"))
+                n->type = RTN_UNREACHABLE;
+        else if (streq(rvalue, "prohibit"))
+                n->type = RTN_PROHIBIT;
+        else {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Could not parse route type \"%s\", ignoring assignment: %m", rvalue);
+                return 0;
+        }
+
+        n = NULL;
+
+        return 0;
+}
+
+int config_parse_tcp_window(const char *unit,
+                             const char *filename,
+                             unsigned line,
+                             const char *section,
+                             unsigned section_line,
+                             const char *lvalue,
+                             int ltype,
+                             const char *rvalue,
+                             void *data,
+                             void *userdata) {
+        _cleanup_route_free_ Route *n = NULL;
+        Network *network = userdata;
+        uint64_t k;
+        int r;
+
+        assert(filename);
+        assert(section);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        r = route_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        r = parse_size(rvalue, 1024, &k);
+        if (r < 0 || k > UINT32_MAX)  {
+                log_syntax(unit, LOG_ERR, filename, line, r,
+                           "Could not parse TCP %s \"%s\" bytes, ignoring assignment: %m", rvalue, lvalue);
+                return 0;
+        }
+
+        if (streq(lvalue, "InitialCongestionWindow"))
+                n->initcwnd = k;
+        else if (streq(lvalue, "InitialAdvertisedReceiveWindow"))
+                n->initrwnd = k;
+        else {
+                log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to parse TCP %s: %s", lvalue, rvalue);
+                return 0;
+        }
+
+        n = NULL;
+
+        return 0;
+}
+
+int config_parse_quickack(const char *unit,
+                          const char *filename,
+                          unsigned line,
+                          const char *section,
+                          unsigned section_line,
+                          const char *lvalue,
+                          int ltype,
+                          const char *rvalue,
+                          void *data,
+                          void *userdata) {
+        _cleanup_route_free_ Route *n = NULL;
+        Network *network = userdata;
+        int k, r;
+
+        assert(filename);
+        assert(section);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        r = route_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        k = parse_boolean(rvalue);
+        if (k < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, k, "Failed to parse TCP quickack, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        n->quickack = !!k;
         n = NULL;
 
         return 0;

@@ -12,9 +12,6 @@ Bugfixes:
           Environment=ONE='one' "TWO='two two' too" THREE=
           ExecStart=/bin/python3 -c 'import sys;print(sys.argv)' $ONE $TWO $THREE
 
-* When systemctl --host is used, underlying ssh connection can remain open.
-  bus_close does not kill children?
-
 External:
 
 * Fedora: add an rpmlint check that verifies that all unit files in the RPM are listed in %systemd_post macros.
@@ -23,39 +20,208 @@ External:
 
 Janitorial Clean-ups:
 
-* replace manual readdir() loops with FOREACH_DIRENT or FOREACH_DIRENT_ALL
-
 * Rearrange tests so that the various test-xyz.c match a specific src/basic/xyz.c again
 
 Features:
 
-* replace all canonicalize_file_name() invocations by chase_symlinks(), in
-  particulr those where a rootdir is relevant.
+* add proper dbus APIs for the various sd_notify() commands, such as MAINPID=1
+  and so on, which would mean we could report errors and such.
 
-* add parse_ip_port() or so, that is like safe_atou16() but checks for != 0
+* teach tmpfiles.d q/Q logic something sensible in the context of XFS/ext4
+  project quota
+
+* introduce DefaultSlice= or so in system.conf that allows changing where we
+  place our units by default, i.e. change system.slice to something
+  else. Similar, ManagerSlice= should exist so that PID1's own scope unit could
+  be moved somewhere else too. Finally machined and logind should get similar
+  options so that it is possible to move user session scopes and machines to a
+  different slice too by default. Usecase: people who want to put resources on
+  the entire system, with the exception of one specific service. See:
+  https://lists.freedesktop.org/archives/systemd-devel/2018-February/040369.html
+
+* maybe rework get_user_creds() to query the user database if $SHELL is used
+  for root, but only then.
+
+* be stricter with fds we receive for the fdstore: close them asynchronously
+
+* calenderspec: add support for week numbers and day numbers within a
+  year. This would allow us to define "bi-weekly" triggers safely.
+
+* add bpf-based implementation of devices cgroup controller logic for compat
+  with cgroupsv2 as supported by newest kernel
+
+* introduce sd_id128_get_boot_app_specific() which is like
+  sd_id128_get_machine_app_specific(). After all on long-running systems both
+  IDs have similar properties.
+
+* sd-bus: add vtable flag, that may be used to request client creds implicitly
+  and asynchronously before dispatching the operation
+
+* make use of ethtool veth peer info in machined, for automatically finding out
+  host-side interface pointing to the container.
+
+* add some special mode to LogsDirectory=/StateDirectory=… that allows
+  declaring these directories without necessarily pulling in deps for them, or
+  creating them when starting up. That way, we could declare that
+  systemd-journald writes to /var/log/journal, which could be useful when we
+  doing disk usage calculations and so on.
+
+* taint systemd if there are fewer than 65536 users assigned (userns) to the system.
+
+* deprecate PermissionsStartOnly= and RootDirectoryStartOnly= in favour of the ExecStart= prefix chars
+
+* add a new RuntimeDirectoryPreserve= mode that defines a similar lifecycle for
+  the runtime dir as we maintain for the fdstore: i.e. keep it around as long
+  as the unit is running or has a job queued.
+
+* support projid-based quota in machinectl for containers, and then drop
+  implicit btrfs loopback magic in machined
+
+* Add NetworkNamespacePath= to specify a path to a network namespace
+
+* maybe use SOURCE_DATE_EPOCH (i.e. the env var the reproducible builds folks
+  introduced) as the RTC epoch, instead of the mtime of NEWS.
+
+* add a way to lock down cgroup migration: a boolean, which when set for a unit
+  makes sure the processes in it can never migrate out of it
+
+* blog about fd store and restartable services
+
+* document Environment=SYSTEMD_LOG_LEVEL=debug drop-in in debugging document
+
+* rework ExecOutput and ExecInput enums so that EXEC_OUTPUT_NULL loses its
+  magic meaning and is no longer upgraded to something else if set explicitly.
+
+* in the long run: permit a system with /etc/machine-id linked to /dev/null, to
+  make it lose its identity, i.e. be anonymous. For this we'd have to patch
+  through the whole tree to make all code deal with the case where no machine
+  ID is available.
+
+* optionally, collect cgroup resource data, and store it in per-unit RRD files,
+  suitable for processing with rrdtool. Add bus API to access this data, and
+  possibly implement a CPULoad property based on it.
+
+* beef up pam_systemd to take unit file settings such as cgroups properties as
+  parameters
+
+* a new "systemd-analyze security" tool outputting a checklist of security
+  features a service does and does not implement
+
+* maybe hook of xfs/ext4 quotactl() with services? i.e. automatically manage
+  the quota of a the user indicated in User= via unit file settings, like the
+  other resource management concepts. Would mix nicely with DynamicUser=1. Or
+  alternatively, do this with projids, so that we can also cover services
+  running as root. Quota should probably cover all the special dirs such as
+  StateDirectory=, LogsDirectory=, CacheDirectory=, as well as RootDirectory= if it
+  is set, plus the whole disk space any image configured with RootImage=.
+
+* Introduce "exit" as an EmergencyAction value, and allow to configure a
+  per-unit success/failure exit code to configure. This would be useful for
+  running commands inside of services inside of containers, which could then
+  propagate their failure state all the way up.
+
+* In DynamicUser= mode: before selecting a UID, use disk quota APIs on relevant
+  disks to see if the UID is already in use.
+
+* add "systemctl wait" or so, which does what "systemd-run --wait" does, but
+  for all units. It should be both a way to pin units into memory as well as a
+  wait to retrieve their exit data.
+
+* maybe set a new set of env vars for services, based on RuntimeDirectory=,
+  StateDirectory=, LogsDirectory=, CacheDirectory= and ConfigurationDirectory=
+  automatically. For example, there could be $RUNTIME_DIRECTORY,
+  $STATE_DIRECTORY, $LOGS_DIRECTORY=, $CACHE_DIRECTORY and
+  $CONFIGURATION_DIRECTORY or so. This could be useful to write services that
+  can adapt to varying directories for these purposes. Special care has to be
+  taken if multiple dirs are configured. Maybe avoid setting the env vars in
+  that case?
+
+* expose IO accounting data on the bus, show it in systemd-run --wait and log
+  about it in the resource log message
+
+* add "systemctl purge" for flushing out configuration, state, logs, ... of a
+  unit when it is stopped
+
+* show whether a service has out-of-date configuration in "systemctl status" by
+  using mtime data of ConfigurationDirectory=.
+
+* replace all uses of fgets() + LINE_MAX by read_line()
+
+* Add AddUser= setting to unit files, similar to DynamicUser=1 which however
+  creates a static, persistent user rather than a dynamic, transient user. We
+  can leverage code from sysusers.d for this.
+
+* add some optional flag to ReadWritePaths= and friends, that has the effect
+  that we create the dir in question when the service is started. Example:
+
+  ReadWritePaths=:/var/lib/foobar
+
+* maybe add call sd_journal_set_block_timeout() or so to set SO_SNDTIMEO for
+  the sd-journal logging socket, and, if the timeout is set to 0, sets
+  O_NONBLOCK on it. That way people can control if and when to block for
+  logging.
+
+* hostnamed: populate form factor data from a new hwdb database, so that old
+  yogas can be recognized as "convertible" too, even if they predate the DMI
+  "convertible" form factor
+
+* Maybe add a small tool invoked early at boot, that adds in or resizes
+  partitions automatically, to be used when the media used is actually larger
+  than the image written onto it is.
+
+* Maybe add PrivatePIDs= as new unit setting, and do minimal PID namespacing
+  after all. Be strict however, only support the equivalent of nspawn's
+  --as-pid2 switch, and sanely proxy sd_notify() messages dropping stuff such
+  as MAINPID.
+
+* Add ExecMonitor= setting. May be used multiple times. Forks off a process in
+  the service cgroup, which is supposed to monitor the service, and when it
+  exits the service is considered failed by its monitor.
+
+* track the per-service PAM process properly (i.e. as an additional control
+  process), so that it may be queried on the bus and everything.
+
+* add a new "debug" job mode, that is propagated to unit_start() and for
+  services results in two things: we raise SIGSTOP right before invoking
+  execve() and turn off watchdog support. Then, use that to implement
+  "systemd-gdb" for attaching to the start-up of any system service in its
+  natural habitat.
+
+* maybe introduce gpt auto discovery for /var/tmp?
+
+* maybe add gpt-partition-based user management: each user gets his own
+  LUKS-encrypted GPT partition with a new GPT type. A small nss module
+  enumerates users via udev partition enumeration. UIDs are assigned in a fixed
+  way: the partition index is added as offset to some fixed base uid. User name
+  is stored in GPT partition name. A PAM module authenticates the user via the
+  LUKS partition password. Benefits: strong per-user security, compatibility
+  with stateless/read-only/verity-enabled root. (other idea: do this based on
+  loopback files in /home, without GPT involvement)
+
+* gpt-auto logic: introduce support for discovering /var matching an image. For
+  that, use a partition type UUID that is hashed from the OS name (as encoded
+  in /etc/os-release), the architecture, and 4 new bits from the gpt flags
+  field of the root partition. This way can easily support multiple OS
+  installations on the same GPT partition table, without problems with
+  unmatched /var partitions.
+
+* gpt-auto logic: related to the above, maybe support a "secondary" root
+  partition, that is mounted to / and is writable, and where the actual root's
+  /usr is mounted into.
+
+* gpt-auto logic: support encrypted swap, add kernel cmdline option to force it, and honour a gpt bit about it, plus maybe a configuration file
 
 * drop nss-myhostname in favour of nss-resolve?
-
-* drop internal dlopen() based nss-dns fallback in nss-resolve, and rely on the
-  external nsswitch.conf based one
 
 * add a percentage syntax for TimeoutStopSec=, e.g. TimeoutStopSec=150%, and
   then use that for the setting used in user@.service. It should be understood
   relative to the configured default value.
 
-* on cgroupsv2 add DelegateControllers=, to pick the precise cgroup controllers to delegate
-
 * in networkd, when matching device types, fix up DEVTYPE rubbish the kernel passes to us
 
 * enable LockMLOCK to take a percentage value relative to physical memory
 
-* switch to ProtectSystem=strict for all our long-running services where that's possible
-
-* If RootDirectory= is used, mount /proc, /sys, /dev into it, if not mounted yet
-
 * Permit masking specific netlink APIs with RestrictAddressFamily=
-
-* nspawn: start UID allocation loop from hash of container name
 
 * nspawn: support that /proc, /sys/, /dev are pre-mounted
 
@@ -79,13 +245,6 @@ Features:
 
 * DeviceAllow= should also generate seccomp filters for mknod()
 
-* Add DataDirectory=, CacheDirectory= and LogDirectory= to match
-  RuntimeDirectory=, and create it as necessary when starting a service, owned by the right user.
-
-* Add BindDirectory= for allowing arbitrary, private bind mounts for services
-
-* Add RootImage= for mounting a disk image or file as root directory
-
 * make sure the ratelimit object can deal with USEC_INFINITY as way to turn off things
 
 * journalctl: make sure -f ends when the container indicated by -M terminates
@@ -100,8 +259,6 @@ Features:
   find a way to map the User=/Group= of the service to the right name. This way
   a user/group for a service only has to exist on the host for the right
   mapping to work.
-
-* allow attaching additional journald log fields to cgroups
 
 * add bus API for creating unit files in /etc, reusing the code for transient units
 
@@ -119,8 +276,6 @@ Features:
 
 * journald: sigbus API via a signal-handler safe function that people may call
   from the SIGBUS handler
-
-* move specifier expansion from service_spawn() into load-fragment.c
 
 * optionally, also require WATCHDOG=1 notifications during service start-up and shutdown
 
@@ -140,8 +295,6 @@ Features:
   the specified range and generates sane error messages for incorrect
   specifications.
 
-* do something about "/control" subcgroups in the unified cgroup hierarchy
-
 * when we detect that there are waiting jobs but no running jobs, do something
 
 * push CPUAffinity= also into the "cpuset" cgroup controller (only after the cpuset controller got ported to the unified hierarchy)
@@ -153,15 +306,9 @@ Features:
   prefixed with /sys generally special.
   http://lists.freedesktop.org/archives/systemd-devel/2015-June/032962.html
 
-* man: document that unless you use StandardError=null the shell >/dev/stderr won't work in shell scripts in services
-
 * fstab-generator: default to tmpfs-as-root if only usr= is specified on the kernel cmdline
 
 * docs: bring http://www.freedesktop.org/wiki/Software/systemd/MyServiceCantGetRealtime up to date
-
-* mounting and unmounting mount points manually with different source
-  devices will result in collected on all devices used.
-  http://lists.freedesktop.org/archives/systemd-devel/2015-April/030225.html
 
 * add a job mode that will fail if a transaction would mean stopping
   running units. Use this in timedated to manage the NTP service
@@ -179,13 +326,6 @@ Features:
 
 * networkd/udev: implement SR_IOV configuration in .link files:
   http://lists.freedesktop.org/archives/systemd-devel/2015-January/027451.html
-
-* Rework systemctl's GetAll property parsing to use the generic bus_map_all_properties() API
-
-* implement a per-service firewall based on net_cls
-
-* Port various tools to make use of verbs.[ch], where applicable: busctl,
-  coredumpctl, hostnamectl, localectl, systemd-analyze, timedatectl
 
 * hostnamectl: show root image uuid
 
@@ -220,16 +360,12 @@ Features:
 
 * introduce systemd-timesync-wait.service or so to sync on an NTP fix?
 
-* systemd --user should issue sd_notify() upon reaching basic.target, not on becoming idle
-
 * consider showing the unit names during boot up in the status output, not just the unit descriptions
 
 * maybe allow timer units with an empty Units= setting, so that they
   can be used for resuming the system but nothing else.
 
 * what to do about udev db binary stability for apps? (raw access is not an option)
-
-* maybe provide an API to allow migration of foreign PIDs into existing scopes.
 
 * man: maybe use the word "inspect" rather than "introspect"?
 
@@ -270,7 +406,6 @@ Features:
 
 * support empty /etc boots nicely:
   - nspawn/gpt-generator: introduce new gpt partition type for /usr
-  - fstab-generator: support systemd.volatile=yes|no|state on the kernel cmdline, too, similar to nspawn's --volatile=
 
 * generator that automatically discovers btrfs subvolumes, identifies their purpose based on some xattr on them.
 
@@ -278,17 +413,12 @@ Features:
 
 * figure out a nice way how we can let the admin know what child/sibling unit causes cgroup membership for a specific unit
 
-* mount_cgroup_controllers(): symlinks need to get the label applied
-
 * For timer units: add some mechanisms so that timer units that trigger immediately on boot do not have the services
   they run added to the initial transaction and thus confuse Type=idle.
-
-* Run most system services with cgroupfs read-only and procfs with a more secure mode (doesn't work, since the hidepid= option is per-pid-namespace, not per-mount)
 
 * add bus api to query unit file's X fields.
 
 * gpt-auto-generator:
-  - Support LUKS for root devices
   - Define new partition type for encrypted swap? Support probed LUKS for encrypted swap?
   - Make /home automount rather than mount?
 
@@ -346,8 +476,6 @@ Features:
 
 * refuse boot if /usr/lib/os-release is missing or /etc/machine-id cannot be set up
 
-* btrfs raid assembly: some .device jobs stay stuck in the queue
-
 * man: the documentation of Restart= currently is very misleading and suggests the tools from ExecStartPre= might get restarted.
 
 * load .d/*.conf dropins for device units
@@ -358,25 +486,16 @@ Features:
 * sd-bus:
   - EBADSLT handling
   - GetAllProperties() on a non-existing object does not result in a failure currently
-  - kdbus: process fd=-1 for incoming msgs
   - port to sd-resolve for connecting to TCP dbus servers
-  - kdbus: maybe add controlling tty metadata fields
   - see if we can introduce a new sd_bus_get_owner_machine_id() call to retrieve the machine ID of the machine of the bus itself
-  - when kdbus does not take our message without memfds, try again with memfds
   - see if we can drop more message validation on the sending side
   - add API to clone sd_bus_message objects
-  - make AddMatch calls on dbus1 transports async?
-  - kdbus: matches against source or destination pids for an "strace -p"-like feel. Problem: The PID info needs to be available in userspace too...
   - longer term: priority inheritance
   - dbus spec updates:
-       - kdbus mapping
        - NameLost/NameAcquired obsolete
        - GVariant
        - path escaping
   - update systemd.special(7) to mention that dbus.socket is only about the compatibility socket now
-  - test bloom filter generation indexes
-  - kdbus: introduce a concept of "send-only" connections
-  - kdbus: add counter for refused unicast messages that is passed out via the RECV ioctl. SImilar to the counter for dropped multicast messages we already have.
 
 * sd-event
   - allow multiple signal handlers per signal?
@@ -396,11 +515,8 @@ Features:
 
 * maybe add a generator that looks for "systemd.run=" on the kernel cmdline for container usercases...
 
-* cgtop: make cgtop useful in a container
-
 * test/:
-  - add 'set -e' to scripts in test/
-  - make stuff in test/ work with separate output dir
+  - add unit tests for config_parse_device_allow()
 
 * seems that when we follow symlinks to units we prefer the symlink
   destination path over /etc and /usr. We should not do that. Instead
@@ -427,8 +543,6 @@ Features:
 * remove any syslog support from log.c — we probably cannot do this before split-off udev is gone for good
 
 * shutdown logging: store to EFI var, and store to USB stick?
-
-* think about window-manager-run-as-user-service problem: exit 0 → activate shutdown.target; exit != 0 → restart service
 
 * merge unit_kill_common() and unit_kill_context()
 
@@ -479,8 +593,6 @@ Features:
 
 * exec: when deinitializating a tty device fix the perms and group, too, not only when initializing. Set access mode/gid to 0620/tty.
 
-* service: watchdog logic: for testing purposes allow ping, but do not require pong
-
 * journal:
   - consider introducing implicit _TTY= + _PPID= + _EUID= + _EGID= + _FSUID= + _FSGID= fields
   - import and delete pstore filesystem content at startup
@@ -515,7 +627,6 @@ Features:
   - journald: when we drop syslog messages because the syslog socket is
     full, make sure to write how many messages are lost as first thing
     to syslog when it works again.
-  - journald: make sure ratelimit is actually really per-service with the new cgroup changes
   - change systemd-journal-flush into a service that stays around during
     boot, and causes the journal to be moved back to /run on shutdown,
     so that we do not keep /var busy. This needs to happen synchronously,
@@ -544,19 +655,21 @@ Features:
   - add journalctl -H that talks via ssh to a remote peer and passes through
     binary logs data
   - add a version of --merge which also merges /var/log/journal/remote
-  - log accumulated resource usage after each service invocation
   - journalctl: -m should access container journals directly by enumerating
     them via machined, and also watch containers coming and going.
     Benefit: nspawn --ephemeral would start working nicely with the journal.
   - assign MESSAGE_ID to log messages about failed services
 
+* add a test if all entries in the catalog are properly formatted.
+    (Adding dashes in a catalog entry currently results in the catalog entry
+     being silently skipped. journalctl --update-catalog must warn about this,
+     and we should also have a unit test to check that all our message are OK.)
+
 * document:
   - document that deps in [Unit] sections ignore Alias= fields in
     [Install] units of other units, unless those units are disabled
   - man: clarify that time-sync.target is not only sysv compat but also useful otherwise. Same for similar targets
-  - document the exit codes when services fail before they are exec()ed
   - document that service reload may be implemented as service reexec
-  - document in wiki how to map ical recurrence events to systemd timer unit calendar specifications
   - add a man page containing packaging guidelines and recommending usage of things like Documentation=, PrivateTmp=, PrivateNetwork= and ReadOnlyDirectories=/etc /usr.
   - document systemd-journal-flush.service properly
   - documentation: recommend to connect the timer units of a service to the service via Also= in [Install]
@@ -574,7 +687,6 @@ Features:
   - add new command to systemctl: "systemctl system-reexec" which reexecs as many daemons as virtually possible
   - systemctl enable: fail if target to alias into does not exist? maybe show how many units are enabled afterwards?
   - systemctl: "Journal has been rotated since unit was started." message is misleading
-  - better error message if you run systemctl without systemd running
   - systemctl status output should include list of triggering units and their status
 
 * unit install:
@@ -593,15 +705,13 @@ Features:
 
 * on shutdown: move utmp, wall, audit logic all into PID 1 (or logind?), get rid of systemd-update-utmp-runlevel
 
-* make repeated alt-ctrl-del presses printing a dump, or even force a reboot without
-  waiting for the timeout
+* make repeated alt-ctrl-del presses printing a dump
 
 * hostnamed: before returning information from /etc/machine-info.conf check the modification data and reread. Similar for localed, ...
 
 * currently x-systemd.timeout is lost in the initrd, since crypttab is copied into dracut, but fstab is not
 
 * nspawn:
-  - nspawn -x should support ephemeral instances of gpt images
   - emulate /dev/kmsg using CUSE and turn off the syslog syscall
     with seccomp. That should provide us with a useful log buffer that
     systemd can log to during early boot, and disconnect container logs
@@ -616,13 +726,14 @@ Features:
     https://github.com/systemd/systemd/pull/272#issuecomment-113153176
   - should optionally support receiving WATCHDOG=1 messages from its payload
     PID 1...
-  - should send out sd_notify("WATCHDOG=1") messages
   - optionally automatically add FORWARD rules to iptables whenever nspawn is
     running, remove them when shut down.
-  - Improve error message when --bind= is used on a non-existing source
-    directory
   - maybe make copying of /etc/resolv.conf optional, and skip it if --read-only
     is used
+
+* dissect
+  - refuse mounting over a mount point
+  - automatically discover .roothash files in dissect, similarly to nspawn
 
 * machined:
   - add an API so that libvirt-lxc can inform us about network interfaces being
@@ -645,14 +756,12 @@ Features:
 
 * cryptsetup:
   - cryptsetup-generator: allow specification of passwords in crypttab itself
-  - move cryptsetup key caching into kernel keyctl?
-    https://bugs.freedesktop.org/show_bug.cgi?id=54982
   - support rd.luks.allow-discards= kernel cmdline params in cryptsetup generator
 
 * hw watchdog: optionally try to use the preset watchdog timeout instead of always overriding it
   https://bugs.freedesktop.org/show_bug.cgi?id=54712
 
-* create /sbin/init symlinks from the build system
+* add a dependency on standard-conf.xml and other included files to man pages
 
 * MountFlags=shared acts as MountFlags=slave right now.
 
@@ -665,8 +774,6 @@ Features:
   - kill scsi_id
   - add trigger --subsystem-match=usb/usb_device device
   - reimport udev db after MOVE events for devices without dev_t
-
-* when a service has the same env var set twice we actually store it twice and return that in systemctl show -p... We should only show the last setting
 
 * There's currently no way to cancel fsck (used to be possible via C-c or c on the console)
 
@@ -705,7 +812,6 @@ Features:
 * write blog stories about:
   - hwdb: what belongs into it, lsusb
   - enabling dbus services
-  - status update
   - how to make changes to sysctl and sysfs attributes
   - remote access
   - how to pass throw-away units to systemd, or dynamically change properties of existing units
@@ -726,10 +832,7 @@ Features:
 
 * dot output for --test showing the 'initial transaction'
 
-* fingerprint.target, wireless.target, gps.target, netdevice.target
-
 * pid1:
-  - .timer units should optionally support CLOCK_BOOTTIME in addition to CLOCK_MONOTONIC
   - When logging about multiple units (stopping BoundTo units, conflicts, etc.),
     log both units as UNIT=, so that journalctl -u triggers on both.
   - generate better errors when people try to set transient properties
@@ -765,12 +868,9 @@ Features:
   - load-fragment: when loading a unit file via a chain of symlinks
     verify that it is not masked via any of the names traversed.
   - introduce Type=pid-file
-  - ExecOnFailure=/usr/bin/foo
   - introduce mix of BindTo and Requisite
   - add a concept of RemainAfterExit= to scope units
-  - Set NoNewPrivileges= on all of our own services, where that makes sense
   - Allow multiple ExecStart= for all Type= settings, so that we can cover rescue.service nicely
-  - consider adding RuntimeDirectoryUser= + RuntimeDirectoryGroup=
 
 * udev-link-config:
    - Make sure ID_PATH is always exported and complete for
@@ -812,7 +912,6 @@ Features:
 
 * dhcp:
    - figure out how much we can increase Maximum Message Size
-   - support RFC4702 (pass FQDN)
 
 * dhcp6:
    - add functions to set previously stored IPv6 addresses on startup and get
@@ -844,8 +943,6 @@ External:
 
 * drop accountsservice's StandardOutput=syslog and Type=dbus fields
 
-* dbus: in fedora, make /var/lib/dbus/machine-id a symlink to /etc/machine-id
-
 * /usr/bin/service should actually show the new command line
 
 * fedora: suggest auto-restart on failure, but not on success and not on coredump. also, ask people to think about changing the start limit logic. Also point people to RestartPreventExitStatus=, SuccessExitStatus=
@@ -868,8 +965,6 @@ Regularly:
 * look for close() vs. close_nointr() vs. close_nointr_nofail()
 
 * check for strerror(r) instead of strerror(-r)
-
-* Use PR_SET_PROCTITLE_AREA if it becomes available in the kernel
 
 * pahole
 

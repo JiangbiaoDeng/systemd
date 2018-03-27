@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 #pragma once
 
 /*
@@ -80,7 +81,9 @@ int udev_rules_apply_static_dev_perms(struct udev_rules *rules);
 /* udev-event.c */
 struct udev_event *udev_event_new(struct udev_device *dev);
 void udev_event_unref(struct udev_event *event);
-size_t udev_event_apply_format(struct udev_event *event, const char *src, char *dest, size_t size);
+size_t udev_event_apply_format(struct udev_event *event,
+                               const char *src, char *dest, size_t size,
+                               bool replace_whitespace);
 int udev_event_apply_subsys_kernel(struct udev_event *event, const char *string,
                                    char *result, size_t maxsize, int read_value);
 int udev_event_spawn(struct udev_event *event,
@@ -144,21 +147,21 @@ int udev_ctrl_get_set_children_max(struct udev_ctrl_msg *ctrl_msg);
 
 /* built-in commands */
 enum udev_builtin_cmd {
-#ifdef HAVE_BLKID
+#if HAVE_BLKID
         UDEV_BUILTIN_BLKID,
 #endif
         UDEV_BUILTIN_BTRFS,
         UDEV_BUILTIN_HWDB,
         UDEV_BUILTIN_INPUT_ID,
         UDEV_BUILTIN_KEYBOARD,
-#ifdef HAVE_KMOD
+#if HAVE_KMOD
         UDEV_BUILTIN_KMOD,
 #endif
         UDEV_BUILTIN_NET_ID,
         UDEV_BUILTIN_NET_LINK,
         UDEV_BUILTIN_PATH_ID,
         UDEV_BUILTIN_USB_ID,
-#ifdef HAVE_ACL
+#if HAVE_ACL
         UDEV_BUILTIN_UACCESS,
 #endif
         UDEV_BUILTIN_MAX
@@ -172,14 +175,14 @@ struct udev_builtin {
         bool (*validate)(struct udev *udev);
         bool run_once;
 };
-#ifdef HAVE_BLKID
+#if HAVE_BLKID
 extern const struct udev_builtin udev_builtin_blkid;
 #endif
 extern const struct udev_builtin udev_builtin_btrfs;
 extern const struct udev_builtin udev_builtin_hwdb;
 extern const struct udev_builtin udev_builtin_input_id;
 extern const struct udev_builtin udev_builtin_keyboard;
-#ifdef HAVE_KMOD
+#if HAVE_KMOD
 extern const struct udev_builtin udev_builtin_kmod;
 #endif
 extern const struct udev_builtin udev_builtin_net_id;

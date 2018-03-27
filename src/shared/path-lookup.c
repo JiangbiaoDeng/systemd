@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -23,6 +24,8 @@
 #include <string.h>
 
 #include "alloc-util.h"
+#include "fileio.h"
+#include "fs-util.h"
 #include "install.h"
 #include "log.h"
 #include "macro.h"
@@ -33,9 +36,10 @@
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "user-util.h"
 #include "util.h"
 
-static int user_runtime_dir(char **ret, const char *suffix) {
+int xdg_user_runtime_dir(char **ret, const char *suffix) {
         const char *e;
         char *j;
 
@@ -54,9 +58,10 @@ static int user_runtime_dir(char **ret, const char *suffix) {
         return 0;
 }
 
-static int user_config_dir(char **ret, const char *suffix) {
+int xdg_user_config_dir(char **ret, const char *suffix) {
         const char *e;
         char *j;
+        int r;
 
         assert(ret);
 
@@ -64,11 +69,11 @@ static int user_config_dir(char **ret, const char *suffix) {
         if (e)
                 j = strappend(e, suffix);
         else {
-                const char *home;
+                _cleanup_free_ char *home = NULL;
 
-                home = getenv("HOME");
-                if (!home)
-                        return -ENXIO;
+                r = get_home_dir(&home);
+                if (r < 0)
+                        return r;
 
                 j = strjoin(home, "/.config", suffix);
         }
@@ -80,9 +85,10 @@ static int user_config_dir(char **ret, const char *suffix) {
         return 0;
 }
 
-static int user_data_dir(char **ret, const char *suffix) {
+int xdg_user_data_dir(char **ret, const char *suffix) {
         const char *e;
         char *j;
+        int r;
 
         assert(ret);
         assert(suffix);
@@ -95,12 +101,11 @@ static int user_data_dir(char **ret, const char *suffix) {
         if (e)
                 j = strappend(e, suffix);
         else {
-                const char *home;
+                _cleanup_free_ char *home = NULL;
 
-                home = getenv("HOME");
-                if (!home)
-                        return -ENXIO;
-
+                r = get_home_dir(&home);
+                if (r < 0)
+                        return r;
 
                 j = strjoin(home, "/.local/share", suffix);
         }
@@ -111,38 +116,22 @@ static int user_data_dir(char **ret, const char *suffix) {
         return 1;
 }
 
-static char** user_dirs(
-                const char *persistent_config,
-                const char *runtime_config,
-                const char *generator,
-                const char *generator_early,
-                const char *generator_late,
-                const char *transient,
-                const char *persistent_control,
-                const char *runtime_control) {
+static const char* const user_data_unit_paths[] = {
+        "/usr/local/lib/systemd/user",
+        "/usr/local/share/systemd/user",
+        USER_DATA_UNIT_PATH,
+        "/usr/lib/systemd/user",
+        "/usr/share/systemd/user",
+        NULL
+};
 
-        const char * const config_unit_paths[] = {
-                USER_CONFIG_UNIT_PATH,
-                "/etc/systemd/user",
-                NULL
-        };
+static const char* const user_config_unit_paths[] = {
+        USER_CONFIG_UNIT_PATH,
+        "/etc/systemd/user",
+        NULL
+};
 
-        const char * const data_unit_paths[] = {
-                "/usr/local/lib/systemd/user",
-                "/usr/local/share/systemd/user",
-                USER_DATA_UNIT_PATH,
-                "/usr/lib/systemd/user",
-                "/usr/share/systemd/user",
-                NULL
-        };
-
-        const char *e;
-        _cleanup_strv_free_ char **config_dirs = NULL, **data_dirs = NULL;
-        _cleanup_free_ char *data_home = NULL;
-        _cleanup_free_ char **res = NULL;
-        char **tmp;
-        int r;
-
+int xdg_user_dirs(char ***ret_config_dirs, char ***ret_data_dirs) {
         /* Implement the mechanisms defined in
          *
          * http://standards.freedesktop.org/basedir-spec/basedir-spec-0.6.html
@@ -151,17 +140,15 @@ static char** user_dirs(
          * want to encourage that distributors ship their unit files
          * as data, and allow overriding as configuration.
          */
+        const char *e;
+        _cleanup_strv_free_ char **config_dirs = NULL, **data_dirs = NULL;
 
         e = getenv("XDG_CONFIG_DIRS");
         if (e) {
                 config_dirs = strv_split(e, ":");
                 if (!config_dirs)
-                        return NULL;
+                        return -ENOMEM;
         }
-
-        r = user_data_dir(&data_home, "/systemd/user");
-        if (r < 0 && r != -ENXIO)
-                return NULL;
 
         e = getenv("XDG_DATA_DIRS");
         if (e)
@@ -171,6 +158,37 @@ static char** user_dirs(
                                      "/usr/share",
                                      NULL);
         if (!data_dirs)
+                return -ENOMEM;
+
+        *ret_config_dirs = config_dirs;
+        *ret_data_dirs = data_dirs;
+        config_dirs = data_dirs = NULL;
+        return 0;
+}
+
+static char** user_dirs(
+                const char *persistent_config,
+                const char *runtime_config,
+                const char *global_persistent_config,
+                const char *global_runtime_config,
+                const char *generator,
+                const char *generator_early,
+                const char *generator_late,
+                const char *transient,
+                const char *persistent_control,
+                const char *runtime_control) {
+
+        _cleanup_strv_free_ char **config_dirs = NULL, **data_dirs = NULL;
+        _cleanup_free_ char *data_home = NULL;
+        _cleanup_strv_free_ char **res = NULL;
+        int r;
+
+        r = xdg_user_dirs(&config_dirs, &data_dirs);
+        if (r < 0)
+                return NULL;
+
+        r = xdg_user_data_dir(&data_home, "/systemd/user");
+        if (r < 0 && r != -ENXIO)
                 return NULL;
 
         /* Now merge everything we found. */
@@ -186,17 +204,23 @@ static char** user_dirs(
         if (strv_extend(&res, generator_early) < 0)
                 return NULL;
 
-        if (!strv_isempty(config_dirs))
-                if (strv_extend_strv_concat(&res, config_dirs, "/systemd/user") < 0)
-                        return NULL;
+        if (strv_extend_strv_concat(&res, config_dirs, "/systemd/user") < 0)
+                return NULL;
 
         if (strv_extend(&res, persistent_config) < 0)
                 return NULL;
 
-        if (strv_extend_strv(&res, (char**) config_unit_paths, false) < 0)
+        /* global config has lower priority than the user config of the same type */
+        if (strv_extend(&res, global_persistent_config) < 0)
+                return NULL;
+
+        if (strv_extend_strv(&res, (char**) user_config_unit_paths, false) < 0)
                 return NULL;
 
         if (strv_extend(&res, runtime_config) < 0)
+                return NULL;
+
+        if (strv_extend(&res, global_runtime_config) < 0)
                 return NULL;
 
         if (strv_extend(&res, generator) < 0)
@@ -205,11 +229,10 @@ static char** user_dirs(
         if (strv_extend(&res, data_home) < 0)
                 return NULL;
 
-        if (!strv_isempty(data_dirs))
-                if (strv_extend_strv_concat(&res, data_dirs, "/systemd/user") < 0)
-                        return NULL;
+        if (strv_extend_strv_concat(&res, data_dirs, "/systemd/user") < 0)
+                return NULL;
 
-        if (strv_extend_strv(&res, (char**) data_unit_paths, false) < 0)
+        if (strv_extend_strv(&res, (char**) user_data_unit_paths, false) < 0)
                 return NULL;
 
         if (strv_extend(&res, generator_late) < 0)
@@ -218,13 +241,24 @@ static char** user_dirs(
         if (path_strv_make_absolute_cwd(res) < 0)
                 return NULL;
 
-        tmp = res;
-        res = NULL;
-        return tmp;
+        return TAKE_PTR(res);
+}
+
+bool path_is_user_data_dir(const char *path) {
+        assert(path);
+
+        return strv_contains((char**) user_data_unit_paths, path);
+}
+
+bool path_is_user_config_dir(const char *path) {
+        assert(path);
+
+        return strv_contains((char**) user_config_unit_paths, path);
 }
 
 static int acquire_generator_dirs(
                 UnitFileScope scope,
+                const char *tempdir,
                 char **generator,
                 char **generator_early,
                 char **generator_late) {
@@ -235,40 +269,36 @@ static int acquire_generator_dirs(
         assert(generator);
         assert(generator_early);
         assert(generator_late);
+        assert(IN_SET(scope, UNIT_FILE_SYSTEM, UNIT_FILE_USER, UNIT_FILE_GLOBAL));
 
-        switch (scope) {
+        if (scope == UNIT_FILE_GLOBAL)
+                return -EOPNOTSUPP;
 
-        case UNIT_FILE_SYSTEM:
-                prefix = "/run/systemd/";
-                break;
+        if (tempdir)
+                prefix = tempdir;
 
-        case UNIT_FILE_USER: {
+        else if (scope == UNIT_FILE_SYSTEM)
+                prefix = "/run/systemd";
+
+        else if (scope == UNIT_FILE_USER) {
                 const char *e;
 
                 e = getenv("XDG_RUNTIME_DIR");
                 if (!e)
                         return -ENXIO;
 
-                prefix = strjoina(e, "/systemd/");
-                break;
+                prefix = strjoina(e, "/systemd");
         }
 
-        case UNIT_FILE_GLOBAL:
-                return -EOPNOTSUPP;
-
-        default:
-                assert_not_reached("Hmm, unexpected scope value.");
-        }
-
-        x = strappend(prefix, "generator");
+        x = strappend(prefix, "/generator");
         if (!x)
                 return -ENOMEM;
 
-        y = strappend(prefix, "generator.early");
+        y = strappend(prefix, "/generator.early");
         if (!y)
                 return -ENOMEM;
 
-        z = strappend(prefix, "generator.late");
+        z = strappend(prefix, "/generator.late");
         if (!z)
                 return -ENOMEM;
 
@@ -280,31 +310,30 @@ static int acquire_generator_dirs(
         return 0;
 }
 
-static int acquire_transient_dir(UnitFileScope scope, char **ret) {
+static int acquire_transient_dir(
+                UnitFileScope scope,
+                const char *tempdir,
+                char **ret) {
+
+        char *transient;
+
         assert(ret);
+        assert(IN_SET(scope, UNIT_FILE_SYSTEM, UNIT_FILE_USER, UNIT_FILE_GLOBAL));
 
-        switch (scope) {
-
-        case UNIT_FILE_SYSTEM: {
-                char *transient;
-
-                transient = strdup("/run/systemd/transient");
-                if (!transient)
-                        return -ENOMEM;
-
-                *ret = transient;
-                return 0;
-        }
-
-        case UNIT_FILE_USER:
-                return user_runtime_dir(ret, "/systemd/transient");
-
-        case UNIT_FILE_GLOBAL:
+        if (scope == UNIT_FILE_GLOBAL)
                 return -EOPNOTSUPP;
 
-        default:
-                assert_not_reached("Hmm, unexpected scope value.");
-        }
+        if (tempdir)
+                transient = strjoin(tempdir, "/transient");
+        else if (scope == UNIT_FILE_SYSTEM)
+                transient = strdup("/run/systemd/transient");
+        else
+                return xdg_user_runtime_dir(ret, "/systemd/transient");
+
+        if (!transient)
+                return -ENOMEM;
+        *ret = transient;
+        return 0;
 }
 
 static int acquire_config_dirs(UnitFileScope scope, char **persistent, char **runtime) {
@@ -327,16 +356,21 @@ static int acquire_config_dirs(UnitFileScope scope, char **persistent, char **ru
                 break;
 
         case UNIT_FILE_USER:
-                r = user_config_dir(&a, "/systemd/user");
-                if (r < 0)
+                r = xdg_user_config_dir(&a, "/systemd/user");
+                if (r < 0 && r != -ENXIO)
                         return r;
 
-                r = user_runtime_dir(runtime, "/systemd/user");
-                if (r < 0)
-                        return r;
+                r = xdg_user_runtime_dir(runtime, "/systemd/user");
+                if (r < 0) {
+                        if (r != -ENXIO)
+                                return r;
 
-                *persistent = a;
-                a = NULL;
+                        /* If XDG_RUNTIME_DIR is not set, don't consider that fatal, simply initialize the runtime
+                         * directory to NULL */
+                        *runtime = NULL;
+                }
+
+                *persistent = TAKE_PTR(a);
 
                 return 0;
 
@@ -374,20 +408,25 @@ static int acquire_control_dirs(UnitFileScope scope, char **persistent, char **r
                 if (!b)
                         return -ENOMEM;
 
-                *runtime = b;
-                b = NULL;
+                *runtime = TAKE_PTR(b);
 
                 break;
         }
 
         case UNIT_FILE_USER:
-                r = user_config_dir(&a, "/systemd/system.control");
-                if (r < 0)
+                r = xdg_user_config_dir(&a, "/systemd/user.control");
+                if (r < 0 && r != -ENXIO)
                         return r;
 
-                r = user_runtime_dir(runtime, "/systemd/system.control");
-                if (r < 0)
-                        return r;
+                r = xdg_user_runtime_dir(runtime, "/systemd/user.control");
+                if (r < 0) {
+                        if (r != -ENXIO)
+                                return r;
+
+                        /* If XDG_RUNTIME_DIR is not set, don't consider this fatal, simply initialize the directory to
+                         * NULL */
+                        *runtime = NULL;
+                }
 
                 break;
 
@@ -398,8 +437,7 @@ static int acquire_control_dirs(UnitFileScope scope, char **persistent, char **r
                 assert_not_reached("Hmm, unexpected scope value.");
         }
 
-        *persistent = a;
-        a = NULL;
+        *persistent = TAKE_PTR(a);
 
         return 0;
 }
@@ -444,9 +482,11 @@ int lookup_paths_init(
                 LookupPathsFlags flags,
                 const char *root_dir) {
 
+        _cleanup_(rmdir_and_freep) char *tempdir = NULL;
         _cleanup_free_ char
                 *root = NULL,
                 *persistent_config = NULL, *runtime_config = NULL,
+                *global_persistent_config = NULL, *global_runtime_config = NULL,
                 *generator = NULL, *generator_early = NULL, *generator_late = NULL,
                 *transient = NULL,
                 *persistent_control = NULL, *runtime_control = NULL;
@@ -474,22 +514,39 @@ int lookup_paths_init(
                         return -ENOMEM;
         }
 
+        if (flags & LOOKUP_PATHS_TEMPORARY_GENERATED) {
+                r = mkdtemp_malloc("/tmp/systemd-temporary-XXXXXX", &tempdir);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to create temporary directory: %m");
+        }
+
+        /* Note: when XDG_RUNTIME_DIR is not set this will not return -ENXIO, but simply set runtime_config to NULL */
         r = acquire_config_dirs(scope, &persistent_config, &runtime_config);
-        if (r < 0 && r != -ENXIO)
+        if (r < 0)
                 return r;
 
-        if ((flags & LOOKUP_PATHS_EXCLUDE_GENERATED) == 0) {
-                r = acquire_generator_dirs(scope, &generator, &generator_early, &generator_late);
-                if (r < 0 && r != -EOPNOTSUPP && r != -ENXIO)
+        if (scope == UNIT_FILE_USER) {
+                r = acquire_config_dirs(UNIT_FILE_GLOBAL, &global_persistent_config, &global_runtime_config);
+                if (r < 0)
                         return r;
         }
 
-        r = acquire_transient_dir(scope, &transient);
-        if (r < 0 && r != -EOPNOTSUPP && r != -ENXIO)
+        if ((flags & LOOKUP_PATHS_EXCLUDE_GENERATED) == 0) {
+                /* Note: if XDG_RUNTIME_DIR is not set, this will fail completely with ENXIO */
+                r = acquire_generator_dirs(scope, tempdir,
+                                           &generator, &generator_early, &generator_late);
+                if (r < 0 && !IN_SET(r, -EOPNOTSUPP, -ENXIO))
+                        return r;
+        }
+
+        /* Note: if XDG_RUNTIME_DIR is not set, this will fail completely with ENXIO */
+        r = acquire_transient_dir(scope, tempdir, &transient);
+        if (r < 0 && !IN_SET(r, -EOPNOTSUPP, -ENXIO))
                 return r;
 
+        /* Note: when XDG_RUNTIME_DIR is not set this will not return -ENXIO, but simply set runtime_control to NULL */
         r = acquire_control_dirs(scope, &persistent_control, &runtime_control);
-        if (r < 0 && r != -EOPNOTSUPP && r != -ENXIO)
+        if (r < 0 && r != -EOPNOTSUPP)
                 return r;
 
         /* First priority is whatever has been passed to us via env vars */
@@ -503,8 +560,7 @@ int lookup_paths_init(
                         append = true;
                 }
 
-                /* FIXME: empty components in other places should be
-                 * rejected. */
+                /* FIXME: empty components in other places should be rejected. */
 
                 r = path_split_and_make_absolute(e, &paths);
                 if (r < 0)
@@ -541,7 +597,7 @@ int lookup_paths_init(
                                         "/usr/local/lib/systemd/system",
                                         SYSTEM_DATA_UNIT_PATH,
                                         "/usr/lib/systemd/system",
-#ifdef HAVE_SPLIT_USR
+#if HAVE_SPLIT_USR
                                         "/lib/systemd/system",
 #endif
                                         STRV_IFNOTNULL(generator_late),
@@ -563,20 +619,21 @@ int lookup_paths_init(
                                         runtime_config,
                                         "/run/systemd/user",
                                         STRV_IFNOTNULL(generator),
-                                        "/usr/local/lib/systemd/user",
                                         "/usr/local/share/systemd/user",
+                                        "/usr/share/systemd/user",
+                                        "/usr/local/lib/systemd/user",
                                         USER_DATA_UNIT_PATH,
                                         "/usr/lib/systemd/user",
-                                        "/usr/share/systemd/user",
                                         STRV_IFNOTNULL(generator_late),
                                         NULL);
                         break;
 
                 case UNIT_FILE_USER:
                         add = user_dirs(persistent_config, runtime_config,
+                                        global_persistent_config, global_runtime_config,
                                         generator, generator_early, generator_late,
                                         transient,
-                                        persistent_config, runtime_control);
+                                        persistent_control, runtime_control);
                         break;
 
                 default:
@@ -653,6 +710,9 @@ int lookup_paths_init(
         p->root_dir = root;
         root = NULL;
 
+        p->temporary_dir = tempdir;
+        tempdir = NULL;
+
         return 0;
 }
 
@@ -675,6 +735,7 @@ void lookup_paths_free(LookupPaths *p) {
         p->runtime_control = mfree(p->runtime_control);
 
         p->root_dir = mfree(p->root_dir);
+        p->temporary_dir = mfree(p->temporary_dir);
 }
 
 int lookup_paths_reduce(LookupPaths *p) {
@@ -696,6 +757,14 @@ int lookup_paths_reduce(LookupPaths *p) {
         while (p->search_path[c]) {
                 struct stat st;
                 unsigned k;
+
+                /* Never strip the transient and control directories from the path */
+                if (path_equal_ptr(p->search_path[c], p->transient) ||
+                    path_equal_ptr(p->search_path[c], p->persistent_control) ||
+                    path_equal_ptr(p->search_path[c], p->runtime_control)) {
+                        c++;
+                        continue;
+                }
 
                 if (p->root_dir)
                         r = lstat(p->search_path[c], &st);
@@ -795,6 +864,9 @@ void lookup_paths_flush_generator(LookupPaths *p) {
                 (void) rm_rf(p->generator_early, REMOVE_ROOT);
         if (p->generator_late)
                 (void) rm_rf(p->generator_late, REMOVE_ROOT);
+
+        if (p->temporary_dir)
+                (void) rm_rf(p->temporary_dir, REMOVE_ROOT);
 }
 
 char **generator_binary_paths(UnitFileScope scope) {

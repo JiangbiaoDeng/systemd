@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -21,7 +22,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
 #include <selinux/selinux.h>
 #endif
 
@@ -32,7 +33,7 @@
 #include "string-util.h"
 #include "util.h"
 
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
 _printf_(2,3)
 static int null_log(int type, const char *fmt, ...) {
         return 0;
@@ -41,18 +42,20 @@ static int null_log(int type, const char *fmt, ...) {
 
 int mac_selinux_setup(bool *loaded_policy) {
 
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
         int enforce = 0;
         usec_t before_load, after_load;
         char *con;
         int r;
-        union selinux_callback cb;
+        static const union selinux_callback cb = {
+                .func_log = null_log,
+        };
+
         bool initialized = false;
 
         assert(loaded_policy);
 
         /* Turn off all of SELinux' own logging, we want to do that */
-        cb.func_log = null_log;
         selinux_set_callback(SELINUX_CB_LOG, cb);
 
         /* Don't load policy in the initrd if we don't appear to have

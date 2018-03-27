@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,7 +18,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <sd-messages.h>
+#include "sd-messages.h"
 
 #include "alloc-util.h"
 #include "resolved-dns-server.h"
@@ -28,8 +29,8 @@
 #include "string-util.h"
 
 /* After how much time to repeat classic DNS requests */
-#define DNS_TIMEOUT_MIN_USEC (500 * USEC_PER_MSEC)
-#define DNS_TIMEOUT_MAX_USEC (5 * USEC_PER_SEC)
+#define DNS_TIMEOUT_MIN_USEC (750 * USEC_PER_MSEC)
+#define DNS_TIMEOUT_MAX_USEC (SD_RESOLVED_QUERY_TIMEOUT_USEC / DNS_TRANSACTION_ATTEMPTS_MAX)
 
 /* The amount of time to wait before retrying with a full feature set */
 #define DNS_SERVER_FEATURE_GRACE_PERIOD_MAX_USEC (6 * USEC_PER_HOUR)
@@ -70,15 +71,12 @@ int dns_server_new(
 
         s->n_ref = 1;
         s->manager = m;
-        s->verified_feature_level = _DNS_SERVER_FEATURE_LEVEL_INVALID;
-        s->possible_feature_level = DNS_SERVER_FEATURE_LEVEL_BEST;
-        s->features_grace_period_usec = DNS_SERVER_FEATURE_GRACE_PERIOD_MIN_USEC;
-        s->received_udp_packet_max = DNS_PACKET_UNICAST_SIZE_MAX;
         s->type = type;
         s->family = family;
         s->address = *in_addr;
         s->ifindex = ifindex;
-        s->resend_timeout = DNS_TIMEOUT_MIN_USEC;
+
+        dns_server_reset_features(s);
 
         switch (type) {
 
@@ -304,7 +302,10 @@ void dns_server_packet_received(DnsServer *s, int protocol, DnsServerFeatureLeve
         if (s->max_rtt < rtt) {
                 s->max_rtt = rtt;
                 s->resend_timeout = CLAMP(s->max_rtt * 2, DNS_TIMEOUT_MIN_USEC, DNS_TIMEOUT_MAX_USEC);
-        }
+        } else if (s->resend_timeout > rtt)
+                /* If we received the packet faster than the resend_timeout, bias
+                 * the resend_timeout back to the rtt. */
+                s->resend_timeout = CLAMP((2 * s->resend_timeout + rtt) / 3, DNS_TIMEOUT_MIN_USEC, DNS_TIMEOUT_MAX_USEC);
 }
 
 void dns_server_packet_lost(DnsServer *s, int protocol, DnsServerFeatureLevel level, usec_t usec) {
@@ -399,12 +400,24 @@ static bool dns_server_grace_period_expired(DnsServer *s) {
 }
 
 DnsServerFeatureLevel dns_server_possible_feature_level(DnsServer *s) {
+        DnsServerFeatureLevel best;
+
         assert(s);
 
-        if (s->possible_feature_level != DNS_SERVER_FEATURE_LEVEL_BEST &&
-            dns_server_grace_period_expired(s)) {
+        /* Determine the best feature level we care about. If DNSSEC mode is off there's no point in using anything
+         * better than EDNS0, hence don't even try. */
+        best = dns_server_get_dnssec_mode(s) == DNSSEC_NO ?
+                DNS_SERVER_FEATURE_LEVEL_EDNS0 :
+                DNS_SERVER_FEATURE_LEVEL_BEST;
 
-                s->possible_feature_level = DNS_SERVER_FEATURE_LEVEL_BEST;
+        /* Clamp the feature level the highest level we care about. The DNSSEC mode might have changed since the last
+         * time, hence let's downgrade if we are still at a higher level. */
+        if (s->possible_feature_level > best)
+                s->possible_feature_level = best;
+
+        if (s->possible_feature_level < best && dns_server_grace_period_expired(s)) {
+
+                s->possible_feature_level = best;
 
                 dns_server_reset_counters(s);
 
@@ -414,6 +427,8 @@ DnsServerFeatureLevel dns_server_possible_feature_level(DnsServer *s) {
                 log_info("Grace period over, resuming full feature set (%s) for DNS server %s.",
                          dns_server_feature_level_to_string(s->possible_feature_level),
                          dns_server_string(s));
+
+                dns_server_flush_cache(s);
 
         } else if (s->possible_feature_level <= s->verified_feature_level)
                 s->possible_feature_level = s->verified_feature_level;
@@ -451,18 +466,22 @@ DnsServerFeatureLevel dns_server_possible_feature_level(DnsServer *s) {
                         s->possible_feature_level = DNS_SERVER_FEATURE_LEVEL_EDNS0;
 
                 } else if (s->n_failed_udp >= DNS_SERVER_FEATURE_RETRY_ATTEMPTS &&
-                            s->possible_feature_level >= DNS_SERVER_FEATURE_LEVEL_UDP) {
+                           s->possible_feature_level >= (dns_server_get_dnssec_mode(s) == DNSSEC_YES ? DNS_SERVER_FEATURE_LEVEL_LARGE : DNS_SERVER_FEATURE_LEVEL_UDP)) {
 
                         /* We lost too many UDP packets in a row, and are on a feature level of UDP or higher. If the
                          * packets are lost, maybe the server cannot parse them, hence downgrading sounds like a good
-                         * idea. We might downgrade all the way down to TCP this way. */
+                         * idea. We might downgrade all the way down to TCP this way.
+                         *
+                         * If strict DNSSEC mode is used we won't downgrade below DO level however, as packet loss
+                         * might have many reasons, a broken DNSSEC implementation being only one reason. And if the
+                         * user is strict on DNSSEC, then let's assume that DNSSEC is not the fault here. */
 
                         log_debug("Lost too many UDP packets, downgrading feature level...");
                         s->possible_feature_level--;
 
                 } else if (s->n_failed_tcp >= DNS_SERVER_FEATURE_RETRY_ATTEMPTS &&
                            s->packet_truncated &&
-                           s->possible_feature_level > DNS_SERVER_FEATURE_LEVEL_UDP) {
+                           s->possible_feature_level > (dns_server_get_dnssec_mode(s) == DNSSEC_YES ? DNS_SERVER_FEATURE_LEVEL_LARGE : DNS_SERVER_FEATURE_LEVEL_UDP)) {
 
                          /* We got too many TCP connection failures in a row, we had at least one truncated packet, and
                           * are on a feature level above UDP. By downgrading things and getting rid of DNSSEC or EDNS0
@@ -566,7 +585,7 @@ void dns_server_warn_downgrade(DnsServer *server) {
                 return;
 
         log_struct(LOG_NOTICE,
-                   LOG_MESSAGE_ID(SD_MESSAGE_DNSSEC_DOWNGRADE),
+                   "MESSAGE_ID=" SD_MESSAGE_DNSSEC_DOWNGRADE_STR,
                    LOG_MESSAGE("Server %s does not support DNSSEC, downgrading to non-DNSSEC mode.", dns_server_string(server)),
                    "DNS_SERVER=%s", dns_server_string(server),
                    "DNS_SERVER_FEATURE_LEVEL=%s", dns_server_feature_level_to_string(server->possible_feature_level),
@@ -698,9 +717,9 @@ DnsServer *manager_set_dns_server(Manager *m, DnsServer *s) {
                 return s;
 
         if (s)
-                log_info("Switching to %s DNS server %s.",
-                         dns_server_type_to_string(s->type),
-                         dns_server_string(s));
+                log_debug("Switching to %s DNS server %s.",
+                          dns_server_type_to_string(s->type),
+                          dns_server_string(s));
 
         dns_server_unref(m->current_dns_server);
         m->current_dns_server = dns_server_ref(s);
@@ -777,6 +796,113 @@ bool dns_server_address_valid(int family, const union in_addr_union *sa) {
                 return false;
 
         return true;
+}
+
+DnssecMode dns_server_get_dnssec_mode(DnsServer *s) {
+        assert(s);
+
+        if (s->link)
+                return link_get_dnssec_mode(s->link);
+
+        return manager_get_dnssec_mode(s->manager);
+}
+
+void dns_server_flush_cache(DnsServer *s) {
+        DnsServer *current;
+        DnsScope *scope;
+
+        assert(s);
+
+        /* Flush the cache of the scope this server belongs to */
+
+        current = s->link ? s->link->current_dns_server : s->manager->current_dns_server;
+        if (current != s)
+                return;
+
+        scope = s->link ? s->link->unicast_scope : s->manager->unicast_scope;
+        if (!scope)
+                return;
+
+        dns_cache_flush(&scope->cache);
+}
+
+void dns_server_reset_features(DnsServer *s) {
+        assert(s);
+
+        s->max_rtt = 0;
+        s->resend_timeout = DNS_TIMEOUT_MIN_USEC;
+
+        s->verified_feature_level = _DNS_SERVER_FEATURE_LEVEL_INVALID;
+        s->possible_feature_level = DNS_SERVER_FEATURE_LEVEL_BEST;
+
+        s->received_udp_packet_max = DNS_PACKET_UNICAST_SIZE_MAX;
+
+        s->packet_bad_opt = false;
+        s->packet_rrsig_missing = false;
+
+        s->features_grace_period_usec = DNS_SERVER_FEATURE_GRACE_PERIOD_MIN_USEC;
+
+        s->warned_downgrade = false;
+
+        dns_server_reset_counters(s);
+}
+
+void dns_server_reset_features_all(DnsServer *s) {
+        DnsServer *i;
+
+        LIST_FOREACH(servers, i, s)
+                dns_server_reset_features(i);
+}
+
+void dns_server_dump(DnsServer *s, FILE *f) {
+        assert(s);
+
+        if (!f)
+                f = stdout;
+
+        fputs("[Server ", f);
+        fputs(dns_server_string(s), f);
+        fputs(" type=", f);
+        fputs(dns_server_type_to_string(s->type), f);
+
+        if (s->type == DNS_SERVER_LINK) {
+                assert(s->link);
+
+                fputs(" interface=", f);
+                fputs(s->link->name, f);
+        }
+
+        fputs("]\n", f);
+
+        fputs("\tVerified feature level: ", f);
+        fputs(strna(dns_server_feature_level_to_string(s->verified_feature_level)), f);
+        fputc('\n', f);
+
+        fputs("\tPossible feature level: ", f);
+        fputs(strna(dns_server_feature_level_to_string(s->possible_feature_level)), f);
+        fputc('\n', f);
+
+        fputs("\tDNSSEC Mode: ", f);
+        fputs(strna(dnssec_mode_to_string(dns_server_get_dnssec_mode(s))), f);
+        fputc('\n', f);
+
+        fputs("\tCan do DNSSEC: ", f);
+        fputs(yes_no(dns_server_dnssec_supported(s)), f);
+        fputc('\n', f);
+
+        fprintf(f,
+                "\tMaximum UDP packet size received: %zu\n"
+                "\tFailed UDP attempts: %u\n"
+                "\tFailed TCP attempts: %u\n"
+                "\tSeen truncated packet: %s\n"
+                "\tSeen OPT RR getting lost: %s\n"
+                "\tSeen RRSIG RR missing: %s\n",
+                s->received_udp_packet_max,
+                s->n_failed_udp,
+                s->n_failed_tcp,
+                yes_no(s->packet_truncated),
+                yes_no(s->packet_bad_opt),
+                yes_no(s->packet_rrsig_missing));
 }
 
 static const char* const dns_server_type_table[_DNS_SERVER_TYPE_MAX] = {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -24,7 +25,7 @@
 int main(int argc, char *argv[]) {
         uid_t uid;
         int r;
-        const char* name = argv[1] ?: "nfsnobody";
+        const char* name = argv[1] ?: NOBODY_USER_NAME;
 
         r = get_user_creds(&name, &uid, NULL, NULL, NULL);
         if (r < 0) {

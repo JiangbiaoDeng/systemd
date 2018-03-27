@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -292,7 +293,7 @@ static int device_compare(const void *_a, const void *_b) {
                  * entire sound card completed. The kernel makes this guarantee
                  * when creating those devices, and hence we should too when
                  * enumerating them. */
-                sound_a += strlen("/sound/card");
+                sound_a += STRLEN("/sound/card");
                 sound_a = strchr(sound_a, '/');
 
                 if (sound_a) {
@@ -631,10 +632,8 @@ static int enumerator_scan_devices_tag(sd_device_enumerator *enumerator, const c
         if (!dir) {
                 if (errno == ENOENT)
                         return 0;
-                else {
-                        log_error("sd-device-enumerator: could not open tags directory %s: %m", path);
-                        return -errno;
-                }
+                else
+                        return log_error_errno(errno, "sd-device-enumerator: could not open tags directory %s: %m", path);
         }
 
         /* TODO: filter away subsystems? */
@@ -758,10 +757,8 @@ static int parent_crawl_children(sd_device_enumerator *enumerator, const char *p
         int r = 0;
 
         dir = opendir(path);
-        if (!dir) {
-                log_debug("sd-device-enumerate: could not open parent directory %s: %m", path);
-                return -errno;
-        }
+        if (!dir)
+                return log_debug_errno(errno, "sd-device-enumerate: could not open parent directory %s: %m", path);
 
         FOREACH_DIRENT_ALL(dent, dir, return -errno) {
                 _cleanup_free_ char *child = NULL;

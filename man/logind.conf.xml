@@ -1,8 +1,13 @@
 <?xml version='1.0'?> <!--*- Mode: nxml; nxml-child-indent: 2; indent-tabs-mode: nil -*-->
 <!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd" [
+<!ENTITY % entities SYSTEM "custom-entities.ent" >
+%entities;
+]>
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2010 Lennart Poettering
@@ -124,7 +129,7 @@
         corresponding to the session and all processes inside that scope will be
         terminated. If false, the scope is "abandoned", see
         <citerefentry><refentrytitle>systemd.scope</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-        and processes are not killed. Defaults to <literal>yes</literal>,
+        and processes are not killed. Defaults to <literal>&KILL_USER_PROCESSES;</literal>,
         but see the options <varname>KillOnlyUsers=</varname> and
         <varname>KillExcludeUsers=</varname> below.</para>
 
@@ -173,7 +178,8 @@
         <literal>kexec</literal>,
         <literal>suspend</literal>,
         <literal>hibernate</literal>,
-        <literal>hybrid-sleep</literal>, and
+        <literal>hybrid-sleep</literal>,
+        <literal>suspend-to-hibernate</literal>, and
         <literal>lock</literal>.
         Defaults to <literal>ignore</literal>.</para>
 
@@ -209,6 +215,7 @@
         <term><varname>HandleSuspendKey=</varname></term>
         <term><varname>HandleHibernateKey=</varname></term>
         <term><varname>HandleLidSwitch=</varname></term>
+        <term><varname>HandleLidSwitchExternalPower=</varname></term>
         <term><varname>HandleLidSwitchDocked=</varname></term>
 
         <listitem><para>Controls how logind shall handle the
@@ -221,7 +228,8 @@
         <literal>kexec</literal>,
         <literal>suspend</literal>,
         <literal>hibernate</literal>,
-        <literal>hybrid-sleep</literal>, and
+        <literal>hybrid-sleep</literal>,
+        <literal>suspend-to-hibernate</literal>, and
         <literal>lock</literal>.
         If <literal>ignore</literal>, logind will never handle these
         keys. If <literal>lock</literal>, all running sessions will be
@@ -233,19 +241,25 @@
         <varname>HandleSuspendKey=</varname> and
         <varname>HandleLidSwitch=</varname> default to
         <literal>suspend</literal>.
-        <varname>HandleLidSwitchDocked=</varname> defaults to
-        <literal>ignore</literal>.
+        <varname>HandleLidSwitchExternalPower=</varname> is completely
+        ignored by default (for backwards compatibility) — an explicit
+        value must be set before it will be used to determine
+        behaviour. <varname>HandleLidSwitchDocked=</varname> defaults
+        to <literal>ignore</literal>.
         <varname>HandleHibernateKey=</varname> defaults to
         <literal>hibernate</literal>. If the system is inserted in a
         docking station, or if more than one display is connected, the
         action specified by <varname>HandleLidSwitchDocked=</varname>
+        occurs; if the system is on external power the action (if any)
+        specified by <varname>HandleLidSwitchExternalPower=</varname>
         occurs; otherwise the <varname>HandleLidSwitch=</varname>
         action occurs.</para>
 
         <para>A different application may disable logind's handling of system power and
         sleep keys and the lid switch by taking a low-level inhibitor lock
-        ("handle-power-key", "handle-suspend-key", "handle-hibernate-key",
-        "handle-lid-switch"). This is most commonly used by graphical desktop environments
+        (<literal>handle-power-key</literal>, <literal>handle-suspend-key</literal>,
+        <literal>handle-hibernate-key</literal>, <literal>handle-lid-switch</literal>).
+        This is most commonly used by graphical desktop environments
         to take over suspend and hibernation handling, and to use their own configuration
         mechanisms. If a low-level inhibitor lock is taken, logind will not take any
         action when that key or switch is triggered and the <varname>Handle*=</varname>
@@ -261,7 +275,9 @@
         <listitem><para>Controls whether actions that <command>systemd-logind</command>
         takes when the power and sleep keys and the lid switch are triggered are subject
         to high-level inhibitor locks ("shutdown", "sleep", "idle"). Low level inhibitor
-        locks ("handle-*-key"), are always honored, irrespective of this setting.</para>
+        locks (<literal>handle-power-key</literal>, <literal>handle-suspend-key</literal>,
+        <literal>handle-hibernate-key</literal>, <literal>handle-lid-switch</literal>),
+        are always honored, irrespective of this setting.</para>
 
         <para>These settings take boolean arguments. If <literal>no</literal>, the
         inhibitor locks taken by applications are respected. If <literal>yes</literal>,

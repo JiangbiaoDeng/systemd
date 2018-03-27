@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -36,3 +37,5 @@ int config_parse_address_family_boolean_with_kernel(const char* unit, const char
 
 const char *address_family_boolean_to_string(AddressFamilyBoolean b) _const_;
 AddressFamilyBoolean address_family_boolean_from_string(const char *s) _const_;
+
+int kernel_route_expiration_supported(void);

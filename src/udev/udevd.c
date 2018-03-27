@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright (C) 2004-2012 Kay Sievers <kay@vrfy.org>
  * Copyright (C) 2004 Chris Friesen <chris_friesen@sympatico.ca>
@@ -53,6 +54,7 @@
 #include "fs-util.h"
 #include "hashmap.h"
 #include "io-util.h"
+#include "list.h"
 #include "netlink-util.h"
 #include "parse-util.h"
 #include "proc-cmdline.h"
@@ -78,7 +80,7 @@ typedef struct Manager {
         struct udev *udev;
         sd_event *event;
         Hashmap *workers;
-        struct udev_list_node events;
+        LIST_HEAD(struct event, events);
         const char *cgroup;
         pid_t pid; /* the process that originally allocated the manager object */
 
@@ -108,7 +110,7 @@ enum event_state {
 };
 
 struct event {
-        struct udev_list_node node;
+        LIST_FIELDS(struct event, event);
         Manager *manager;
         struct udev *udev;
         struct udev_device *dev;
@@ -127,10 +129,6 @@ struct event {
         sd_event_source *timeout;
 };
 
-static inline struct event *node_to_event(struct udev_list_node *node) {
-        return container_of(node, struct event, node);
-}
-
 static void event_queue_cleanup(Manager *manager, enum event_state type);
 
 enum worker_state {
@@ -142,7 +140,6 @@ enum worker_state {
 
 struct worker {
         Manager *manager;
-        struct udev_list_node node;
         int refcount;
         pid_t pid;
         struct udev_monitor *monitor;
@@ -159,8 +156,9 @@ static void event_free(struct event *event) {
 
         if (!event)
                 return;
+        assert(event->manager);
 
-        udev_list_node_remove(&event->node);
+        LIST_REMOVE(event, event->manager->events, event);
         udev_device_unref(event->dev);
         udev_device_unref(event->dev_kernel);
 
@@ -170,11 +168,9 @@ static void event_free(struct event *event) {
         if (event->worker)
                 event->worker->event = NULL;
 
-        assert(event->manager);
-
-        if (udev_list_node_is_empty(&event->manager->events)) {
+        if (LIST_IS_EMPTY(event->manager->events)) {
                 /* only clean up the queue from the process that created it */
-                if (event->manager->pid == getpid()) {
+                if (event->manager->pid == getpid_cached()) {
                         r = unlink("/run/udev/queue");
                         if (r < 0)
                                 log_warning_errno(errno, "could not unlink /run/udev/queue: %m");
@@ -237,8 +233,7 @@ static int worker_new(struct worker **ret, Manager *manager, struct udev_monitor
         if (r < 0)
                 return r;
 
-        *ret = worker;
-        worker = NULL;
+        *ret = TAKE_PTR(worker);
 
         return 0;
 }
@@ -284,12 +279,12 @@ static void worker_attach_event(struct worker *worker, struct event *event) {
 
         e = worker->manager->event;
 
-        assert_se(sd_event_now(e, clock_boottime_or_monotonic(), &usec) >= 0);
+        assert_se(sd_event_now(e, CLOCK_MONOTONIC, &usec) >= 0);
 
-        (void) sd_event_add_time(e, &event->timeout_warning, clock_boottime_or_monotonic(),
+        (void) sd_event_add_time(e, &event->timeout_warning, CLOCK_MONOTONIC,
                                  usec + arg_event_timeout_warn_usec, USEC_PER_SEC, on_event_timeout_warning, event);
 
-        (void) sd_event_add_time(e, &event->timeout, clock_boottime_or_monotonic(),
+        (void) sd_event_add_time(e, &event->timeout, CLOCK_MONOTONIC,
                                  usec + arg_event_timeout_usec, USEC_PER_SEC, on_event_timeout, event);
 }
 
@@ -593,9 +588,9 @@ static int event_queue_insert(Manager *manager, struct udev_device *dev) {
 
         /* only one process can add events to the queue */
         if (manager->pid == 0)
-                manager->pid = getpid();
+                manager->pid = getpid_cached();
 
-        assert(manager->pid == getpid());
+        assert(manager->pid == getpid_cached());
 
         event = new0(struct event, 1);
         if (!event)
@@ -619,13 +614,13 @@ static int event_queue_insert(Manager *manager, struct udev_device *dev) {
 
         event->state = EVENT_QUEUED;
 
-        if (udev_list_node_is_empty(&manager->events)) {
+        if (LIST_IS_EMPTY(manager->events)) {
                 r = touch("/run/udev/queue");
                 if (r < 0)
                         log_warning_errno(r, "could not touch /run/udev/queue: %m");
         }
 
-        udev_list_node_append(&event->node, &manager->events);
+        LIST_APPEND(event, manager->events, event);
 
         return 0;
 }
@@ -647,14 +642,12 @@ static void manager_kill_workers(Manager *manager) {
 
 /* lookup event for identical, parent, child device */
 static bool is_devpath_busy(Manager *manager, struct event *event) {
-        struct udev_list_node *loop;
+        struct event *loop_event;
         size_t common;
 
         /* check if queue contains events we depend on */
-        udev_list_node_foreach(loop, &manager->events) {
-                struct event *loop_event = node_to_event(loop);
-
-                /* we already found a later event, earlier can not block us, no need to check again */
+        LIST_FOREACH(event, loop_event, manager->events) {
+                /* we already found a later event, earlier cannot block us, no need to check again */
                 if (loop_event->seqnum < event->delaying_seqnum)
                         continue;
 
@@ -755,9 +748,9 @@ static void manager_exit(Manager *manager) {
         event_queue_cleanup(manager, EVENT_QUEUED);
         manager_kill_workers(manager);
 
-        assert_se(sd_event_now(manager->event, clock_boottime_or_monotonic(), &usec) >= 0);
+        assert_se(sd_event_now(manager->event, CLOCK_MONOTONIC, &usec) >= 0);
 
-        r = sd_event_add_time(manager->event, NULL, clock_boottime_or_monotonic(),
+        r = sd_event_add_time(manager->event, NULL, CLOCK_MONOTONIC,
                               usec + 30 * USEC_PER_SEC, USEC_PER_SEC, on_exit_timeout, manager);
         if (r < 0)
                 return;
@@ -782,16 +775,16 @@ static void manager_reload(Manager *manager) {
 }
 
 static void event_queue_start(Manager *manager) {
-        struct udev_list_node *loop;
+        struct event *event;
         usec_t usec;
 
         assert(manager);
 
-        if (udev_list_node_is_empty(&manager->events) ||
+        if (LIST_IS_EMPTY(manager->events) ||
             manager->exit || manager->stop_exec_queue)
                 return;
 
-        assert_se(sd_event_now(manager->event, clock_boottime_or_monotonic(), &usec) >= 0);
+        assert_se(sd_event_now(manager->event, CLOCK_MONOTONIC, &usec) >= 0);
         /* check for changed config, every 3 seconds at most */
         if (manager->last_usec == 0 ||
             (usec - manager->last_usec) > 3 * USEC_PER_SEC) {
@@ -810,9 +803,7 @@ static void event_queue_start(Manager *manager) {
                         return;
         }
 
-        udev_list_node_foreach(loop, &manager->events) {
-                struct event *event = node_to_event(loop);
-
+        LIST_FOREACH(event,event,manager->events) {
                 if (event->state != EVENT_QUEUED)
                         continue;
 
@@ -825,11 +816,9 @@ static void event_queue_start(Manager *manager) {
 }
 
 static void event_queue_cleanup(Manager *manager, enum event_state match_type) {
-        struct udev_list_node *loop, *tmp;
+        struct event *event, *tmp;
 
-        udev_list_node_foreach_safe(loop, tmp, &manager->events) {
-                struct event *event = node_to_event(loop);
-
+        LIST_FOREACH_SAFE(event, event, tmp, manager->events) {
                 if (match_type != EVENT_UNDEF && match_type != event->state)
                         continue;
 
@@ -1134,7 +1123,7 @@ static int on_inotify(sd_event_source *s, int fd, uint32_t revents, void *userda
 
         l = read(fd, &buffer, sizeof(buffer));
         if (l < 0) {
-                if (errno == EAGAIN || errno == EINTR)
+                if (IN_SET(errno, EAGAIN, EINTR))
                         return 1;
 
                 return log_error_errno(errno, "Failed to read inotify fd: %m");
@@ -1210,7 +1199,7 @@ static int on_sigchld(sd_event_source *s, const struct signalfd_siginfo *si, voi
                         else
                                 log_warning("worker ["PID_FMT"] exited with return code %i", pid, WEXITSTATUS(status));
                 } else if (WIFSIGNALED(status)) {
-                        log_warning("worker ["PID_FMT"] terminated by signal %i (%s)", pid, WTERMSIG(status), strsignal(WTERMSIG(status)));
+                        log_warning("worker ["PID_FMT"] terminated by signal %i (%s)", pid, WTERMSIG(status), signal_to_string(WTERMSIG(status)));
                 } else if (WIFSTOPPED(status)) {
                         log_info("worker ["PID_FMT"] stopped", pid);
                         continue;
@@ -1246,7 +1235,7 @@ static int on_post(sd_event_source *s, void *userdata) {
 
         assert(manager);
 
-        if (udev_list_node_is_empty(&manager->events)) {
+        if (LIST_IS_EMPTY(manager->events)) {
                 /* no pending events */
                 if (!hashmap_isempty(manager->workers)) {
                         /* there are idle workers */
@@ -1345,7 +1334,7 @@ static int listen_fds(int *rctrl, int *rnetlink) {
                         return log_error_errno(netlink_fd, "could not get uevent fd: %m");
 
                 netlink_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-                if (ctrl_fd < 0)
+                if (netlink_fd < 0)
                         return log_error_errno(errno, "could not dup netlink fd: %m");
         }
 
@@ -1357,10 +1346,10 @@ static int listen_fds(int *rctrl, int *rnetlink) {
 
 /*
  * read the kernel command line, in case we need to get into debug mode
- *   udev.log-priority=<level>                 syslog priority
- *   udev.children-max=<number of workers>     events are fully serialized if set to 1
- *   udev.exec-delay=<number of seconds>       delay execution of every executed program
- *   udev.event-timeout=<number of seconds>    seconds to wait before terminating an event
+ *   udev.log_priority=<level>                 syslog priority
+ *   udev.children_max=<number of workers>     events are fully serialized if set to 1
+ *   udev.exec_delay=<number of seconds>       delay execution of every executed program
+ *   udev.event_timeout=<number of seconds>    seconds to wait before terminating an event
  */
 static int parse_proc_cmdline_item(const char *key, const char *value, void *data) {
         int r = 0;
@@ -1370,25 +1359,46 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
         if (!value)
                 return 0;
 
-        if (streq(key, "udev.log-priority") && value) {
+        if (proc_cmdline_key_streq(key, "udev.log_priority")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
                 r = util_log_priority(value);
                 if (r >= 0)
                         log_set_max_level(r);
-        } else if (streq(key, "udev.event-timeout") && value) {
+
+        } else if (proc_cmdline_key_streq(key, "udev.event_timeout")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
                 r = safe_atou64(value, &arg_event_timeout_usec);
                 if (r >= 0) {
                         arg_event_timeout_usec *= USEC_PER_SEC;
                         arg_event_timeout_warn_usec = (arg_event_timeout_usec / 3) ? : 1;
                 }
-        } else if (streq(key, "udev.children-max") && value)
+
+        } else if (proc_cmdline_key_streq(key, "udev.children_max")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
                 r = safe_atou(value, &arg_children_max);
-        else if (streq(key, "udev.exec-delay") && value)
+
+        } else if (proc_cmdline_key_streq(key, "udev.exec_delay")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
                 r = safe_atoi(value, &arg_exec_delay);
-        else if (startswith(key, "udev."))
+
+        } else if (startswith(key, "udev."))
                 log_warning("Unknown udev kernel command line option \"%s\"", key);
 
         if (r < 0)
                 log_warning_errno(r, "Failed to parse \"%s=%s\", ignoring: %m", key, value);
+
         return 0;
 }
 
@@ -1396,13 +1406,13 @@ static void help(void) {
         printf("%s [OPTIONS...]\n\n"
                "Manages devices.\n\n"
                "  -h --help                   Print this message\n"
-               "     --version                Print version of the program\n"
-               "     --daemon                 Detach and run in the background\n"
-               "     --debug                  Enable debug output\n"
-               "     --children-max=INT       Set maximum number of workers\n"
-               "     --exec-delay=SECONDS     Seconds to wait before executing RUN=\n"
-               "     --event-timeout=SECONDS  Seconds to wait before terminating an event\n"
-               "     --resolve-names=early|late|never\n"
+               "  -V --version                Print version of the program\n"
+               "  -d --daemon                 Detach and run in the background\n"
+               "  -D --debug                  Enable debug output\n"
+               "  -c --children-max=INT       Set maximum number of workers\n"
+               "  -e --exec-delay=SECONDS     Seconds to wait before executing RUN=\n"
+               "  -t --event-timeout=SECONDS  Seconds to wait before terminating an event\n"
+               "  -N --resolve-names=early|late|never\n"
                "                              When to resolve users and groups\n"
                , program_invocation_short_name);
 }
@@ -1471,7 +1481,7 @@ static int parse_argv(int argc, char *argv[]) {
                         help();
                         return 0;
                 case 'V':
-                        printf("%s\n", VERSION);
+                        printf("%s\n", PACKAGE_VERSION);
                         return 0;
                 case '?':
                         return -EINVAL;
@@ -1510,7 +1520,7 @@ static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent, const char *cg
         if (!manager->rules)
                 return log_error_errno(ENOMEM, "error reading rules");
 
-        udev_list_node_init(&manager->events);
+        LIST_HEAD_INIT(manager->events);
         udev_list_init(manager->udev, &manager->properties, true);
 
         manager->cgroup = cgroup;
@@ -1642,6 +1652,7 @@ int main(int argc, char *argv[]) {
         int r;
 
         log_set_target(LOG_TARGET_AUTO);
+        udev_parse_config();
         log_parse_environment();
         log_open();
 
@@ -1649,7 +1660,7 @@ int main(int argc, char *argv[]) {
         if (r <= 0)
                 goto exit;
 
-        r = parse_proc_cmdline(parse_proc_cmdline_item, NULL, true);
+        r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, PROC_CMDLINE_STRIP_RD_PREFIX);
         if (r < 0)
                 log_warning_errno(r, "failed to parse kernel command line, ignoring: %m");
 
@@ -1658,10 +1669,9 @@ int main(int argc, char *argv[]) {
                 log_set_max_level(LOG_DEBUG);
         }
 
-        if (getuid() != 0) {
-                r = log_error_errno(EPERM, "root privileges required");
+        r = must_be_root();
+        if (r < 0)
                 goto exit;
-        }
 
         if (arg_children_max == 0) {
                 cpu_set_t cpu_set;
@@ -1689,9 +1699,9 @@ int main(int argc, char *argv[]) {
                 goto exit;
         }
 
-        r = mkdir("/run/udev", 0755);
-        if (r < 0 && errno != EEXIST) {
-                r = log_error_errno(errno, "could not create /run/udev: %m");
+        r = mkdir_errno_wrapper("/run/udev", 0755);
+        if (r < 0 && r != -EEXIST) {
+                log_error_errno(r, "could not create /run/udev: %m");
                 goto exit;
         }
 
@@ -1703,7 +1713,7 @@ int main(int argc, char *argv[]) {
                    by PID1. otherwise we are not guaranteed to have a dedicated cgroup */
                 r = cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, 0, &cgroup);
                 if (r < 0) {
-                        if (r == -ENOENT || r == -ENOMEDIUM)
+                        if (IN_SET(r, -ENOENT, -ENOMEDIUM))
                                 log_debug_errno(r, "did not find dedicated cgroup: %m");
                         else
                                 log_warning_errno(r, "failed to get cgroup: %m");
@@ -1719,7 +1729,7 @@ int main(int argc, char *argv[]) {
         if (arg_daemonize) {
                 pid_t pid;
 
-                log_info("starting version " VERSION);
+                log_info("starting version " PACKAGE_VERSION);
 
                 /* connect /dev/null to stdin, stdout, stderr */
                 if (log_get_max_level() < LOG_DEBUG) {

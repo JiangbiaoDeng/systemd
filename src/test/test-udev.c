@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -88,7 +89,7 @@ int main(int argc, char *argv[]) {
         if (udev == NULL)
                 return EXIT_FAILURE;
 
-        log_debug("version %s", VERSION);
+        log_debug("version %s", PACKAGE_VERSION);
         mac_selinux_init();
 
         action = argv[1];

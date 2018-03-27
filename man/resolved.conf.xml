@@ -3,6 +3,8 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2014 Tom Gundersen
@@ -21,7 +23,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 -->
 
-<refentry id="resolved.conf" conditional='ENABLE_RESOLVED'
+<refentry id="resolved.conf" conditional='ENABLE_RESOLVE'
     xmlns:xi="http://www.w3.org/2001/XInclude">
   <refentryinfo>
     <title>resolved.conf</title>
@@ -122,6 +124,21 @@
         but responding is disabled. Note that
         <citerefentry><refentrytitle>systemd-networkd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
         also maintains per-link LLMNR settings. LLMNR will be
+        enabled on a link only if the per-link and the
+        global setting is on.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>MulticastDNS=</varname></term>
+        <listitem><para>Takes a boolean argument or
+        <literal>resolve</literal>. Controls Multicast DNS support (<ulink
+        url="https://tools.ietf.org/html/rfc6762">RFC 6762</ulink>) on
+        the local host. If true, enables full Multicast DNS responder and
+        resolver support. If false, disables both. If set to
+        <literal>resolve</literal>, only resolution support is enabled,
+        but responding is disabled. Note that
+        <citerefentry><refentrytitle>systemd-networkd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+        also maintains per-link Multicast DNS settings. Multicast DNS will be
         enabled on a link only if the per-link and the
         global setting is on.</para></listitem>
       </varlistentry>

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -18,14 +19,18 @@
 ***/
 
 #include "alloc-util.h"
+#include "build.h"
 #include "cgroup-util.h"
 #include "dirent-util.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "parse-util.h"
+#include "proc-cmdline.h"
 #include "process-util.h"
+#include "special.h"
 #include "stat-util.h"
 #include "string-util.h"
+#include "strv.h"
 #include "test-helper.h"
 #include "user-util.h"
 #include "util.h"
@@ -138,10 +143,10 @@ static void check_p_g_slice(const char *path, int code, const char *result) {
 
 static void test_path_get_slice(void) {
         check_p_g_slice("/user.slice", 0, "user.slice");
-        check_p_g_slice("/foobar", 0, "-.slice");
+        check_p_g_slice("/foobar", 0, SPECIAL_ROOT_SLICE);
         check_p_g_slice("/user.slice/user-waldo.slice", 0, "user-waldo.slice");
-        check_p_g_slice("", 0, "-.slice");
-        check_p_g_slice("foobar", 0, "-.slice");
+        check_p_g_slice("", 0, SPECIAL_ROOT_SLICE);
+        check_p_g_slice("foobar", 0, SPECIAL_ROOT_SLICE);
         check_p_g_slice("foobar.slice", 0, "foobar.slice");
         check_p_g_slice("foo.slice/foo-bar.slice/waldo.service", 0, "foo-bar.slice");
 }
@@ -162,10 +167,10 @@ static void test_path_get_user_slice(void) {
         check_p_g_u_slice("foobar.slice", -ENXIO, NULL);
         check_p_g_u_slice("foo.slice/foo-bar.slice/waldo.service", -ENXIO, NULL);
 
-        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service", 0, "-.slice");
-        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service/", 0, "-.slice");
-        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service///", 0, "-.slice");
-        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service/waldo.service", 0, "-.slice");
+        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service", 0, SPECIAL_ROOT_SLICE);
+        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service/", 0, SPECIAL_ROOT_SLICE);
+        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service///", 0, SPECIAL_ROOT_SLICE);
+        check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service/waldo.service", 0, SPECIAL_ROOT_SLICE);
         check_p_g_u_slice("foo.slice/foo-bar.slice/user@1000.service/piep.slice/foo.service", 0, "piep.slice");
         check_p_g_u_slice("/foo.slice//foo-bar.slice/user@1000.service/piep.slice//piep-pap.slice//foo.service", 0, "piep-pap.slice");
 }
@@ -190,8 +195,7 @@ static void test_proc(void) {
                 pid_t pid;
                 uid_t uid = UID_INVALID;
 
-                if (de->d_type != DT_DIR &&
-                    de->d_type != DT_UNKNOWN)
+                if (!IN_SET(de->d_type, DT_DIR, DT_UNKNOWN))
                         continue;
 
                 r = parse_pid(de->d_name, &pid);
@@ -272,7 +276,7 @@ static void test_slice_to_path(void) {
         test_slice_to_path_one("foobar.slice", "foobar.slice", 0);
         test_slice_to_path_one("foobar-waldo.slice", "foobar.slice/foobar-waldo.slice", 0);
         test_slice_to_path_one("foobar-waldo.service", NULL, -EINVAL);
-        test_slice_to_path_one("-.slice", "", 0);
+        test_slice_to_path_one(SPECIAL_ROOT_SLICE, "", 0);
         test_slice_to_path_one("--.slice", NULL, -EINVAL);
         test_slice_to_path_one("-", NULL, -EINVAL);
         test_slice_to_path_one("-foo-.slice", NULL, -EINVAL);
@@ -332,7 +336,125 @@ static void test_fd_is_cgroup_fs(void) {
         fd = safe_close(fd);
 }
 
+static void test_is_wanted_print(bool header) {
+        _cleanup_free_ char *cmdline = NULL;
+
+        log_info("-- %s --", __func__);
+        assert_se(proc_cmdline(&cmdline) >= 0);
+        log_info("cmdline: %s", cmdline);
+        if (header) {
+
+                log_info(_CGROUP_HIEARCHY_);
+                (void) system("findmnt -n /sys/fs/cgroup");
+        }
+
+        log_info("is_unified_wanted() → %s", yes_no(cg_is_unified_wanted()));
+        log_info("is_hybrid_wanted() → %s", yes_no(cg_is_hybrid_wanted()));
+        log_info("is_legacy_wanted() → %s", yes_no(cg_is_legacy_wanted()));
+        log_info(" ");
+}
+
+static void test_is_wanted(void) {
+        assert_se(setenv("SYSTEMD_PROC_CMDLINE",
+                         "systemd.unified_cgroup_hierarchy", 1) >= 0);
+        test_is_wanted_print(false);
+
+        assert_se(setenv("SYSTEMD_PROC_CMDLINE",
+                         "systemd.unified_cgroup_hierarchy=0", 1) >= 0);
+        test_is_wanted_print(false);
+
+        assert_se(setenv("SYSTEMD_PROC_CMDLINE",
+                         "systemd.unified_cgroup_hierarchy=0 "
+                         "systemd.legacy_systemd_cgroup_controller", 1) >= 0);
+        test_is_wanted_print(false);
+
+        assert_se(setenv("SYSTEMD_PROC_CMDLINE",
+                         "systemd.unified_cgroup_hierarchy=0 "
+                         "systemd.legacy_systemd_cgroup_controller=0", 1) >= 0);
+        test_is_wanted_print(false);
+}
+
+static void test_cg_tests(void) {
+        int all, hybrid, systemd, r;
+
+        r = cg_unified_flush();
+        if (r == -ENOMEDIUM) {
+                log_notice_errno(r, "Skipping cg hierarchy tests: %m");
+                return;
+        }
+        assert_se(r == 0);
+
+        all = cg_all_unified();
+        assert_se(IN_SET(all, 0, 1));
+
+        hybrid = cg_hybrid_unified();
+        assert_se(IN_SET(hybrid, 0, 1));
+
+        systemd = cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER);
+        assert_se(IN_SET(systemd, 0, 1));
+
+        if (all) {
+                assert_se(systemd);
+                assert_se(!hybrid);
+
+        } else if (hybrid) {
+                assert_se(systemd);
+                assert_se(!all);
+
+        } else
+                assert_se(!systemd);
+}
+
+static void test_cg_get_keyed_attribute(void) {
+        _cleanup_free_ char *val = NULL;
+        char *vals3[3] = {}, *vals3a[3] = {};
+        int i, r;
+
+        r = cg_get_keyed_attribute("cpu", "/init.scope", "no_such_file", STRV_MAKE("no_such_attr"), &val);
+        if (r == -ENOMEDIUM) {
+                log_info_errno(r, "Skipping most of %s, /sys/fs/cgroup not accessible: %m", __func__);
+                return;
+        }
+
+        assert_se(r == -ENOENT);
+        assert_se(val == NULL);
+
+        if (access("/sys/fs/cgroup/init.scope/cpu.stat", R_OK) < 0) {
+                log_info_errno(errno, "Skipping most of %s, /init.scope/cpu.stat not accessible: %m", __func__);
+                return;
+        }
+
+        assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat", STRV_MAKE("no_such_attr"), &val) == -ENXIO);
+        assert_se(val == NULL);
+
+        assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat", STRV_MAKE("usage_usec"), &val) == 0);
+        log_info("cpu /init.scope cpu.stat [usage_usec] → \"%s\"", val);
+
+        assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat", STRV_MAKE("usage_usec", "no_such_attr"), vals3) == -ENXIO);
+
+        assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat", STRV_MAKE("usage_usec", "usage_usec"), vals3) == -ENXIO);
+
+        assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat",
+                                         STRV_MAKE("usage_usec", "user_usec", "system_usec"), vals3) == 0);
+        log_info("cpu /init.scope cpu.stat [usage_usec user_usec system_usec] → \"%s\", \"%s\", \"%s\"",
+                 vals3[0], vals3[1], vals3[2]);
+
+        assert_se(cg_get_keyed_attribute("cpu", "/init.scope", "cpu.stat",
+                                         STRV_MAKE("system_usec", "user_usec", "usage_usec"), vals3a) == 0);
+        log_info("cpu /init.scope cpu.stat [system_usec user_usec usage_usec] → \"%s\", \"%s\", \"%s\"",
+                 vals3a[0], vals3a[1], vals3a[2]);
+
+        for (i = 0; i < 3; i++) {
+                free(vals3[i]);
+                free(vals3a[i]);
+        }
+}
+
 int main(void) {
+        log_set_max_level(LOG_DEBUG);
+        log_parse_environment();
+        log_open();
+
         test_path_decode_unit();
         test_path_get_unit();
         test_path_get_user_unit();
@@ -349,6 +471,11 @@ int main(void) {
         TEST_REQ_RUNNING_SYSTEMD(test_mask_supported());
         TEST_REQ_RUNNING_SYSTEMD(test_is_cgroup_fs());
         TEST_REQ_RUNNING_SYSTEMD(test_fd_is_cgroup_fs());
+        test_is_wanted_print(true);
+        test_is_wanted_print(false); /* run twice to test caching */
+        test_is_wanted();
+        test_cg_tests();
+        test_cg_get_keyed_attribute();
 
         return 0;
 }
