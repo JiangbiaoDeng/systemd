@@ -1,25 +1,9 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2014 systemd developers
+#include <getopt.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "macro.h"
 #include "strv.h"
+#include "tests.h"
 #include "verbs.h"
 
 static int noop_dispatcher(int argc, char *argv[], void *userdata) {
@@ -30,7 +14,7 @@ static int noop_dispatcher(int argc, char *argv[], void *userdata) {
         optind = 0; \
         assert_se(dispatch_verb(strv_length(argv), argv, verbs, NULL) == expected);
 
-static void test_verbs(void) {
+TEST(verbs) {
         static const Verb verbs[] = {
                 { "help",        VERB_ANY, VERB_ANY, 0,            noop_dispatcher },
                 { "list-images", VERB_ANY, 1,        0,            noop_dispatcher },
@@ -59,21 +43,38 @@ static void test_verbs(void) {
         test_dispatch_one(STRV_MAKE("copy-to", "foo", "bar", "baz", "quux", "qaax"), verbs, -EINVAL);
 
         /* no verb, but a default is set */
-        test_dispatch_one(STRV_MAKE_EMPTY, verbs, 0);
+        test_dispatch_one(STRV_EMPTY, verbs, 0);
 }
 
-static void test_verbs_no_default(void) {
+TEST(verbs_no_default) {
         static const Verb verbs[] = {
                 { "help", VERB_ANY, VERB_ANY, 0, noop_dispatcher },
                 {},
         };
 
         test_dispatch_one(STRV_MAKE(NULL), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hel"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("helpp"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hgrejgoraoiosafso"), verbs, -EINVAL);
 }
 
-int main(int argc, char *argv[]) {
-        test_verbs();
-        test_verbs_no_default();
+TEST(verbs_no_default_many) {
+        static const Verb verbs[] = {
+                { "help",        VERB_ANY, VERB_ANY, 0,            noop_dispatcher },
+                { "list-images", VERB_ANY, 1,        0,            noop_dispatcher },
+                { "list",        VERB_ANY, 2,        0,            noop_dispatcher },
+                { "status",      2,        VERB_ANY, 0,            noop_dispatcher },
+                { "show",        VERB_ANY, VERB_ANY, 0,            noop_dispatcher },
+                { "terminate",   2,        VERB_ANY, 0,            noop_dispatcher },
+                { "login",       2,        2,        0,            noop_dispatcher },
+                { "copy-to",     3,        4,        0,            noop_dispatcher },
+                {}
+        };
 
-        return 0;
+        test_dispatch_one(STRV_MAKE(NULL), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hel"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("helpp"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hgrejgoraoiosafso"), verbs, -EINVAL);
 }
+
+DEFINE_TEST_MAIN(LOG_INFO);

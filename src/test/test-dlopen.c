@@ -1,33 +1,20 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2016 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <dlfcn.h>
 #include <stdlib.h>
 
-#include "macro.h"
+#include "dlfcn-util.h"
+#include "shared-forward.h"
 
 int main(int argc, char **argv) {
-        void *handle;
+        void *handles[argc - 1];
+        int i;
 
-        assert_se((handle = dlopen(argv[1], RTLD_NOW)));
-        assert_se(dlclose(handle) == 0);
+        for (i = 0; i < argc - 1; i++)
+                assert_se(dlopen_safe(argv[i + 1], handles + i, /* reterr_dlerror= */ NULL) >= 0);
+
+        for (i--; i >= 0; i--)
+                assert_se(dlclose(handles[i]) == 0);
 
         return EXIT_SUCCESS;
 }

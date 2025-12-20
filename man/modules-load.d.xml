@@ -1,41 +1,14 @@
 <?xml version="1.0"?>
 <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN" "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2011 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 <refentry id="modules-load.d" conditional='HAVE_KMOD'
     xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>modules-load.d</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>Lennart</firstname>
-        <surname>Poettering</surname>
-        <email>lennart@poettering.net</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -49,9 +22,12 @@
   </refnamediv>
 
   <refsynopsisdiv>
-    <para><filename>/etc/modules-load.d/*.conf</filename></para>
-    <para><filename>/run/modules-load.d/*.conf</filename></para>
-    <para><filename>/usr/lib/modules-load.d/*.conf</filename></para>
+    <para><simplelist>
+      <member><filename>/etc/modules-load.d/*.conf</filename></member>
+      <member><filename>/run/modules-load.d/*.conf</filename></member>
+      <member><filename>/usr/local/lib/modules-load.d/*.conf</filename></member>
+      <member><filename>/usr/lib/modules-load.d/*.conf</filename></member>
+    </simplelist></para>
   </refsynopsisdiv>
 
   <refsect1>
@@ -92,12 +68,12 @@ virtio-net</programlisting>
 
   <refsect1>
     <title>See Also</title>
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd-modules-load.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd-delta</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry project='man-pages'><refentrytitle>modprobe</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-modules-load.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-delta</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry project='man-pages'><refentrytitle>modprobe</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

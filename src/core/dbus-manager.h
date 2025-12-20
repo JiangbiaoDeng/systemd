@@ -1,31 +1,39 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "sd-bus-vtable.h"
 
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "manager.h"
+#include "core-forward.h"
 
 extern const sd_bus_vtable bus_manager_vtable[];
+extern const sd_bus_vtable bus_manager_log_control_vtable[];
 
-void bus_manager_send_finished(Manager *m, usec_t firmware_usec, usec_t loader_usec, usec_t kernel_usec, usec_t initrd_usec, usec_t userspace_usec, usec_t total_usec);
+void bus_manager_send_finished(
+                Manager *m,
+                usec_t firmware_usec,
+                usec_t loader_usec,
+                usec_t kernel_usec,
+                usec_t initrd_usec,
+                usec_t userspace_usec,
+                usec_t total_usec);
+
 void bus_manager_send_reloading(Manager *m, bool active);
 void bus_manager_send_change_signal(Manager *m);
 
-int verify_run_space_and_log(const char *message);
+int bus_property_get_oom_policy(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *reterr_error);
+
+int bus_property_get_emergency_action(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *reterr_error);

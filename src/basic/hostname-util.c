@@ -1,145 +1,101 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2015 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <errno.h>
-#include <limits.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/utsname.h>
-#include <unistd.h>
+#include <stdlib.h>
 
 #include "alloc-util.h"
-#include "def.h"
-#include "fd-util.h"
-#include "fileio.h"
+#include "env-file.h"
 #include "hostname-util.h"
-#include "macro.h"
+#include "log.h"
+#include "os-util.h"
 #include "string-util.h"
+#include "strv.h"
+#include "user-util.h"
 
-bool hostname_is_set(void) {
-        struct utsname u;
+char* get_default_hostname_raw(void) {
+        int r;
 
-        assert_se(uname(&u) >= 0);
+        /* Returns the default hostname, and leaves any ??? in place. */
 
-        if (isempty(u.nodename))
-                return false;
+        const char *e = secure_getenv("SYSTEMD_DEFAULT_HOSTNAME");
+        if (e) {
+                if (hostname_is_valid(e, VALID_HOSTNAME_QUESTION_MARK))
+                        return strdup(e);
 
-        /* This is the built-in kernel default host name */
-        if (streq(u.nodename, "(none)"))
-                return false;
+                log_debug("Invalid hostname in $SYSTEMD_DEFAULT_HOSTNAME, ignoring: %s", e);
+        }
 
-        return true;
+        _cleanup_free_ char *f = NULL;
+        r = parse_os_release(NULL, "DEFAULT_HOSTNAME", &f);
+        if (r < 0)
+                log_debug_errno(r, "Failed to parse os-release, ignoring: %m");
+        else if (f) {
+                if (hostname_is_valid(f, VALID_HOSTNAME_QUESTION_MARK))
+                        return TAKE_PTR(f);
+
+                log_debug("Invalid hostname in os-release, ignoring: %s", f);
+        }
+
+        return strdup(FALLBACK_HOSTNAME);
 }
 
-char* gethostname_malloc(void) {
-        struct utsname u;
+bool valid_ldh_char(char c) {
+        /* "LDH" → "Letters, digits, hyphens", as per RFC 5890, Section 2.3.1 */
 
-        /* This call tries to return something useful, either the actual hostname
-         * or it makes something up. The only reason it might fail is OOM.
-         * It might even return "localhost" if that's set. */
-
-        assert_se(uname(&u) >= 0);
-
-        if (isempty(u.nodename) || streq(u.nodename, "(none)"))
-                return strdup(FALLBACK_HOSTNAME);
-
-        return strdup(u.nodename);
+        return ascii_isalpha(c) ||
+                ascii_isdigit(c) ||
+                c == '-';
 }
 
-int gethostname_strict(char **ret) {
-        struct utsname u;
-        char *k;
-
-        /* This call will rather fail than make up a name. It will not return "localhost" either. */
-
-        assert_se(uname(&u) >= 0);
-
-        if (isempty(u.nodename))
-                return -ENXIO;
-
-        if (streq(u.nodename, "(none)"))
-                return -ENXIO;
-
-        if (is_localhost(u.nodename))
-                return -ENXIO;
-
-        k = strdup(u.nodename);
-        if (!k)
-                return -ENOMEM;
-
-        *ret = k;
-        return 0;
-}
-
-static bool hostname_valid_char(char c) {
-        return
-                (c >= 'a' && c <= 'z') ||
-                (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') ||
-                IN_SET(c, '-', '_', '.');
-}
-
-/**
- * Check if s looks like a valid host name or FQDN. This does not do
- * full DNS validation, but only checks if the name is composed of
- * allowed characters and the length is not above the maximum allowed
- * by Linux (c.f. dns_name_is_valid()). Trailing dot is allowed if
- * allow_trailing_dot is true and at least two components are present
- * in the name. Note that due to the restricted charset and length
- * this call is substantially more conservative than
- * dns_name_is_valid().
- */
-bool hostname_is_valid(const char *s, bool allow_trailing_dot) {
+bool hostname_is_valid(const char *s, ValidHostnameFlags flags) {
         unsigned n_dots = 0;
         const char *p;
-        bool dot;
+        bool dot, hyphen;
+
+        /* Check if s looks like a valid hostname or FQDN. This does not do full DNS validation, but only
+         * checks if the name is composed of allowed characters and the length is not above the maximum
+         * allowed by Linux (c.f. dns_name_is_valid()). A trailing dot is allowed if
+         * VALID_HOSTNAME_TRAILING_DOT flag is set and at least two components are present in the name. Note
+         * that due to the restricted charset and length this call is substantially more conservative than
+         * dns_name_is_valid(). Doesn't accept empty hostnames, hostnames with leading dots, and hostnames
+         * with multiple dots in a sequence. Doesn't allow hyphens at the beginning or end of label. */
 
         if (isempty(s))
                 return false;
 
-        /* Doesn't accept empty hostnames, hostnames with
-         * leading dots, and hostnames with multiple dots in a
-         * sequence. Also ensures that the length stays below
-         * HOST_NAME_MAX. */
+        if (streq(s, ".host")) /* Used by the container logic to denote the "root container" */
+                return FLAGS_SET(flags, VALID_HOSTNAME_DOT_HOST);
 
-        for (p = s, dot = true; *p; p++) {
+        for (p = s, dot = hyphen = true; *p; p++)
                 if (*p == '.') {
-                        if (dot)
+                        if (dot || hyphen)
                                 return false;
 
                         dot = true;
+                        hyphen = false;
                         n_dots++;
-                } else {
-                        if (!hostname_valid_char(*p))
+
+                } else if (*p == '-') {
+                        if (dot)
                                 return false;
 
                         dot = false;
-                }
-        }
+                        hyphen = true;
 
-        if (dot && (n_dots < 2 || !allow_trailing_dot))
+                } else {
+                        if (!valid_ldh_char(*p) && (*p != '?' || !FLAGS_SET(flags, VALID_HOSTNAME_QUESTION_MARK)))
+                                return false;
+
+                        dot = false;
+                        hyphen = false;
+                }
+
+        if (dot && (n_dots < 2 || !FLAGS_SET(flags, VALID_HOSTNAME_TRAILING_DOT)))
+                return false;
+        if (hyphen)
                 return false;
 
-        if (p-s > HOST_NAME_MAX) /* Note that HOST_NAME_MAX is 64 on
-                                  * Linux, but DNS allows domain names
-                                  * up to 255 characters */
+        /* Note that host name max is 64 on Linux, but DNS allows domain names up to 255 characters. */
+        if (p - s > (ssize_t) LINUX_HOST_NAME_MAX)
                 return false;
 
         return true;
@@ -147,29 +103,38 @@ bool hostname_is_valid(const char *s, bool allow_trailing_dot) {
 
 char* hostname_cleanup(char *s) {
         char *p, *d;
-        bool dot;
+        bool dot, hyphen;
 
         assert(s);
 
-        strshorten(s, HOST_NAME_MAX);
-
-        for (p = s, d = s, dot = true; *p; p++) {
+        for (p = s, d = s, dot = hyphen = true; *p && d - s < (ssize_t) LINUX_HOST_NAME_MAX; p++)
                 if (*p == '.') {
-                        if (dot)
+                        if (dot || hyphen)
                                 continue;
 
                         *(d++) = '.';
                         dot = true;
-                } else if (hostname_valid_char(*p)) {
+                        hyphen = false;
+
+                } else if (*p == '-') {
+                        if (dot)
+                                continue;
+
+                        *(d++) = '-';
+                        dot = false;
+                        hyphen = true;
+
+                } else if (valid_ldh_char(*p) || *p == '?') {
                         *(d++) = *p;
                         dot = false;
+                        hyphen = false;
                 }
-        }
 
-        if (dot && d > s)
-                d[-1] = 0;
-        else
-                *d = 0;
+        if (d > s && IN_SET(d[-1], '-', '.'))
+                /* The dot can occur at most once, but we might have multiple
+                 * hyphens, hence the loop */
+                d--;
+        *d = 0;
 
         return s;
 }
@@ -180,128 +145,111 @@ bool is_localhost(const char *hostname) {
         /* This tries to identify local host and domain names
          * described in RFC6761 plus the redhatism of localdomain */
 
-        return strcaseeq(hostname, "localhost") ||
-               strcaseeq(hostname, "localhost.") ||
-               strcaseeq(hostname, "localhost.localdomain") ||
-               strcaseeq(hostname, "localhost.localdomain.") ||
-               endswith_no_case(hostname, ".localhost") ||
-               endswith_no_case(hostname, ".localhost.") ||
-               endswith_no_case(hostname, ".localhost.localdomain") ||
-               endswith_no_case(hostname, ".localhost.localdomain.");
+        return STRCASE_IN_SET(
+                        hostname,
+                        "localhost",
+                        "localhost.",
+                        "localhost.localdomain",
+                        "localhost.localdomain.") ||
+                endswith_no_case(hostname, ".localhost") ||
+                endswith_no_case(hostname, ".localhost.") ||
+                endswith_no_case(hostname, ".localhost.localdomain") ||
+                endswith_no_case(hostname, ".localhost.localdomain.");
 }
 
-bool is_gateway_hostname(const char *hostname) {
-        assert(hostname);
+const char* etc_hostname(void) {
+        static const char *cached = NULL;
 
-        /* This tries to identify the valid syntaxes for the our
-         * synthetic "gateway" host. */
+        if (!cached)
+                cached = secure_getenv("SYSTEMD_ETC_HOSTNAME") ?: "/etc/hostname";
 
-        return
-                strcaseeq(hostname, "_gateway") || strcaseeq(hostname, "_gateway.")
-#if ENABLE_COMPAT_GATEWAY_HOSTNAME
-                || strcaseeq(hostname, "gateway") || strcaseeq(hostname, "gateway.")
-#endif
-                ;
+        return cached;
 }
 
-int sethostname_idempotent(const char *s) {
-        char buf[HOST_NAME_MAX + 1] = {};
+const char* etc_machine_info(void) {
+        static const char *cached = NULL;
 
-        assert(s);
+        if (!cached)
+                cached = secure_getenv("SYSTEMD_ETC_MACHINE_INFO") ?: "/etc/machine-info";
 
-        if (gethostname(buf, sizeof(buf)) < 0)
-                return -errno;
-
-        if (streq(buf, s))
-                return 0;
-
-        if (sethostname(s, strlen(s)) < 0)
-                return -errno;
-
-        return 1;
+        return cached;
 }
 
-int shorten_overlong(const char *s, char **ret) {
-        char *h, *p;
-
-        /* Shorten an overlong name to HOST_NAME_MAX or to the first dot,
-         * whatever comes earlier. */
-
-        assert(s);
-
-        h = strdup(s);
-        if (!h)
-                return -ENOMEM;
-
-        if (hostname_is_valid(h, false)) {
-                *ret = h;
-                return 0;
-        }
-
-        p = strchr(h, '.');
-        if (p)
-                *p = 0;
-
-        strshorten(h, HOST_NAME_MAX);
-
-        if (!hostname_is_valid(h, false)) {
-                free(h);
-                return -EDOM;
-        }
-
-        *ret = h;
-        return 1;
-}
-
-int read_etc_hostname_stream(FILE *f, char **ret) {
+int get_pretty_hostname(char **ret) {
+        _cleanup_free_ char *n = NULL;
         int r;
 
-        assert(f);
         assert(ret);
 
-        for (;;) {
-                _cleanup_free_ char *line = NULL;
-                char *p;
+        r = parse_env_file(NULL, etc_machine_info(), "PRETTY_HOSTNAME", &n);
+        if (r < 0)
+                return r;
 
-                r = read_line(f, LONG_LINE_MAX, &line);
-                if (r < 0)
-                        return r;
-                if (r == 0) /* EOF without any hostname? the file is empty, let's treat that exactly like no file at all: ENOENT */
-                        return -ENOENT;
+        if (isempty(n))
+                return -ENXIO;
 
-                p = strstrip(line);
-
-                /* File may have empty lines or comments, ignore them */
-                if (!IN_SET(*p, '\0', '#')) {
-                        char *copy;
-
-                        hostname_cleanup(p); /* normalize the hostname */
-
-                        if (!hostname_is_valid(p, true)) /* check that the hostname we return is valid */
-                                return -EBADMSG;
-
-                        copy = strdup(p);
-                        if (!copy)
-                                return -ENOMEM;
-
-                        *ret = copy;
-                        return 0;
-                }
-        }
+        *ret = TAKE_PTR(n);
+        return 0;
 }
 
-int read_etc_hostname(const char *path, char **ret) {
-        _cleanup_fclose_ FILE *f = NULL;
+int split_user_at_host(const char *s, char **ret_user, char **ret_host) {
+        _cleanup_free_ char *u = NULL, *h = NULL;
 
-        assert(ret);
+        /* Splits a user@host expression (one of those we accept on --machine= and similar). Returns NULL in
+         * each of the two return parameters if that part was left empty. */
 
-        if (!path)
-                path = "/etc/hostname";
+        assert(s);
 
-        f = fopen(path, "re");
-        if (!f)
-                return -errno;
+        const char *rhs = strchr(s, '@');
+        if (rhs) {
+                if (ret_user && rhs > s) {
+                        u = strndup(s, rhs - s);
+                        if (!u)
+                                return -ENOMEM;
+                }
 
-        return read_etc_hostname_stream(f, ret);
+                if (ret_host && rhs[1] != 0) {
+                        h = strdup(rhs + 1);
+                        if (!h)
+                                return -ENOMEM;
+                }
 
+        } else {
+                if (isempty(s))
+                        return -EINVAL;
+
+                if (ret_host) {
+                        h = strdup(s);
+                        if (!h)
+                                return -ENOMEM;
+                }
+        }
+
+        if (ret_user)
+                *ret_user = TAKE_PTR(u);
+        if (ret_host)
+                *ret_host = TAKE_PTR(h);
+
+        return !!rhs; /* return > 0 if '@' was specified, 0 otherwise */
+}
+
+int machine_spec_valid(const char *s) {
+        _cleanup_free_ char *u = NULL, *h = NULL;
+        int r;
+
+        assert(s);
+
+        r = split_user_at_host(s, &u, &h);
+        if (r == -EINVAL)
+                return false;
+        if (r < 0)
+                return r;
+
+        if (u && !valid_user_group_name(u, VALID_USER_RELAX | VALID_USER_ALLOW_NUMERIC))
+                return false;
+
+        if (h && !hostname_is_valid(h, VALID_HOSTNAME_DOT_HOST))
+                return false;
+
+        return true;
 }

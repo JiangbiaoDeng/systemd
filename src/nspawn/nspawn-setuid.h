@@ -1,23 +1,7 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "shared-forward.h"
 
-  Copyright 2015 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-int change_uid_gid(const char *user, char **ret);
+int change_uid_gid_raw(uid_t uid, gid_t gid, const gid_t *supplementary_gids, size_t n_supplementary_gids, bool chown_stdio);
+int change_uid_gid(const char *user, bool chown_stdio, char **ret_home);

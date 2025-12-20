@@ -1,12 +1,8 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #ifndef foosdcommonhfoo
 #define foosdcommonhfoo
 
 /***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
   the Free Software Foundation; either version 2.1 of the License, or
@@ -18,33 +14,54 @@
   Lesser General Public License for more details.
 
   You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  along with systemd; If not, see <https://www.gnu.org/licenses/>.
 ***/
+
+#include <errno.h>
+#include <inttypes.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
 
 /* This is a private header; never even think of including this directly! */
 
-#if defined(__INCLUDE_LEVEL__) && __INCLUDE_LEVEL__ <= 1
+#if defined(__INCLUDE_LEVEL__) && __INCLUDE_LEVEL__ <= 1 && !defined(__COVERITY__) && !defined(__clang_analyzer__) && !defined(__INTELLISENSE__)
 #  error "Do not include _sd-common.h directly; it is a private header."
 #endif
 
+typedef void (*_sd_destroy_t)(void *userdata);
+
 #ifndef _sd_printf_
 #  if __GNUC__ >= 4
-#    define _sd_printf_(a,b) __attribute__ ((format (printf, a, b)))
+#    define _sd_printf_(a,b) __attribute__((__format__(printf, a, b)))
 #  else
 #    define _sd_printf_(a,b)
 #  endif
 #endif
 
 #ifndef _sd_sentinel_
-#  define _sd_sentinel_ __attribute__((sentinel))
+#  define _sd_sentinel_ __attribute__((__sentinel__))
 #endif
 
 #ifndef _sd_packed_
-#  define _sd_packed_ __attribute__((packed))
+#  define _sd_packed_ __attribute__((__packed__))
 #endif
 
 #ifndef _sd_pure_
-#  define _sd_pure_ __attribute__((pure))
+#  define _sd_pure_ __attribute__((__pure__))
+#endif
+
+/* Note that strictly speaking __deprecated__ has been available before GCC 6. However, starting with GCC 6
+ * it also works on enum values, which we are interested in. Since this is a developer-facing feature anyway
+ * (as opposed to build engineer-facing), let's hence conditionalize this to gcc 6, given that the developers
+ * are probably going to use something newer anyway. */
+#ifndef _sd_deprecated_
+#  if __GNUC__ >= 6
+#    define _sd_deprecated_ __attribute__((__deprecated__))
+#  else
+#    define _sd_deprecated_
+#  endif
 #endif
 
 #ifndef _SD_STRINGIFY
@@ -74,11 +91,32 @@
 #  endif
 #endif
 
+#ifndef _SD_ARRAY_STATIC
+#  if __STDC_VERSION__ >= 199901L && !defined(__cplusplus)
+#    define _SD_ARRAY_STATIC static
+#  else
+#    define _SD_ARRAY_STATIC
+#  endif
+#endif
+
 #define _SD_DEFINE_POINTER_CLEANUP_FUNC(type, func)             \
         static __inline__ void func##p(type **p) {              \
                 if (*p)                                         \
                         func(*p);                               \
         }                                                       \
         struct _sd_useless_struct_to_allow_trailing_semicolon_
+
+/* The following macro should be used in all public enums, to force 64-bit wideness on them, so that we can
+ * freely extend them later on, without breaking compatibility. */
+#define _SD_ENUM_FORCE_S64(id)               \
+        _SD_##id##_INT64_MIN = INT64_MIN,    \
+        _SD_##id##_INT64_MAX = INT64_MAX
+
+/* In GCC 14 (C23) we can force enums to have the right types, and not solely rely on language extensions anymore */
+#if ((__GNUC__ >= 14) || (__STDC_VERSION__ >= 202311L)) && !defined(__cplusplus) && !defined(__EDG__)
+#  define _SD_ENUM_TYPE_S64(id) id : int64_t
+#else
+#  define _SD_ENUM_TYPE_S64(id) id
+#endif
 
 #endif

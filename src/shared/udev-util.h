@@ -1,47 +1,34 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "conf-parser.h"
+#include "shared-forward.h"
 
-  Copyright 2013 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "udev.h"
-#include "util.h"
-
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev*, udev_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_device*, udev_device_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_enumerate*, udev_enumerate_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_event*, udev_event_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_rules*, udev_rules_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_ctrl*, udev_ctrl_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_ctrl_connection*, udev_ctrl_connection_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_ctrl_msg*, udev_ctrl_msg_unref);
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct udev_monitor*, udev_monitor_unref);
-
-#define _cleanup_udev_unref_ _cleanup_(udev_unrefp)
-#define _cleanup_udev_device_unref_ _cleanup_(udev_device_unrefp)
-#define _cleanup_udev_enumerate_unref_ _cleanup_(udev_enumerate_unrefp)
-#define _cleanup_udev_event_unref_ _cleanup_(udev_event_unrefp)
-#define _cleanup_udev_rules_unref_ _cleanup_(udev_rules_unrefp)
-#define _cleanup_udev_ctrl_unref_ _cleanup_(udev_ctrl_unrefp)
-#define _cleanup_udev_ctrl_connection_unref_ _cleanup_(udev_ctrl_connection_unrefp)
-#define _cleanup_udev_ctrl_msg_unref_ _cleanup_(udev_ctrl_msg_unrefp)
-#define _cleanup_udev_monitor_unref_ _cleanup_(udev_monitor_unrefp)
-#define _cleanup_udev_list_cleanup_ _cleanup_(udev_list_cleanup)
-
+int udev_parse_config_full(const ConfigTableItem config_table[]);
 int udev_parse_config(void);
+
+int device_wait_for_initialization(sd_device *device, const char *subsystem, usec_t timeout_usec, sd_device **ret);
+int device_wait_for_devlink(const char *devlink, const char *subsystem, usec_t timeout_usec, sd_device **ret);
+int device_is_renaming(sd_device *dev);
+int device_is_processed(sd_device *dev);
+
+bool device_for_action(sd_device *dev, sd_device_action_t action);
+
+void log_device_uevent(sd_device *device, const char *str);
+
+size_t udev_replace_whitespace(const char *str, char *to, size_t len);
+size_t udev_replace_chars(char *str, const char *allow);
+
+int udev_queue_is_empty(void);
+
+void reset_cached_udev_availability(void);
+bool udev_available(void);
+
+int device_get_vendor_string(sd_device *device, const char **ret);
+int device_get_model_string(sd_device *device, const char **ret);
+
+int device_get_property_value_with_fallback(
+                sd_device *device,
+                const char *prop,
+                Hashmap *extra_props,
+                const char **ret);

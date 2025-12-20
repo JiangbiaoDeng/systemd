@@ -1,39 +1,33 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2017 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#if HAVE_SELINUX
-#include <selinux/selinux.h>
-#endif
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "alloc-util.h"
 #include "audit-util.h"
 #include "cgroup-util.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
-#include "io-util.h"
-#include "journal-util.h"
+#include "iovec-util.h"
+#include "journal-internal.h"
+#include "journald-client.h"
 #include "journald-context.h"
+#include "journald-manager.h"
+#include "log.h"
+#include "log-ratelimit.h"
+#include "parse-util.h"
+#include "path-util.h"
+#include "pidref.h"
+#include "prioq.h"
 #include "process-util.h"
+#include "procfs-util.h"
+#include "selinux-util.h"
+#include "set.h"
 #include "string-util.h"
 #include "syslog-util.h"
+#include "time-util.h"
 #include "unaligned.h"
 #include "user-util.h"
 
@@ -63,7 +57,7 @@
  *    previously had trouble associating the log message with the service.
  *
  * NB: With and without the metadata cache: the implicitly added entry metadata in the journal (with the exception of
- *     UID/PID/GID and SELinux label) must be understood as possibly slightly out of sync (i.e. sometimes slighly older
+ *     UID/PID/GID and SELinux label) must be understood as possibly slightly out of sync (i.e. sometimes slightly older
  *     and sometimes slightly newer than what was current at the log event).
  */
 
@@ -76,67 +70,87 @@
 /* Keep at most 16K entries in the cache. (Note though that this limit may be violated if enough streams pin entries in
  * the cache, in which case we *do* permit this limit to be breached. That's safe however, as the number of stream
  * clients itself is limited.) */
-#define CACHE_MAX (16*1024)
+#define CACHE_MAX_FALLBACK 128U
+#define CACHE_MAX_MAX (16*1024U)
+#define CACHE_MAX_MIN 64U
+
+static size_t cache_max(void) {
+        static size_t cached = -1;
+
+        if (cached == SIZE_MAX) {
+                uint64_t mem_total;
+                int r;
+
+                r = procfs_memory_get(&mem_total, NULL);
+                if (r < 0) {
+                        log_warning_errno(r, "Cannot query /proc/meminfo for MemTotal: %m");
+                        cached = CACHE_MAX_FALLBACK;
+                } else
+                        /* Cache entries are usually a few kB, but the process cmdline is controlled by the
+                         * user and can be up to _SC_ARG_MAX, usually 2MB. Let's say that approximately up to
+                         * 1/8th of memory may be used by the cache.
+                         *
+                         * In the common case, this formula gives 64 cache entries for each GB of RAM.
+                         */
+                        cached = CLAMP(mem_total / 8 / sc_arg_max(), CACHE_MAX_MIN, CACHE_MAX_MAX);
+        }
+
+        return cached;
+}
 
 static int client_context_compare(const void *a, const void *b) {
         const ClientContext *x = a, *y = b;
-
-        if (x->timestamp < y->timestamp)
-                return -1;
-        if (x->timestamp > y->timestamp)
-                return 1;
-
-        if (x->pid < y->pid)
-                return -1;
-        if (x->pid > y->pid)
-                return 1;
-
-        return 0;
-}
-
-static int client_context_new(Server *s, pid_t pid, ClientContext **ret) {
-        ClientContext *c;
         int r;
 
-        assert(s);
+        r = CMP(x->timestamp, y->timestamp);
+        if (r != 0)
+                return r;
+
+        return CMP(x->pid, y->pid);
+}
+
+static int client_context_new(Manager *m, pid_t pid, ClientContext **ret) {
+        _cleanup_free_ ClientContext *c = NULL;
+        int r;
+
+        assert(m);
         assert(pid_is_valid(pid));
         assert(ret);
 
-        r = hashmap_ensure_allocated(&s->client_contexts, NULL);
+        r = prioq_ensure_allocated(&m->client_contexts_lru, client_context_compare);
         if (r < 0)
                 return r;
 
-        r = prioq_ensure_allocated(&s->client_contexts_lru, client_context_compare);
-        if (r < 0)
-                return r;
-
-        c = new0(ClientContext, 1);
+        c = new(ClientContext, 1);
         if (!c)
                 return -ENOMEM;
 
-        c->pid = pid;
+        *c = (ClientContext) {
+                .pid = pid,
+                .uid = UID_INVALID,
+                .gid = GID_INVALID,
+                .auditid = AUDIT_SESSION_INVALID,
+                .loginuid = UID_INVALID,
+                .owner_uid = UID_INVALID,
+                .lru_index = PRIOQ_IDX_NULL,
+                .timestamp = USEC_INFINITY,
+                .extra_fields_mtime = NSEC_INFINITY,
+                .log_level_max = -1,
+                .log_ratelimit_interval = m->config.ratelimit_interval,
+                .log_ratelimit_burst = m->config.ratelimit_burst,
+                .capability_quintet = CAPABILITY_QUINTET_NULL,
+        };
 
-        c->uid = UID_INVALID;
-        c->gid = GID_INVALID;
-        c->auditid = AUDIT_SESSION_INVALID;
-        c->loginuid = UID_INVALID;
-        c->owner_uid = UID_INVALID;
-        c->lru_index = PRIOQ_IDX_NULL;
-        c->timestamp = USEC_INFINITY;
-        c->extra_fields_mtime = NSEC_INFINITY;
-        c->log_level_max = -1;
-
-        r = hashmap_put(s->client_contexts, PID_TO_PTR(pid), c);
-        if (r < 0) {
-                free(c);
+        r = hashmap_ensure_put(&m->client_contexts, NULL, PID_TO_PTR(pid), c);
+        if (r < 0)
                 return r;
-        }
 
-        *ret = c;
+        *ret = TAKE_PTR(c);
         return 0;
 }
 
-static void client_context_reset(ClientContext *c) {
+static void client_context_reset(Manager *m, ClientContext *c) {
+        assert(m);
         assert(c);
 
         c->timestamp = USEC_INFINITY;
@@ -147,7 +161,6 @@ static void client_context_reset(ClientContext *c) {
         c->comm = mfree(c->comm);
         c->exe = mfree(c->exe);
         c->cmdline = mfree(c->cmdline);
-        c->capeff = mfree(c->capeff);
 
         c->auditid = AUDIT_SESSION_INVALID;
         c->loginuid = UID_INVALID;
@@ -171,20 +184,30 @@ static void client_context_reset(ClientContext *c) {
         c->extra_fields_mtime = NSEC_INFINITY;
 
         c->log_level_max = -1;
+
+        c->log_ratelimit_interval = m->config.ratelimit_interval;
+        c->log_ratelimit_burst = m->config.ratelimit_burst;
+        c->log_ratelimit_interval_from_unit = false;
+        c->log_ratelimit_burst_from_unit = false;
+
+        c->log_filter_allowed_patterns = set_free(c->log_filter_allowed_patterns);
+        c->log_filter_denied_patterns = set_free(c->log_filter_denied_patterns);
+
+        c->capability_quintet = CAPABILITY_QUINTET_NULL;
 }
 
-static ClientContext* client_context_free(Server *s, ClientContext *c) {
-        assert(s);
+static ClientContext* client_context_free(Manager *m, ClientContext *c) {
+        assert(m);
 
         if (!c)
                 return NULL;
 
-        assert_se(hashmap_remove(s->client_contexts, PID_TO_PTR(c->pid)) == c);
+        assert_se(hashmap_remove(m->client_contexts, PID_TO_PTR(c->pid)) == c);
 
         if (c->in_lru)
-                assert_se(prioq_remove(s->client_contexts_lru, c, &c->lru_index) >= 0);
+                assert_se(prioq_remove(m->client_contexts_lru, c, &c->lru_index) >= 0);
 
-        client_context_reset(c);
+        client_context_reset(m, c);
 
         return mfree(c);
 }
@@ -197,7 +220,7 @@ static void client_context_read_uid_gid(ClientContext *c, const struct ucred *uc
         if (ucred && uid_is_valid(ucred->uid))
                 c->uid = ucred->uid;
         else
-                (void) get_process_uid(c->pid, &c->uid);
+                (void) pid_get_uid(c->pid, &c->uid);
 
         if (ucred && gid_is_valid(ucred->gid))
                 c->gid = ucred->gid;
@@ -211,17 +234,16 @@ static void client_context_read_basic(ClientContext *c) {
         assert(c);
         assert(pid_is_valid(c->pid));
 
-        if (get_process_comm(c->pid, &t) >= 0)
+        if (pid_get_comm(c->pid, &t) >= 0)
                 free_and_replace(c->comm, t);
 
         if (get_process_exe(c->pid, &t) >= 0)
                 free_and_replace(c->exe, t);
 
-        if (get_process_cmdline(c->pid, 0, false, &t) >= 0)
+        if (pid_get_cmdline(c->pid, SIZE_MAX, PROCESS_CMDLINE_QUOTE, &t) >= 0)
                 free_and_replace(c->cmdline, t);
 
-        if (get_process_capeff(c->pid, &t) >= 0)
-                free_and_replace(c->capeff, t);
+        (void) pidref_get_capability(&PIDREF_MAKE_FROM_PID(c->pid), &c->capability_quintet);
 }
 
 static int client_context_read_label(
@@ -231,6 +253,9 @@ static int client_context_read_label(
         assert(c);
         assert(pid_is_valid(c->pid));
         assert(label_size == 0 || label);
+
+        if (!mac_selinux_use())
+                return 0;
 
         if (label_size > 0) {
                 char *l;
@@ -250,7 +275,7 @@ static int client_context_read_label(
 
                 /* If we got no SELinux label passed in, let's try to acquire one */
 
-                if (getpidcon(c->pid, &con) >= 0) {
+                if (sym_getpidcon_raw(c->pid, &con) >= 0 && con) {
                         free_and_replace(c->label, con);
                         c->label_size = strlen(c->label);
                 }
@@ -260,17 +285,18 @@ static int client_context_read_label(
         return 0;
 }
 
-static int client_context_read_cgroup(Server *s, ClientContext *c, const char *unit_id) {
-        char *t = NULL;
+static int client_context_read_cgroup(Manager *m, ClientContext *c, const char *unit_id) {
+        _cleanup_free_ char *t = NULL;
         int r;
 
         assert(c);
 
         /* Try to acquire the current cgroup path */
-        r = cg_pid_get_path_shifted(c->pid, s->cgroup_root, &t);
-        if (r < 0) {
-
-                /* If that didn't work, we use the unit ID passed in as fallback, if we have nothing cached yet */
+        r = cg_pid_get_path_shifted(c->pid, m->cgroup_root, &t);
+        if (r < 0 || empty_or_root(t)) {
+                /* We use the unit ID passed in as fallback if we have nothing cached yet and cg_pid_get_path_shifted()
+                 * failed or process is running in a root cgroup. Zombie processes are automatically migrated to root cgroup
+                 * on cgroup v1 and we want to be able to map log messages from them too. */
                 if (unit_id && !c->unit) {
                         c->unit = strdup(unit_id);
                         if (c->unit)
@@ -280,11 +306,11 @@ static int client_context_read_cgroup(Server *s, ClientContext *c, const char *u
                 return r;
         }
 
+        (void) client_context_read_log_filter_patterns(c, t);
+
         /* Let's shortcut this if the cgroup path didn't change */
-        if (streq_ptr(c->cgroup, t)) {
-                free(t);
+        if (streq_ptr(c->cgroup, t))
                 return 0;
-        }
 
         free_and_replace(c->cgroup, t);
 
@@ -310,22 +336,32 @@ static int client_context_read_cgroup(Server *s, ClientContext *c, const char *u
 }
 
 static int client_context_read_invocation_id(
-                Server *s,
+                Manager *m,
                 ClientContext *c) {
 
-        _cleanup_free_ char *value = NULL;
-        const char *p;
+        _cleanup_free_ char *p = NULL, *value = NULL;
         int r;
 
-        assert(s);
+        assert(m);
         assert(c);
 
-        /* Read the invocation ID of a unit off a unit. PID 1 stores it in a per-unit symlink in /run/systemd/units/ */
+        /* Read the invocation ID of a unit off a unit.
+         * PID 1 stores it in a per-unit symlink in /run/systemd/units/
+         * User managers store it in a per-unit symlink under /run/user/<uid>/systemd/units/ */
 
         if (!c->unit)
                 return 0;
 
-        p = strjoina("/run/systemd/units/invocation:", c->unit);
+        if (c->user_unit) {
+                r = asprintf(&p, "/run/user/" UID_FMT "/systemd/units/invocation:%s", c->owner_uid, c->user_unit);
+                if (r < 0)
+                        return r;
+        } else {
+                p = strjoin("/run/systemd/units/invocation:", c->unit);
+                if (!p)
+                        return -ENOMEM;
+        }
+
         r = readlink_malloc(p, &value);
         if (r < 0)
                 return r;
@@ -334,7 +370,7 @@ static int client_context_read_invocation_id(
 }
 
 static int client_context_read_log_level_max(
-                Server *s,
+                Manager *m,
                 ClientContext *c) {
 
         _cleanup_free_ char *value = NULL;
@@ -351,18 +387,18 @@ static int client_context_read_log_level_max(
 
         ll = log_level_from_string(value);
         if (ll < 0)
-                return -EINVAL;
+                return ll;
 
         c->log_level_max = ll;
         return 0;
 }
 
 static int client_context_read_extra_fields(
-                Server *s,
+                Manager *m,
                 ClientContext *c) {
 
-        size_t size = 0, n_iovec = 0, n_allocated = 0, left;
         _cleanup_free_ struct iovec *iovec = NULL;
+        size_t size = 0, n_iovec = 0, left;
         _cleanup_free_ void *data = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         struct stat st;
@@ -428,7 +464,7 @@ static int client_context_read_extra_fields(
                 if (!journal_field_valid((const char *) field, eq - field, false))
                         return -EBADMSG;
 
-                if (!GREEDY_REALLOC(iovec, n_allocated, n_iovec+1))
+                if (!GREEDY_REALLOC(iovec, n_iovec+1))
                         return -ENOMEM;
 
                 iovec[n_iovec++] = IOVEC_MAKE(field, v);
@@ -439,26 +475,69 @@ static int client_context_read_extra_fields(
         free(c->extra_fields_iovec);
         free(c->extra_fields_data);
 
-        c->extra_fields_iovec = iovec;
+        c->extra_fields_iovec = TAKE_PTR(iovec);
         c->extra_fields_n_iovec = n_iovec;
-        c->extra_fields_data = data;
+        c->extra_fields_data = TAKE_PTR(data);
         c->extra_fields_mtime = timespec_load_nsec(&st.st_mtim);
-
-        iovec = NULL;
-        data = NULL;
 
         return 0;
 }
 
+static int client_context_read_log_ratelimit_interval(ClientContext *c) {
+        _cleanup_free_ char *value = NULL;
+        const char *p;
+        int r;
+
+        assert(c);
+
+        if (!c->unit)
+                return 0;
+
+        p = strjoina("/run/systemd/units/log-rate-limit-interval:", c->unit);
+        r = readlink_malloc(p, &value);
+        if (r < 0)
+                return r;
+
+        r = safe_atou64(value, &c->log_ratelimit_interval);
+        if (r < 0)
+                return r;
+
+        c->log_ratelimit_interval_from_unit = true;
+        return 0;
+}
+
+static int client_context_read_log_ratelimit_burst(ClientContext *c) {
+        _cleanup_free_ char *value = NULL;
+        const char *p;
+        int r;
+
+        assert(c);
+
+        if (!c->unit)
+                return 0;
+
+        p = strjoina("/run/systemd/units/log-rate-limit-burst:", c->unit);
+        r = readlink_malloc(p, &value);
+        if (r < 0)
+                return r;
+
+        r = safe_atou(value, &c->log_ratelimit_burst);
+        if (r < 0)
+                return r;
+
+        c->log_ratelimit_burst_from_unit = true;
+        return 0;
+}
+
 static void client_context_really_refresh(
-                Server *s,
+                Manager *m,
                 ClientContext *c,
                 const struct ucred *ucred,
                 const char *label, size_t label_size,
                 const char *unit_id,
                 usec_t timestamp) {
 
-        assert(s);
+        assert(m);
         assert(c);
         assert(pid_is_valid(c->pid));
 
@@ -469,31 +548,33 @@ static void client_context_really_refresh(
         client_context_read_basic(c);
         (void) client_context_read_label(c, label, label_size);
 
-        (void) audit_session_from_pid(c->pid, &c->auditid);
-        (void) audit_loginuid_from_pid(c->pid, &c->loginuid);
+        (void) audit_session_from_pid(&PIDREF_MAKE_FROM_PID(c->pid), &c->auditid);
+        (void) audit_loginuid_from_pid(&PIDREF_MAKE_FROM_PID(c->pid), &c->loginuid);
 
-        (void) client_context_read_cgroup(s, c, unit_id);
-        (void) client_context_read_invocation_id(s, c);
-        (void) client_context_read_log_level_max(s, c);
-        (void) client_context_read_extra_fields(s, c);
+        (void) client_context_read_cgroup(m, c, unit_id);
+        (void) client_context_read_invocation_id(m, c);
+        (void) client_context_read_log_level_max(m, c);
+        (void) client_context_read_extra_fields(m, c);
+        (void) client_context_read_log_ratelimit_interval(c);
+        (void) client_context_read_log_ratelimit_burst(c);
 
         c->timestamp = timestamp;
 
         if (c->in_lru) {
                 assert(c->n_ref == 0);
-                assert_se(prioq_reshuffle(s->client_contexts_lru, c, &c->lru_index) >= 0);
+                prioq_reshuffle(m->client_contexts_lru, c, &c->lru_index);
         }
 }
 
 void client_context_maybe_refresh(
-                Server *s,
+                Manager *m,
                 ClientContext *c,
                 const struct ucred *ucred,
                 const char *label, size_t label_size,
                 const char *unit_id,
                 usec_t timestamp) {
 
-        assert(s);
+        assert(m);
         assert(c);
 
         if (timestamp == USEC_INFINITY)
@@ -506,7 +587,7 @@ void client_context_maybe_refresh(
         /* If the data isn't pinned and if the cashed data is older than the upper limit, we flush it out
          * entirely. This follows the logic that as long as an entry is pinned the PID reuse is unlikely. */
         if (c->n_ref == 0 && c->timestamp + MAX_USEC < timestamp) {
-                client_context_reset(c);
+                client_context_reset(m, c);
                 goto refresh;
         }
 
@@ -527,20 +608,71 @@ void client_context_maybe_refresh(
         return;
 
 refresh:
-        client_context_really_refresh(s, c, ucred, label, label_size, unit_id, timestamp);
+        client_context_really_refresh(m, c, ucred, label, label_size, unit_id, timestamp);
 }
 
-static void client_context_try_shrink_to(Server *s, size_t limit) {
-        assert(s);
+static void client_context_refresh_on_reload(Manager *m, ClientContext *c) {
+        assert(m);
+
+        if (!c)
+                return;
+
+        if (!c->log_ratelimit_interval_from_unit)
+                c->log_ratelimit_interval = m->config.ratelimit_interval;
+
+        if (!c->log_ratelimit_burst_from_unit)
+                c->log_ratelimit_burst = m->config.ratelimit_burst;
+}
+
+void manager_refresh_client_contexts_on_reload(Manager *m, usec_t old_interval, unsigned old_burst) {
+        assert(m);
+
+        if (m->config.ratelimit_interval == old_interval && m->config.ratelimit_burst == old_burst)
+                return;
+
+        client_context_refresh_on_reload(m, m->my_context);
+        client_context_refresh_on_reload(m, m->pid1_context);
+
+        ClientContext *c;
+        HASHMAP_FOREACH(c, m->client_contexts)
+                client_context_refresh_on_reload(m, c);
+}
+
+static void client_context_try_shrink_to(Manager *m, size_t limit) {
+        ClientContext *c;
+        usec_t t;
+
+        assert(m);
+
+        /* Flush any cache entries for PIDs that have already moved on. Don't do this
+         * too often, since it's a slow process. */
+        t = now(CLOCK_MONOTONIC);
+        if (m->last_cache_pid_flush + MAX_USEC < t) {
+                unsigned n = prioq_size(m->client_contexts_lru), idx = 0;
+
+                /* We do a number of iterations based on the initial size of the prioq.  When we remove an
+                 * item, a new item is moved into its places, and items to the right might be reshuffled.
+                 */
+                for (unsigned i = 0; i < n; i++) {
+                        c = prioq_peek_by_index(m->client_contexts_lru, idx);
+
+                        assert(c->n_ref == 0);
+
+                        if (pid_is_unwaited(c->pid) == 0)
+                                client_context_free(m, c);
+                        else
+                                idx++;
+                }
+
+                m->last_cache_pid_flush = t;
+        }
 
         /* Bring the number of cache entries below the indicated limit, so that we can create a new entry without
          * breaching the limit. Note that we only flush out entries that aren't pinned here. This means the number of
          * cache entries may very well grow beyond the limit, if all entries stored remain pinned. */
 
-        while (hashmap_size(s->client_contexts) > limit) {
-                ClientContext *c;
-
-                c = prioq_pop(s->client_contexts_lru);
+        while (hashmap_size(m->client_contexts) > limit) {
+                c = prioq_pop(m->client_contexts_lru);
                 if (!c)
                         break; /* All remaining entries are pinned, give up */
 
@@ -549,29 +681,33 @@ static void client_context_try_shrink_to(Server *s, size_t limit) {
 
                 c->in_lru = false;
 
-                client_context_free(s, c);
+                client_context_free(m, c);
         }
 }
 
-void client_context_flush_all(Server *s) {
-        assert(s);
+void client_context_flush_regular(Manager *m) {
+        client_context_try_shrink_to(m, 0);
+}
+
+void client_context_flush_all(Manager *m) {
+        assert(m);
 
         /* Flush out all remaining entries. This assumes all references are already dropped. */
 
-        s->my_context = client_context_release(s, s->my_context);
-        s->pid1_context = client_context_release(s, s->pid1_context);
+        m->my_context = client_context_release(m, m->my_context);
+        m->pid1_context = client_context_release(m, m->pid1_context);
 
-        client_context_try_shrink_to(s, 0);
+        client_context_flush_regular(m);
 
-        assert(prioq_size(s->client_contexts_lru) == 0);
-        assert(hashmap_size(s->client_contexts) == 0);
+        assert(prioq_isempty(m->client_contexts_lru));
+        assert(hashmap_isempty(m->client_contexts));
 
-        s->client_contexts_lru = prioq_free(s->client_contexts_lru);
-        s->client_contexts = hashmap_free(s->client_contexts);
+        m->client_contexts_lru = prioq_free(m->client_contexts_lru);
+        m->client_contexts = hashmap_free(m->client_contexts);
 }
 
 static int client_context_get_internal(
-                Server *s,
+                Manager *m,
                 pid_t pid,
                 const struct ucred *ucred,
                 const char *label, size_t label_len,
@@ -582,80 +718,80 @@ static int client_context_get_internal(
         ClientContext *c;
         int r;
 
-        assert(s);
+        assert(m);
         assert(ret);
 
         if (!pid_is_valid(pid))
                 return -EINVAL;
 
-        c = hashmap_get(s->client_contexts, PID_TO_PTR(pid));
+        c = hashmap_get(m->client_contexts, PID_TO_PTR(pid));
         if (c) {
 
                 if (add_ref) {
                         if (c->in_lru) {
                                 /* The entry wasn't pinned so far, let's remove it from the LRU list then */
                                 assert(c->n_ref == 0);
-                                assert_se(prioq_remove(s->client_contexts_lru, c, &c->lru_index) >= 0);
+                                assert_se(prioq_remove(m->client_contexts_lru, c, &c->lru_index) >= 0);
                                 c->in_lru = false;
                         }
 
                         c->n_ref++;
                 }
 
-                client_context_maybe_refresh(s, c, ucred, label, label_len, unit_id, USEC_INFINITY);
+                client_context_maybe_refresh(m, c, ucred, label, label_len, unit_id, USEC_INFINITY);
 
                 *ret = c;
                 return 0;
         }
 
-        client_context_try_shrink_to(s, CACHE_MAX-1);
+        client_context_try_shrink_to(m, cache_max()-1);
 
-        r = client_context_new(s, pid, &c);
+        r = client_context_new(m, pid, &c);
         if (r < 0)
                 return r;
 
         if (add_ref)
                 c->n_ref++;
         else {
-                r = prioq_put(s->client_contexts_lru, c, &c->lru_index);
+                r = prioq_put(m->client_contexts_lru, c, &c->lru_index);
                 if (r < 0) {
-                        client_context_free(s, c);
+                        client_context_free(m, c);
                         return r;
                 }
 
                 c->in_lru = true;
         }
 
-        client_context_really_refresh(s, c, ucred, label, label_len, unit_id, USEC_INFINITY);
+        client_context_really_refresh(m, c, ucred, label, label_len, unit_id, USEC_INFINITY);
 
         *ret = c;
         return 0;
 }
 
 int client_context_get(
-                Server *s,
+                Manager *m,
                 pid_t pid,
                 const struct ucred *ucred,
                 const char *label, size_t label_len,
                 const char *unit_id,
                 ClientContext **ret) {
 
-        return client_context_get_internal(s, pid, ucred, label, label_len, unit_id, false, ret);
+        return client_context_get_internal(m, pid, ucred, label, label_len, unit_id, false, ret);
 }
 
 int client_context_acquire(
-                Server *s,
+                Manager *m,
                 pid_t pid,
                 const struct ucred *ucred,
                 const char *label, size_t label_len,
                 const char *unit_id,
                 ClientContext **ret) {
 
-        return client_context_get_internal(s, pid, ucred, label, label_len, unit_id, true, ret);
+        return client_context_get_internal(m, pid, ucred, label, label_len, unit_id, true, ret);
 };
 
-ClientContext *client_context_release(Server *s, ClientContext *c) {
-        assert(s);
+ClientContext *client_context_release(Manager *m, ClientContext *c) {
+        assert(m);
 
         if (!c)
                 return NULL;
@@ -670,39 +806,43 @@ ClientContext *client_context_release(Server *s, ClientContext *c) {
         /* The entry is not pinned anymore, let's add it to the LRU prioq if we can. If we can't we'll drop it
          * right-away */
 
-        if (prioq_put(s->client_contexts_lru, c, &c->lru_index) < 0)
-                client_context_free(s, c);
+        if (prioq_put(m->client_contexts_lru, c, &c->lru_index) < 0)
+                client_context_free(m, c);
         else
                 c->in_lru = true;
 
         return NULL;
 }
 
-void client_context_acquire_default(Server *s) {
+void client_context_acquire_default(Manager *m) {
         int r;
 
-        assert(s);
+        assert(m);
 
         /* Ensure that our own and PID1's contexts are always pinned. Our own context is particularly useful to
          * generate driver messages. */
 
-        if (!s->my_context) {
+        if (!m->my_context) {
                 struct ucred ucred = {
                         .pid = getpid_cached(),
                         .uid = getuid(),
                         .gid = getgid(),
                 };
 
-                r = client_context_acquire(s, ucred.pid, &ucred, NULL, 0, NULL, &s->my_context);
+                r = client_context_acquire(m, ucred.pid, &ucred, NULL, 0, NULL, &m->my_context);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to acquire our own context, ignoring: %m");
+                        log_ratelimit_warning_errno(r, JOURNAL_LOG_RATELIMIT,
+                                                    "Failed to acquire our own context, ignoring: %m");
         }
 
-        if (!s->pid1_context) {
+        if (!m->namespace && !m->pid1_context) {
+                /* Acquire PID1's context, but only if we are in non-namespaced mode, since PID 1 is only
+                 * going to log to the non-namespaced journal instance. */
 
-                r = client_context_acquire(s, 1, NULL, NULL, 0, NULL, &s->pid1_context);
+                r = client_context_acquire(m, 1, NULL, NULL, 0, NULL, &m->pid1_context);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to acquire PID1's context, ignoring: %m");
+                        log_ratelimit_warning_errno(r, JOURNAL_LOG_RATELIMIT,
+                                                    "Failed to acquire PID1's context, ignoring: %m");
 
         }
 }

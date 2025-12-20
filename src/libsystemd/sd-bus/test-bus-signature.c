@@ -1,40 +1,24 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "bus-internal.h"
 #include "bus-signature.h"
 #include "log.h"
-#include "string-util.h"
+#include "tests.h"
 
 int main(int argc, char *argv[]) {
         char prefix[256];
         int r;
+
+        test_setup_logging(LOG_DEBUG);
 
         assert_se(signature_is_single("y", false));
         assert_se(signature_is_single("u", false));
         assert_se(signature_is_single("v", false));
         assert_se(signature_is_single("as", false));
         assert_se(signature_is_single("(ss)", false));
-        assert_se(signature_is_single("()", false));
-        assert_se(signature_is_single("(()()()()())", false));
-        assert_se(signature_is_single("(((())))", false));
+        assert_se(!signature_is_single("()", false));
+        assert_se(!signature_is_single("(()()()()())", false));
+        assert_se(!signature_is_single("(((())))", false));
         assert_se(signature_is_single("((((s))))", false));
         assert_se(signature_is_single("{ss}", true));
         assert_se(signature_is_single("a{ss}", false));
@@ -79,7 +63,7 @@ int main(int argc, char *argv[]) {
         assert_se(signature_is_valid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaas", false));
         assert_se(!signature_is_valid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaau", false));
 
-        assert_se(signature_is_valid("(((((((((((((((((((((((((((((((())))))))))))))))))))))))))))))))", false));
+        assert_se(signature_is_valid("((((((((((((((((((((((((((((((((s))))))))))))))))))))))))))))))))", false));
         assert_se(!signature_is_valid("((((((((((((((((((((((((((((((((()))))))))))))))))))))))))))))))))", false));
 
         assert_se(namespace_complex_pattern("", ""));
@@ -139,7 +123,7 @@ int main(int argc, char *argv[]) {
 
         OBJECT_PATH_FOREACH_PREFIX(prefix, "/") {
                 log_info("<%s>", prefix);
-                assert_not_reached("???");
+                assert_not_reached();
         }
 
         r = 0;

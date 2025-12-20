@@ -1,41 +1,19 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdint.h>
-#include <string.h>
+#include <malloc.h>
 
 #include "alloc-util.h"
-#include "macro.h"
-#include "util.h"
 
 void* memdup(const void *p, size_t l) {
         void *ret;
 
         assert(l == 0 || p);
 
-        ret = malloc(l);
+        ret = malloc(l ?: 1);
         if (!ret)
                 return NULL;
 
-        memcpy(ret, p, l);
-        return ret;
+        return memcpy_safe(ret, p, l);
 }
 
 void* memdup_suffix0(const void *p, size_t l) {
@@ -45,55 +23,122 @@ void* memdup_suffix0(const void *p, size_t l) {
 
         /* The same as memdup() but place a safety NUL byte after the allocated memory */
 
+        if (_unlikely_(l == SIZE_MAX)) /* prevent overflow */
+                return NULL;
+
         ret = malloc(l + 1);
         if (!ret)
                 return NULL;
 
-        *((uint8_t*) mempcpy(ret, p, l)) = 0;
-        return ret;
+        ((uint8_t*) ret)[l] = 0;
+        return memcpy_safe(ret, p, l);
 }
 
-void* greedy_realloc(void **p, size_t *allocated, size_t need, size_t size) {
-        size_t a, newalloc;
+void* greedy_realloc(
+                void **p,
+                size_t need,
+                size_t size) {
+
+        size_t newalloc;
         void *q;
 
         assert(p);
-        assert(allocated);
 
-        if (*allocated >= need)
+        /* We use malloc_usable_size() for determining the current allocated size. On all systems we care
+         * about this should be safe to rely on. Should there ever arise the need to avoid relying on this we
+         * can instead locally fall back to realloc() on every call, rounded up to the next exponent of 2 or
+         * so. */
+
+        if (*p && (size == 0 || (MALLOC_SIZEOF_SAFE(*p) / size >= need)))
                 return *p;
 
-        newalloc = MAX(need * 2, 64u / size);
-        a = newalloc * size;
+        if (_unlikely_(need > SIZE_MAX/2)) /* Overflow check */
+                return NULL;
+        newalloc = need * 2;
 
-        /* check for overflows */
-        if (a < size * need)
+        if (!MUL_ASSIGN_SAFE(&newalloc, size))
                 return NULL;
 
-        q = realloc(*p, a);
+        if (newalloc < 64) /* Allocate at least 64 bytes */
+                newalloc = 64;
+
+        q = realloc(*p, newalloc);
         if (!q)
                 return NULL;
 
-        *p = q;
-        *allocated = newalloc;
-        return q;
+        return *p = q;
 }
 
-void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size) {
-        size_t prev;
+void* greedy_realloc0(
+                void **p,
+                size_t need,
+                size_t size) {
+
+        size_t before, after;
         uint8_t *q;
 
         assert(p);
-        assert(allocated);
 
-        prev = *allocated;
+        before = MALLOC_SIZEOF_SAFE(*p); /* malloc_usable_size() will return 0 on NULL input, as per docs */
 
-        q = greedy_realloc(p, allocated, need, size);
+        q = greedy_realloc(p, need, size);
         if (!q)
                 return NULL;
 
-        if (*allocated > prev)
-                memzero(q + prev * size, (*allocated - prev) * size);
+        after = MALLOC_SIZEOF_SAFE(q);
+
+        if (size == 0) /* avoid division by zero */
+                before = 0;
+        else
+                before = (before / size) * size; /* Round down */
+
+        if (after > before)
+                memzero(q + before, after - before);
 
         return q;
+}
+
+void* greedy_realloc_append(
+                void **p,
+                size_t *n_p,
+                const void *from,
+                size_t n_from,
+                size_t size) {
+
+        uint8_t *q;
+
+        assert(p);
+        assert(n_p);
+        assert(from || n_from == 0);
+
+        if (n_from > SIZE_MAX - *n_p)
+                return NULL;
+
+        q = greedy_realloc(p, *n_p + n_from, size);
+        if (!q)
+                return NULL;
+
+        memcpy_safe(q + *n_p * size, from, n_from * size);
+
+        *n_p += n_from;
+
+        return q;
+}
+
+void *expand_to_usable(void *ptr, size_t newsize _unused_) {
+        return ptr;
+}
+
+size_t malloc_sizeof_safe(void **xp) {
+        if (_unlikely_(!xp || !*xp))
+                return 0;
+
+        size_t sz = malloc_usable_size(*xp);
+        *xp = expand_to_usable(*xp, sz);
+        /* GCC doesn't see the _returns_nonnull_ when built with ubsan, so yet another hint to make it doubly
+         * clear that expand_to_usable won't return NULL.
+         * See: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=79265 */
+        if (!*xp)
+                assert_not_reached();
+        return sz;
 }

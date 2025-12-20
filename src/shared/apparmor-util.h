@@ -1,25 +1,32 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "shared-forward.h"
 
-  Copyright 2013 Lennart Poettering
+#if HAVE_APPARMOR
+#  include <sys/apparmor.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+#  include "dlfcn-util.h"
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
+extern DLSYM_PROTOTYPE(aa_change_onexec);
+extern DLSYM_PROTOTYPE(aa_change_profile);
+extern DLSYM_PROTOTYPE(aa_features_new_from_kernel);
+extern DLSYM_PROTOTYPE(aa_features_unref);
+extern DLSYM_PROTOTYPE(aa_policy_cache_dir_path_preview);
+extern DLSYM_PROTOTYPE(aa_policy_cache_new);
+extern DLSYM_PROTOTYPE(aa_policy_cache_replace_all);
+extern DLSYM_PROTOTYPE(aa_policy_cache_unref);
 
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(aa_features*, sym_aa_features_unref, aa_features_unrefp, NULL);
+DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(aa_policy_cache*, sym_aa_policy_cache_unref, aa_policy_cache_unrefp, NULL);
 
-#include <stdbool.h>
-
+int dlopen_libapparmor(void);
 bool mac_apparmor_use(void);
+#else
+static inline int dlopen_libapparmor(void) {
+        return -EOPNOTSUPP;
+}
+static inline bool mac_apparmor_use(void) {
+        return false;
+}
+#endif

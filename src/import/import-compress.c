@@ -1,26 +1,12 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2015 Lennart Poettering
+#include <stdlib.h>
+#include <string.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#include "import-common.h"
 #include "import-compress.h"
+#include "log.h"
 #include "string-table.h"
-#include "util.h"
 
 void import_compress_free(ImportCompress *c) {
         assert(c);
@@ -32,11 +18,23 @@ void import_compress_free(ImportCompress *c) {
                         deflateEnd(&c->gzip);
                 else
                         inflateEnd(&c->gzip);
+#if HAVE_BZIP2
         } else if (c->type == IMPORT_COMPRESS_BZIP2) {
                 if (c->encoding)
                         BZ2_bzCompressEnd(&c->bzip2);
                 else
                         BZ2_bzDecompressEnd(&c->bzip2);
+#endif
+#if HAVE_ZSTD
+        } else if (c->type == IMPORT_COMPRESS_ZSTD) {
+                if (c->encoding) {
+                        ZSTD_freeCCtx(c->c_zstd);
+                        c->c_zstd = NULL;
+                } else {
+                        ZSTD_freeDCtx(c->d_zstd);
+                        c->d_zstd = NULL;
+                }
+#endif
         }
 
         c->type = IMPORT_COMPRESS_UNKNOWN;
@@ -52,6 +50,9 @@ int import_uncompress_detect(ImportCompress *c, const void *data, size_t size) {
         static const uint8_t bzip2_signature[] = {
                 'B', 'Z', 'h'
         };
+        static const uint8_t zstd_signature[] = {
+                0x28, 0xb5, 0x2f, 0xfd
+        };
 
         int r;
 
@@ -60,8 +61,9 @@ int import_uncompress_detect(ImportCompress *c, const void *data, size_t size) {
         if (c->type != IMPORT_COMPRESS_UNKNOWN)
                 return 1;
 
-        if (size < MAX3(sizeof(xz_signature),
+        if (size < MAX4(sizeof(xz_signature),
                         sizeof(gzip_signature),
+                        sizeof(zstd_signature),
                         sizeof(bzip2_signature)))
                 return 0;
 
@@ -83,18 +85,36 @@ int import_uncompress_detect(ImportCompress *c, const void *data, size_t size) {
 
                 c->type = IMPORT_COMPRESS_GZIP;
 
+#if HAVE_BZIP2
         } else if (memcmp(data, bzip2_signature, sizeof(bzip2_signature)) == 0) {
                 r = BZ2_bzDecompressInit(&c->bzip2, 0, 0);
                 if (r != BZ_OK)
                         return -EIO;
 
                 c->type = IMPORT_COMPRESS_BZIP2;
+#endif
+#if HAVE_ZSTD
+        } else if (memcmp(data, zstd_signature, sizeof(zstd_signature)) == 0) {
+                c->d_zstd = ZSTD_createDCtx();
+                if (!c->d_zstd)
+                        return -ENOMEM;
+
+                c->type = IMPORT_COMPRESS_ZSTD;
+#endif
         } else
                 c->type = IMPORT_COMPRESS_UNCOMPRESSED;
 
         c->encoding = false;
 
+        log_debug("Detected compression type: %s", import_compress_type_to_string(c->type));
         return 1;
+}
+
+void import_uncompress_force_off(ImportCompress *c) {
+        assert(c);
+
+        c->type = IMPORT_COMPRESS_UNCOMPRESSED;
+        c->encoding = false;
 }
 
 int import_uncompress(ImportCompress *c, const void *data, size_t size, ImportCompressCallback callback, void *userdata) {
@@ -129,7 +149,7 @@ int import_uncompress(ImportCompress *c, const void *data, size_t size, ImportCo
                 c->xz.avail_in = size;
 
                 while (c->xz.avail_in > 0) {
-                        uint8_t buffer[16 * 1024];
+                        uint8_t buffer[IMPORT_BUFFER_SIZE];
                         lzma_ret lzr;
 
                         c->xz.next_out = buffer;
@@ -139,9 +159,11 @@ int import_uncompress(ImportCompress *c, const void *data, size_t size, ImportCo
                         if (!IN_SET(lzr, LZMA_OK, LZMA_STREAM_END))
                                 return -EIO;
 
-                        r = callback(buffer, sizeof(buffer) - c->xz.avail_out, userdata);
-                        if (r < 0)
-                                return r;
+                        if (c->xz.avail_out < sizeof(buffer)) {
+                                r = callback(buffer, sizeof(buffer) - c->xz.avail_out, userdata);
+                                if (r < 0)
+                                        return r;
+                        }
                 }
 
                 break;
@@ -151,7 +173,7 @@ int import_uncompress(ImportCompress *c, const void *data, size_t size, ImportCo
                 c->gzip.avail_in = size;
 
                 while (c->gzip.avail_in > 0) {
-                        uint8_t buffer[16 * 1024];
+                        uint8_t buffer[IMPORT_BUFFER_SIZE];
 
                         c->gzip.next_out = buffer;
                         c->gzip.avail_out = sizeof(buffer);
@@ -160,19 +182,22 @@ int import_uncompress(ImportCompress *c, const void *data, size_t size, ImportCo
                         if (!IN_SET(r, Z_OK, Z_STREAM_END))
                                 return -EIO;
 
-                        r = callback(buffer, sizeof(buffer) - c->gzip.avail_out, userdata);
-                        if (r < 0)
-                                return r;
+                        if (c->gzip.avail_out < sizeof(buffer)) {
+                                r = callback(buffer, sizeof(buffer) - c->gzip.avail_out, userdata);
+                                if (r < 0)
+                                        return r;
+                        }
                 }
 
                 break;
 
+#if HAVE_BZIP2
         case IMPORT_COMPRESS_BZIP2:
                 c->bzip2.next_in = (void*) data;
                 c->bzip2.avail_in = size;
 
                 while (c->bzip2.avail_in > 0) {
-                        uint8_t buffer[16 * 1024];
+                        uint8_t buffer[IMPORT_BUFFER_SIZE];
 
                         c->bzip2.next_out = (char*) buffer;
                         c->bzip2.avail_out = sizeof(buffer);
@@ -181,15 +206,47 @@ int import_uncompress(ImportCompress *c, const void *data, size_t size, ImportCo
                         if (!IN_SET(r, BZ_OK, BZ_STREAM_END))
                                 return -EIO;
 
-                        r = callback(buffer, sizeof(buffer) - c->bzip2.avail_out, userdata);
-                        if (r < 0)
-                                return r;
+                        if (c->bzip2.avail_out < sizeof(buffer)) {
+                                r = callback(buffer, sizeof(buffer) - c->bzip2.avail_out, userdata);
+                                if (r < 0)
+                                        return r;
+                        }
                 }
 
                 break;
+#endif
+#if HAVE_ZSTD
+        case IMPORT_COMPRESS_ZSTD: {
+                ZSTD_inBuffer input = {
+                        .src =  (void*) data,
+                        .size = size,
+                };
+
+                while (input.pos < input.size) {
+                        uint8_t buffer[IMPORT_BUFFER_SIZE];
+                        ZSTD_outBuffer output = {
+                                .dst = buffer,
+                                .size = sizeof(buffer),
+                        };
+                        size_t res;
+
+                        res = ZSTD_decompressStream(c->d_zstd, &output, &input);
+                        if (ZSTD_isError(res))
+                                return -EIO;
+
+                        if (output.pos > 0) {
+                                r = callback(output.dst, output.pos, userdata);
+                                if (r < 0)
+                                        return r;
+                        }
+                }
+
+                break;
+        }
+#endif
 
         default:
-                assert_not_reached("Unknown compression");
+                assert_not_reached();
         }
 
         return 1;
@@ -221,6 +278,7 @@ int import_compress_init(ImportCompress *c, ImportCompressType t) {
                 c->type = IMPORT_COMPRESS_GZIP;
                 break;
 
+#if HAVE_BZIP2
         case IMPORT_COMPRESS_BZIP2:
                 r = BZ2_bzCompressInit(&c->bzip2, 9, 0, 0);
                 if (r != BZ_OK)
@@ -228,6 +286,21 @@ int import_compress_init(ImportCompress *c, ImportCompressType t) {
 
                 c->type = IMPORT_COMPRESS_BZIP2;
                 break;
+#endif
+
+#if HAVE_ZSTD
+        case IMPORT_COMPRESS_ZSTD:
+                c->c_zstd = ZSTD_createCCtx();
+                if (!c->c_zstd)
+                        return -ENOMEM;
+
+                r = ZSTD_CCtx_setParameter(c->c_zstd, ZSTD_c_compressionLevel, ZSTD_CLEVEL_DEFAULT);
+                if (ZSTD_isError(r))
+                        return -EIO;
+
+                c->type = IMPORT_COMPRESS_ZSTD;
+                break;
+#endif
 
         case IMPORT_COMPRESS_UNCOMPRESSED:
                 c->type = IMPORT_COMPRESS_UNCOMPRESSED;
@@ -248,7 +321,7 @@ static int enlarge_buffer(void **buffer, size_t *buffer_size, size_t *buffer_all
         if (*buffer_allocated > *buffer_size)
                 return 0;
 
-        l = MAX(16*1024U, (*buffer_size * 2));
+        l = MAX(IMPORT_BUFFER_SIZE, (*buffer_size * 2));
         p = realloc(*buffer, l);
         if (!p)
                 return -ENOMEM;
@@ -325,6 +398,7 @@ int import_compress(ImportCompress *c, const void *data, size_t size, void **buf
 
                 break;
 
+#if HAVE_BZIP2
         case IMPORT_COMPRESS_BZIP2:
 
                 c->bzip2.next_in = (void*) data;
@@ -346,6 +420,36 @@ int import_compress(ImportCompress *c, const void *data, size_t size, void **buf
                 }
 
                 break;
+#endif
+
+#if HAVE_ZSTD
+        case IMPORT_COMPRESS_ZSTD: {
+                ZSTD_inBuffer input = {
+                        .src = data,
+                        .size = size,
+                };
+
+                while (input.pos < input.size) {
+                        r = enlarge_buffer(buffer, buffer_size, buffer_allocated);
+                        if (r < 0)
+                                return r;
+
+                        ZSTD_outBuffer output = {
+                                .dst = ((uint8_t *) *buffer + *buffer_size),
+                                .size = *buffer_allocated - *buffer_size,
+                        };
+                        size_t res;
+
+                        res = ZSTD_compressStream2(c->c_zstd, &output, &input, ZSTD_e_continue);
+                        if (ZSTD_isError(res))
+                                return -EIO;
+
+                        *buffer_size += output.pos;
+                }
+
+                break;
+        }
+#endif
 
         case IMPORT_COMPRESS_UNCOMPRESSED:
 
@@ -429,6 +533,7 @@ int import_compress_finish(ImportCompress *c, void **buffer, size_t *buffer_size
 
                 break;
 
+#if HAVE_BZIP2
         case IMPORT_COMPRESS_BZIP2:
                 c->bzip2.avail_in = 0;
 
@@ -448,6 +553,33 @@ int import_compress_finish(ImportCompress *c, void **buffer, size_t *buffer_size
                 } while (r != BZ_STREAM_END);
 
                 break;
+#endif
+
+#if HAVE_ZSTD
+        case IMPORT_COMPRESS_ZSTD: {
+                ZSTD_inBuffer input = {};
+                size_t res;
+
+                do {
+                        r = enlarge_buffer(buffer, buffer_size, buffer_allocated);
+                        if (r < 0)
+                                return r;
+
+                        ZSTD_outBuffer output = {
+                                .dst = ((uint8_t *) *buffer + *buffer_size),
+                                .size = *buffer_allocated - *buffer_size,
+                        };
+
+                        res = ZSTD_compressStream2(c->c_zstd, &output, &input, ZSTD_e_end);
+                        if (ZSTD_isError(res))
+                                return -EIO;
+
+                        *buffer_size += output.pos;
+                } while (res != 0);
+
+                break;
+        }
+#endif
 
         case IMPORT_COMPRESS_UNCOMPRESSED:
                 break;
@@ -460,11 +592,16 @@ int import_compress_finish(ImportCompress *c, void **buffer, size_t *buffer_size
 }
 
 static const char* const import_compress_type_table[_IMPORT_COMPRESS_TYPE_MAX] = {
-        [IMPORT_COMPRESS_UNKNOWN] = "unknown",
+        [IMPORT_COMPRESS_UNKNOWN]      = "unknown",
         [IMPORT_COMPRESS_UNCOMPRESSED] = "uncompressed",
-        [IMPORT_COMPRESS_XZ] = "xz",
-        [IMPORT_COMPRESS_GZIP] = "gzip",
-        [IMPORT_COMPRESS_BZIP2] = "bzip2",
+        [IMPORT_COMPRESS_XZ]           = "xz",
+        [IMPORT_COMPRESS_GZIP]         = "gzip",
+#if HAVE_BZIP2
+        [IMPORT_COMPRESS_BZIP2]        = "bzip2",
+#endif
+#if HAVE_ZSTD
+        [IMPORT_COMPRESS_ZSTD]         = "zstd",
+#endif
 };
 
 DEFINE_STRING_TABLE_LOOKUP(import_compress_type, ImportCompressType);

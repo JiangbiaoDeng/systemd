@@ -1,50 +1,32 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Inhibitor Inhibitor;
-
+#include "logind-forward.h"
+#include "pidref.h"
+#include "time-util.h"
 
 typedef enum InhibitWhat {
-        INHIBIT_SHUTDOWN = 1,
-        INHIBIT_SLEEP = 2,
-        INHIBIT_IDLE = 4,
-        INHIBIT_HANDLE_POWER_KEY = 8,
-        INHIBIT_HANDLE_SUSPEND_KEY = 16,
-        INHIBIT_HANDLE_HIBERNATE_KEY = 32,
-        INHIBIT_HANDLE_LID_SWITCH = 64,
-        _INHIBIT_WHAT_MAX = 128,
-        _INHIBIT_WHAT_INVALID = -1
+        INHIBIT_SHUTDOWN             = 1 << 0,
+        INHIBIT_SLEEP                = 1 << 1,
+        INHIBIT_IDLE                 = 1 << 2,
+        INHIBIT_HANDLE_POWER_KEY     = 1 << 3,
+        INHIBIT_HANDLE_SUSPEND_KEY   = 1 << 4,
+        INHIBIT_HANDLE_HIBERNATE_KEY = 1 << 5,
+        INHIBIT_HANDLE_LID_SWITCH    = 1 << 6,
+        INHIBIT_HANDLE_REBOOT_KEY    = 1 << 7,
+        _INHIBIT_WHAT_MAX            = 1 << 8,
+        _INHIBIT_WHAT_INVALID        = -EINVAL,
 } InhibitWhat;
 
 typedef enum InhibitMode {
         INHIBIT_BLOCK,
+        INHIBIT_BLOCK_WEAK,
         INHIBIT_DELAY,
         _INHIBIT_MODE_MAX,
-        _INHIBIT_MODE_INVALID = -1
+        _INHIBIT_MODE_INVALID = -EINVAL,
 } InhibitMode;
 
-#include "logind.h"
-
-struct Inhibitor {
+typedef struct Inhibitor {
         Manager *manager;
 
         sd_event_source *event_source;
@@ -59,32 +41,51 @@ struct Inhibitor {
         char *why;
         InhibitMode mode;
 
-        pid_t pid;
+        PidRef pid;
         uid_t uid;
 
         dual_timestamp since;
 
         char *fifo_path;
         int fifo_fd;
-};
+} Inhibitor;
 
-Inhibitor* inhibitor_new(Manager *m, const char *id);
-void inhibitor_free(Inhibitor *i);
+int inhibitor_new(Manager *m, const char* id, Inhibitor **ret);
+Inhibitor* inhibitor_free(Inhibitor *i);
 
-int inhibitor_save(Inhibitor *i);
+DEFINE_TRIVIAL_CLEANUP_FUNC(Inhibitor*, inhibitor_free);
+
 int inhibitor_load(Inhibitor *i);
 
 int inhibitor_start(Inhibitor *i);
-int inhibitor_stop(Inhibitor *i);
+void inhibitor_stop(Inhibitor *i);
 
 int inhibitor_create_fifo(Inhibitor *i);
-void inhibitor_remove_fifo(Inhibitor *i);
 
-InhibitWhat manager_inhibit_what(Manager *m, InhibitMode mm);
-bool manager_is_inhibited(Manager *m, InhibitWhat w, InhibitMode mm, dual_timestamp *since, bool ignore_inactive, bool ignore_uid, uid_t uid, Inhibitor **offending);
+bool inhibitor_is_orphan(Inhibitor *i);
 
-const char *inhibit_what_to_string(InhibitWhat k);
-InhibitWhat inhibit_what_from_string(const char *s);
+InhibitWhat manager_inhibit_what(Manager *m, InhibitMode mode);
 
-const char *inhibit_mode_to_string(InhibitMode k);
+typedef enum ManagerIsInhibitedFlags {
+        MANAGER_IS_INHIBITED_CHECK_DELAY     = 1 << 0,  /* When set, we only check delay inhibitors.
+                                                         * Otherwise, we only check block inhibitors. */
+        MANAGER_IS_INHIBITED_IGNORE_INACTIVE = 1 << 1,  /* When set, ignore inactive sessions. */
+} ManagerIsInhibitedFlags;
+
+bool manager_is_inhibited(
+                Manager *m,
+                InhibitWhat w,
+                dual_timestamp *since,
+                ManagerIsInhibitedFlags flags,
+                uid_t uid_to_ignore,
+                Inhibitor **ret_offending);
+
+static inline bool inhibit_what_is_valid(InhibitWhat w) {
+        return w > 0 && w < _INHIBIT_WHAT_MAX;
+}
+
+const char* inhibit_what_to_string(InhibitWhat w);
+int inhibit_what_from_string(const char *s);
+
+const char* inhibit_mode_to_string(InhibitMode k);
 InhibitMode inhibit_mode_from_string(const char *s);

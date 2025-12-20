@@ -1,124 +1,94 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * load kernel modules
  *
- * Copyright (C) 2011-2012 Kay Sievers <kay@vrfy.org>
- * Copyright (C) 2011 ProFUSION embedded systems
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright © 2011 ProFUSION embedded systems
  */
 
-#include <errno.h>
-#include <libkmod.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-
+#include "device-util.h"
 #include "module-util.h"
 #include "string-util.h"
-#include "udev.h"
+#include "strv.h"
+#include "udev-builtin.h"
 
 static struct kmod_ctx *ctx = NULL;
 
-static int load_module(struct udev *udev, const char *alias) {
-        _cleanup_(kmod_module_unref_listp) struct kmod_list *list = NULL;
-        struct kmod_list *l;
-        int err;
+static int builtin_kmod(UdevEvent *event, int argc, char *argv[]) {
+        sd_device *dev = ASSERT_PTR(ASSERT_PTR(event)->dev);
+        int r;
 
-        err = kmod_module_new_from_lookup(ctx, alias, &list);
-        if (err < 0)
-                return err;
-
-        if (list == NULL)
-                log_debug("No module matches '%s'", alias);
-
-        kmod_list_foreach(l, list) {
-                _cleanup_(kmod_module_unrefp) struct kmod_module *mod = NULL;
-
-                mod = kmod_module_get_module(l);
-
-                err = kmod_module_probe_insert_module(mod, KMOD_PROBE_APPLY_BLACKLIST, NULL, NULL, NULL, NULL);
-                if (err == KMOD_PROBE_APPLY_BLACKLIST)
-                        log_debug("Module '%s' is blacklisted", kmod_module_get_name(mod));
-                else if (err == 0)
-                        log_debug("Inserted '%s'", kmod_module_get_name(mod));
-                else
-                        log_debug("Failed to insert '%s'", kmod_module_get_name(mod));
+        if (event->event_mode != EVENT_UDEV_WORKER) {
+                log_device_debug(dev, "Running in test mode, skipping execution of 'kmod' builtin command.");
+                return 0;
         }
-
-        return err;
-}
-
-_printf_(6,0) static void udev_kmod_log(void *data, int priority, const char *file, int line, const char *fn, const char *format, va_list args) {
-        log_internalv(priority, 0, file, line, fn, format, args);
-}
-
-static int builtin_kmod(struct udev_device *dev, int argc, char *argv[], bool test) {
-        struct udev *udev = udev_device_get_udev(dev);
-        int i;
 
         if (!ctx)
                 return 0;
 
-        if (argc < 3 || !streq(argv[1], "load")) {
-                log_error("expect: %s load <module>", argv[0]);
-                return EXIT_FAILURE;
+        if (argc < 2 || !streq(argv[1], "load"))
+                return log_device_warning_errno(dev, SYNTHETIC_ERRNO(EINVAL),
+                                                "%s: expected: load [module…]", argv[0]);
+
+        char **modules = strv_skip(argv, 2);
+        if (modules)
+                STRV_FOREACH(module, modules)
+                        (void) module_load_and_warn(ctx, *module, /* verbose= */ false);
+        else {
+                const char *modalias;
+
+                r = sd_device_get_property_value(dev, "MODALIAS", &modalias);
+                if (r < 0)
+                        return log_device_warning_errno(dev, r, "Failed to read property \"MODALIAS\": %m");
+
+                (void) module_load_and_warn(ctx, modalias, /* verbose= */ false);
         }
 
-        for (i = 2; argv[i]; i++) {
-                log_debug("Execute '%s' '%s'", argv[1], argv[i]);
-                load_module(udev, argv[i]);
-        }
-
-        return EXIT_SUCCESS;
+        return 0;
 }
 
 /* called at udev startup and reload */
-static int builtin_kmod_init(struct udev *udev) {
+static int builtin_kmod_init(void) {
+        int r;
+
         if (ctx)
                 return 0;
 
-        ctx = kmod_new(NULL, NULL);
-        if (!ctx)
-                return -ENOMEM;
+        r = module_setup_context(&ctx);
+        if (r < 0)
+                return log_error_errno(r, "Failed to initialize libkmod context: %m");
 
-        log_debug("Load module index");
-        kmod_set_log_fn(ctx, udev_kmod_log, udev);
-        kmod_load_resources(ctx);
+        log_debug("Loaded kernel module index.");
         return 0;
 }
 
 /* called on udev shutdown and reload request */
-static void builtin_kmod_exit(struct udev *udev) {
-        log_debug("Unload module index");
-        ctx = kmod_unref(ctx);
+static void builtin_kmod_exit(void) {
+        if (!ctx)
+                return;
+
+        ctx = sym_kmod_unref(ctx);
+        log_debug("Unloaded kernel module index.");
 }
 
 /* called every couple of seconds during event activity; 'true' if config has changed */
-static bool builtin_kmod_validate(struct udev *udev) {
-        log_debug("Validate module index");
+static bool builtin_kmod_should_reload(void) {
         if (!ctx)
                 return false;
-        return (kmod_validate_resources(ctx) != KMOD_RESOURCES_OK);
+
+        if (sym_kmod_validate_resources(ctx) != KMOD_RESOURCES_OK) {
+                log_debug("Kernel module index needs reloading.");
+                return true;
+        }
+
+        return false;
 }
 
-const struct udev_builtin udev_builtin_kmod = {
+const UdevBuiltin udev_builtin_kmod = {
         .name = "kmod",
         .cmd = builtin_kmod,
         .init = builtin_kmod_init,
         .exit = builtin_kmod_exit,
-        .validate = builtin_kmod_validate,
+        .should_reload = builtin_kmod_should_reload,
         .help = "Kernel module loader",
         .run_once = false,
 };

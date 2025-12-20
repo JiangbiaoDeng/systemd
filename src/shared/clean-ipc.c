@@ -1,31 +1,8 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2014 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <dirent.h>
-#include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <mqueue.h>
-#include <stdbool.h>
 #include <stdio.h>
-#include <string.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/sem.h>
@@ -33,15 +10,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "alloc-util.h"
 #include "clean-ipc.h"
 #include "dirent-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
 #include "log.h"
-#include "macro.h"
-#include "string-util.h"
-#include "strv.h"
+#include "path-util.h"
 #include "user-util.h"
 
 static bool match_uid_gid(uid_t subject_uid, gid_t subject_gid, uid_t delete_uid, gid_t delete_gid) {
@@ -57,31 +33,35 @@ static bool match_uid_gid(uid_t subject_uid, gid_t subject_gid, uid_t delete_uid
 
 static int clean_sysvipc_shm(uid_t delete_uid, gid_t delete_gid, bool rm) {
         _cleanup_fclose_ FILE *f = NULL;
-        char line[LINE_MAX];
         bool first = true;
-        int ret = 0;
+        int ret = 0, r;
 
         f = fopen("/proc/sysvipc/shm", "re");
         if (!f) {
                 if (errno == ENOENT)
                         return 0;
 
-                return log_warning_errno(errno, "Failed to open /proc/sysvipc/shm: %m");
+                return log_warning_errno(errno, "Failed to open %s: %m", "/proc/sysvipc/shm");
         }
 
-        FOREACH_LINE(line, f, goto fail) {
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
                 unsigned n_attached;
                 pid_t cpid, lpid;
                 uid_t uid, cuid;
                 gid_t gid, cgid;
                 int shmid;
 
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return log_warning_errno(r, "Failed to read /proc/sysvipc/shm: %m");
+                if (r == 0)
+                        break;
+
                 if (first) {
                         first = false;
                         continue;
                 }
-
-                truncate_nl(line);
 
                 if (sscanf(line, "%*i %i %*o %*u " PID_FMT " " PID_FMT " %u " UID_FMT " " GID_FMT " " UID_FMT " " GID_FMT,
                            &shmid, &cpid, &lpid, &n_attached, &uid, &gid, &cuid, &cgid) != 8)
@@ -113,36 +93,37 @@ static int clean_sysvipc_shm(uid_t delete_uid, gid_t delete_gid, bool rm) {
         }
 
         return ret;
-
-fail:
-        return log_warning_errno(errno, "Failed to read /proc/sysvipc/shm: %m");
 }
 
 static int clean_sysvipc_sem(uid_t delete_uid, gid_t delete_gid, bool rm) {
         _cleanup_fclose_ FILE *f = NULL;
-        char line[LINE_MAX];
         bool first = true;
-        int ret = 0;
+        int ret = 0, r;
 
         f = fopen("/proc/sysvipc/sem", "re");
         if (!f) {
                 if (errno == ENOENT)
                         return 0;
 
-                return log_warning_errno(errno, "Failed to open /proc/sysvipc/sem: %m");
+                return log_warning_errno(errno, "Failed to open %s: %m", "/proc/sysvipc/sem");
         }
 
-        FOREACH_LINE(line, f, goto fail) {
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
                 uid_t uid, cuid;
                 gid_t gid, cgid;
                 int semid;
+
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return log_warning_errno(r, "Failed to read /proc/sysvipc/sem: %m");
+                if (r == 0)
+                        break;
 
                 if (first) {
                         first = false;
                         continue;
                 }
-
-                truncate_nl(line);
 
                 if (sscanf(line, "%*i %i %*o %*u " UID_FMT " " GID_FMT " " UID_FMT " " GID_FMT,
                            &semid, &uid, &gid, &cuid, &cgid) != 5)
@@ -171,37 +152,38 @@ static int clean_sysvipc_sem(uid_t delete_uid, gid_t delete_gid, bool rm) {
         }
 
         return ret;
-
-fail:
-        return log_warning_errno(errno, "Failed to read /proc/sysvipc/sem: %m");
 }
 
 static int clean_sysvipc_msg(uid_t delete_uid, gid_t delete_gid, bool rm) {
         _cleanup_fclose_ FILE *f = NULL;
-        char line[LINE_MAX];
         bool first = true;
-        int ret = 0;
+        int ret = 0, r;
 
         f = fopen("/proc/sysvipc/msg", "re");
         if (!f) {
                 if (errno == ENOENT)
                         return 0;
 
-                return log_warning_errno(errno, "Failed to open /proc/sysvipc/msg: %m");
+                return log_warning_errno(errno, "Failed to open %s: %m", "/proc/sysvipc/msg");
         }
 
-        FOREACH_LINE(line, f, goto fail) {
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
                 uid_t uid, cuid;
                 gid_t gid, cgid;
                 pid_t cpid, lpid;
                 int msgid;
 
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return log_warning_errno(r, "Failed to read /proc/sysvipc/msg: %m");
+                if (r == 0)
+                        break;
+
                 if (first) {
                         first = false;
                         continue;
                 }
-
-                truncate_nl(line);
 
                 if (sscanf(line, "%*i %i %*o %*u %*u " PID_FMT " " PID_FMT " " UID_FMT " " GID_FMT " " UID_FMT " " GID_FMT,
                            &msgid, &cpid, &lpid, &uid, &gid, &cuid, &cgid) != 7)
@@ -230,13 +212,9 @@ static int clean_sysvipc_msg(uid_t delete_uid, gid_t delete_gid, bool rm) {
         }
 
         return ret;
-
-fail:
-        return log_warning_errno(errno, "Failed to read /proc/sysvipc/msg: %m");
 }
 
-static int clean_posix_shm_internal(DIR *dir, uid_t uid, gid_t gid, bool rm) {
-        struct dirent *de;
+static int clean_posix_shm_internal(const char *dirname, DIR *dir, uid_t uid, gid_t gid, bool rm) {
         int ret = 0, r;
 
         assert(dir);
@@ -251,19 +229,21 @@ static int clean_posix_shm_internal(DIR *dir, uid_t uid, gid_t gid, bool rm) {
                         if (errno == ENOENT)
                                 continue;
 
-                        ret = log_warning_errno(errno, "Failed to stat() POSIX shared memory segment %s: %m", de->d_name);
+                        ret = log_warning_errno(errno, "Failed to stat() POSIX shared memory segment %s/%s: %m",
+                                                dirname, de->d_name);
                         continue;
                 }
 
                 if (S_ISDIR(st.st_mode)) {
-                        _cleanup_closedir_ DIR *kid;
+                        _cleanup_closedir_ DIR *kid = NULL;
 
                         kid = xopendirat(dirfd(dir), de->d_name, O_NOFOLLOW|O_NOATIME);
                         if (!kid) {
                                 if (errno != ENOENT)
-                                        ret = log_warning_errno(errno, "Failed to enter shared memory directory %s: %m", de->d_name);
+                                        ret = log_warning_errno(errno, "Failed to enter shared memory directory %s/%s: %m",
+                                                                dirname, de->d_name);
                         } else {
-                                r = clean_posix_shm_internal(kid, uid, gid, rm);
+                                r = clean_posix_shm_internal(de->d_name, kid, uid, gid, rm);
                                 if (r < 0)
                                         ret = r;
                         }
@@ -279,7 +259,8 @@ static int clean_posix_shm_internal(DIR *dir, uid_t uid, gid_t gid, bool rm) {
                                 if (errno == ENOENT)
                                         continue;
 
-                                ret = log_warning_errno(errno, "Failed to remove POSIX shared memory directory %s: %m", de->d_name);
+                                ret = log_warning_errno(errno, "Failed to remove POSIX shared memory directory %s/%s: %m",
+                                                        dirname, de->d_name);
                         } else {
                                 log_debug("Removed POSIX shared memory directory %s", de->d_name);
                                 if (ret == 0)
@@ -321,15 +302,14 @@ static int clean_posix_shm(uid_t uid, gid_t gid, bool rm) {
                 if (errno == ENOENT)
                         return 0;
 
-                return log_warning_errno(errno, "Failed to open /dev/shm: %m");
+                return log_warning_errno(errno, "Failed to open %s: %m", "/dev/shm");
         }
 
-        return clean_posix_shm_internal(dir, uid, gid, rm);
+        return clean_posix_shm_internal("/dev/shm", dir, uid, gid, rm);
 }
 
 static int clean_posix_mq(uid_t uid, gid_t gid, bool rm) {
         _cleanup_closedir_ DIR *dir = NULL;
-        struct dirent *de;
         int ret = 0;
 
         dir = opendir("/dev/mqueue");
@@ -337,7 +317,7 @@ static int clean_posix_mq(uid_t uid, gid_t gid, bool rm) {
                 if (errno == ENOENT)
                         return 0;
 
-                return log_warning_errno(errno, "Failed to open /dev/mqueue: %m");
+                return log_warning_errno(errno, "Failed to open %s: %m", "/dev/mqueue");
         }
 
         FOREACH_DIRENT_ALL(de, dir, goto fail) {

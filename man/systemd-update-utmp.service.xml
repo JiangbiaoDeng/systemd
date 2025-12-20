@@ -1,40 +1,13 @@
 <?xml version="1.0"?>
 <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN" "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 <refentry id="systemd-update-utmp.service" conditional="ENABLE_UTMP">
 
   <refentryinfo>
     <title>systemd-update-utmp.service</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>Lennart</firstname>
-        <surname>Poettering</surname>
-        <email>lennart@poettering.net</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -44,35 +17,30 @@
 
   <refnamediv>
     <refname>systemd-update-utmp.service</refname>
-    <refname>systemd-update-utmp-runlevel.service</refname>
     <refname>systemd-update-utmp</refname>
-    <refpurpose>Write audit and utmp updates at bootup, runlevel
-    changes and shutdown</refpurpose>
+    <refpurpose>Write audit and utmp updates at bootup and shutdown</refpurpose>
   </refnamediv>
 
   <refsynopsisdiv>
     <para><filename>systemd-update-utmp.service</filename></para>
-    <para><filename>systemd-update-utmp-runlevel.service</filename></para>
     <para><filename>/usr/lib/systemd/systemd-update-utmp</filename></para>
   </refsynopsisdiv>
 
   <refsect1>
     <title>Description</title>
 
-    <para><filename>systemd-update-utmp-runlevel.service</filename> is
-    a service that writes SysV runlevel changes to utmp and wtmp, as
-    well as the audit logs, as they occur.
-    <filename>systemd-update-utmp.service</filename> does the same for
-    system reboots and shutdown requests.</para>
+    <para>
+      <filename>systemd-update-utmp.service</filename> is a service that writes system reboots and shutdown
+      requests to utmp and wtmp, as well as the audit logs.</para>
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry project='man-pages'><refentrytitle>utmp</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <citerefentry project='man-pages'><refentrytitle>auditd</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry project='man-pages'><refentrytitle>utmp</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+      <member><citerefentry project='man-pages'><refentrytitle>auditd</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

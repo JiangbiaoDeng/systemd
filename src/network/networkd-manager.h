@@ -1,124 +1,159 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <arpa/inet.h>
-
-#include "sd-bus.h"
-#include "sd-event.h"
-#include "sd-netlink.h"
-#include "sd-resolve.h"
-#include "udev.h"
-
-#include "dhcp-identifier.h"
-#include "hashmap.h"
-#include "list.h"
-
-#include "networkd-address-pool.h"
-#include "networkd-link.h"
+#include "networkd-forward.h"
 #include "networkd-network.h"
 
-extern const char* const network_dirs[];
+typedef enum ManagerState {
+        MANAGER_RUNNING,
+        MANAGER_TERMINATING,
+        MANAGER_RESTARTING,
+        MANAGER_STOPPED,
+        _MANAGER_STATE_MAX,
+        _MANAGER_STATE_INVALID = -EINVAL,
+} ManagerState;
 
-struct Manager {
+typedef struct Manager {
         sd_netlink *rtnl;
         /* lazy initialized */
         sd_netlink *genl;
+        sd_netlink *nfnl;
         sd_event *event;
         sd_resolve *resolve;
-        sd_event_source *bus_retry_event_source;
         sd_bus *bus;
-        sd_bus_slot *prepare_for_sleep_slot;
-        sd_bus_slot *connected_slot;
-        struct udev *udev;
-        struct udev_monitor *udev_monitor;
-        sd_event_source *udev_event_source;
+        sd_varlink_server *varlink_server;
+        sd_varlink_server *varlink_resolve_hook_server;
+        Set *query_filter_subscriptions;
+        sd_device_monitor *device_monitor;
+        Hashmap *polkit_registry;
+        int ethtool_fd;
+        int persistent_storage_fd;
 
-        bool enumerating:1;
-        bool dirty:1;
+        KeepConfiguration keep_configuration;
+        IPv6PrivacyExtensions ipv6_privacy_extensions;
+
+        ManagerState state;
+        bool test_mode;
+        bool enumerating;
+        bool dirty;
+        bool manage_foreign_routes;
+        bool manage_foreign_rules;
+        bool manage_foreign_nexthops;
+        DHCPServerPersistLeases dhcp_server_persist_leases;
 
         Set *dirty_links;
+        Set *new_wlan_ifindices;
 
         char *state_file;
         LinkOperationalState operational_state;
+        LinkCarrierState carrier_state;
+        LinkAddressState address_state;
+        LinkAddressState ipv4_address_state;
+        LinkAddressState ipv6_address_state;
+        LinkOnlineState online_state;
 
-        Hashmap *links;
+        Hashmap *links_by_index;
+        Hashmap *links_by_name;
+        Hashmap *links_by_hw_addr;
+        Hashmap *links_by_dhcp_pd_subnet_prefix;
         Hashmap *netdevs;
-        Hashmap *networks_by_name;
-        Hashmap *dhcp6_prefixes;
-        LIST_HEAD(Network, networks);
-        LIST_HEAD(AddressPool, address_pools);
+        OrderedHashmap *networks;
+        OrderedSet *address_pools;
+        Set *dhcp_pd_subnet_ids;
 
-        usec_t network_dirs_ts_usec;
+        UseDomains use_domains; /* default for all protocols */
+        UseDomains dhcp_use_domains;
+        UseDomains dhcp6_use_domains;
+        UseDomains ndisc_use_domains;
 
-        DUID duid;
+        DHCPClientIdentifier dhcp_client_identifier;
+        DUID dhcp_duid;
+        DUID dhcp6_duid;
+        DUID duid_product_uuid;
+        bool has_product_uuid;
+        bool product_uuid_requested;
+
         char* dynamic_hostname;
         char* dynamic_timezone;
 
         Set *rules;
-        Set *rules_foreign;
-        Set *rules_saved;
-};
 
-static inline const DUID* link_duid(const Link *link) {
-        if (link->network->duid.type != _DUID_TYPE_INVALID)
-                return &link->network->duid;
-        else
-                return &link->manager->duid;
-}
+        /* Manage nexthops by id. */
+        Hashmap *nexthops_by_id;
+        Set *nexthop_ids; /* requested IDs in .network files */
 
-extern const sd_bus_vtable manager_vtable[];
+        /* Manager stores routes without RTA_OIF attribute. */
+        unsigned route_remove_messages;
+        Set *routes;
 
-int manager_new(Manager **ret, sd_event *event);
-void manager_free(Manager *m);
+        /* IPv6 Address Label */
+        Hashmap *address_labels_by_section;
+        unsigned static_address_label_messages;
+        bool static_address_labels_configured;
 
-int manager_connect_bus(Manager *m);
+        /* Route table name */
+        Hashmap *route_table_numbers_by_name;
+        Hashmap *route_table_names_by_number;
+
+        /* Wiphy */
+        Hashmap *wiphy_by_index;
+        Hashmap *wiphy_by_name;
+
+        /* For link speed meter */
+        bool use_speed_meter;
+        sd_event_source *speed_meter_event_source;
+        usec_t speed_meter_interval_usec;
+        usec_t speed_meter_usec_new;
+        usec_t speed_meter_usec_old;
+
+        bool request_queued;
+        OrderedSet *request_queue;
+        OrderedSet *remove_request_queue;
+
+        Hashmap *tuntap_fds_by_name;
+
+        unsigned reloading;
+
+        int serialization_fd;
+
+        /* sysctl */
+        int ip_forwarding[2];
+#if ENABLE_SYSCTL_BPF
+        Hashmap *sysctl_shadow;
+        sd_event_source *sysctl_event_source;
+        struct ring_buffer *sysctl_buffer;
+        struct sysctl_monitor_bpf *sysctl_skel;
+        struct bpf_link *sysctl_link;
+        int cgroup_fd;
+#endif
+} Manager;
+
+int manager_new(Manager **ret, bool test_mode);
+Manager* manager_free(Manager *m);
+
+int manager_setup(Manager *m);
 int manager_start(Manager *m);
 
 int manager_load_config(Manager *m);
-bool manager_should_reload(Manager *m);
 
-int manager_rtnl_enumerate_links(Manager *m);
-int manager_rtnl_enumerate_addresses(Manager *m);
-int manager_rtnl_enumerate_routes(Manager *m);
-int manager_rtnl_enumerate_rules(Manager *m);
-
-int manager_rtnl_process_address(sd_netlink *nl, sd_netlink_message *message, void *userdata);
-int manager_rtnl_process_route(sd_netlink *nl, sd_netlink_message *message, void *userdata);
-int manager_rtnl_process_rule(sd_netlink *nl, sd_netlink_message *message, void *userdata);
-
-int manager_send_changed(Manager *m, const char *property, ...) _sentinel_;
-void manager_dirty(Manager *m);
-
-int manager_address_pool_acquire(Manager *m, int family, unsigned prefixlen, union in_addr_union *found);
-
-Link* manager_find_uplink(Manager *m, Link *exclude);
+int manager_enumerate_internal(
+                Manager *m,
+                sd_netlink *nl,
+                sd_netlink_message *req,
+                int (*process)(sd_netlink *, sd_netlink_message *, Manager *));
+int manager_enumerate(Manager *m);
 
 int manager_set_hostname(Manager *m, const char *hostname);
-int manager_set_timezone(Manager *m, const char *timezone);
+int manager_set_timezone(Manager *m, const char *tz);
 
-Link *manager_dhcp6_prefix_get(Manager *m, struct in6_addr *addr);
-int manager_dhcp6_prefix_add(Manager *m, struct in6_addr *addr, Link *link);
-int manager_dhcp6_prefix_remove(Manager *m, struct in6_addr *addr);
-int manager_dhcp6_prefix_remove_all(Manager *m, Link *link);
+int manager_reload(Manager *m, sd_bus_message *message);
+
+static inline Hashmap** manager_get_sysctl_shadow(Manager *manager) {
+#if ENABLE_SYSCTL_BPF
+        return &ASSERT_PTR(manager)->sysctl_shadow;
+#else
+        return NULL;
+#endif
+}
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Manager*, manager_free);
-#define _cleanup_manager_free_ _cleanup_(manager_freep)

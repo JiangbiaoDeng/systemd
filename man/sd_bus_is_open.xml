@@ -1,42 +1,14 @@
-<?xml version='1.0'?> <!--*- Mode: nxml; nxml-child-indent: 2; indent-tabs-mode: nil -*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-"http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<?xml version='1.0'?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2017 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
-
-<refentry id="sd_bus_is_open">
+<refentry id="sd_bus_is_open"
+          xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>sd_bus_is_open</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>Lennart</firstname>
-        <surname>Poettering</surname>
-        <email>lennart@poettering.net</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -48,7 +20,7 @@
     <refname>sd_bus_is_open</refname>
     <refname>sd_bus_is_ready</refname>
 
-    <refpurpose>Check whether the a bus connection is open or ready.</refpurpose>
+    <refpurpose>Check whether the bus connection is open or ready</refpurpose>
   </refnamediv>
 
   <refsynopsisdiv>
@@ -85,6 +57,9 @@
     zero outside of this state, and positive otherwise. Effectively, this function returns positive while regular
     messages can be sent or received on the connection.</para>
 
+    <para>The <parameter>bus</parameter> argument may be <constant>NULL</constant>, zero is also returned in
+    that case.</para>
+
     <para>To be notified when the connection is fully established, use
     <citerefentry><refentrytitle>sd_bus_set_connected_signal</refentrytitle><manvolnum>3</manvolnum></citerefentry> and
     install a match for the <function>Connected()</function> signal on the
@@ -96,42 +71,42 @@
   <refsect1>
     <title>Return Value</title>
 
-    <para>On success, these functions return 0 or a positive integer. On failure, they return a negative errno-style
-    error code.</para>
+    <para>Those functions return 0 if the bus is <emphasis>not</emphasis> in the given state, and a positive
+    integer when it is. On failure, a negative errno-style error code is returned.</para>
+
+    <refsect2>
+      <title>Errors</title>
+
+      <para>Returned errors may indicate the following problems:</para>
+
+      <variablelist>
+        <varlistentry>
+          <term><constant>-ECHILD</constant></term>
+
+          <listitem><para>The bus connection has been created in a different process, library or module instance.</para></listitem>
+        </varlistentry>
+      </variablelist>
+    </refsect2>
   </refsect1>
 
-  <refsect1>
-    <title>Errors</title>
-
-    <para>Returned errors may indicate the following problems:</para>
-
-    <variablelist>
-      <varlistentry>
-        <term><constant>-ECHILD</constant></term>
-
-        <listitem><para>The bus connection has been created in a different process.</para></listitem>
-      </varlistentry>
-    </variablelist>
-  </refsect1>
+  <xi:include href="libsystemd-pkgconfig.xml" />
 
   <refsect1>
-    <title>Notes</title>
-
-    <para><function>sd_bus_is_open()</function> and <function>sd_bus_is_ready()</function> are available as
-    a shared library, which can be compiled and linked to with the <constant>libsystemd</constant> <citerefentry
-    project='die-net'><refentrytitle>pkg-config</refentrytitle><manvolnum>1</manvolnum></citerefentry> file.</para>
+    <title>History</title>
+    <para><function>sd_bus_is_open()</function> was added in version 221.</para>
+    <para><function>sd_bus_is_ready()</function> was added in version 237.</para>
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_start</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_close</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_set_connected_signal</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_start</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_close</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_set_connected_signal</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

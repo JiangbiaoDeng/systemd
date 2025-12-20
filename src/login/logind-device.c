@@ -1,28 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2011 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <string.h>
 
 #include "alloc-util.h"
+#include "hashmap.h"
+#include "logind.h"
 #include "logind-device.h"
-#include "util.h"
+#include "logind-seat.h"
+#include "logind-seat-dbus.h"
+#include "logind-session-device.h"
 
 Device* device_new(Manager *m, const char *sysfs, bool master) {
         Device *d;
@@ -45,7 +31,7 @@ Device* device_new(Manager *m, const char *sysfs, bool master) {
 
         d->manager = m;
         d->master = master;
-        dual_timestamp_get(&d->timestamp);
+        dual_timestamp_now(&d->timestamp);
 
         return d;
 }
@@ -68,7 +54,7 @@ static void device_detach(Device *d) {
 
         if (!seat_has_master_device(s)) {
                 seat_add_to_gc_queue(s);
-                seat_send_changed(s, "CanGraphical", NULL);
+                seat_send_changed(s, "CanGraphical");
         }
 }
 
@@ -84,7 +70,6 @@ void device_free(Device *d) {
 }
 
 void device_attach(Device *d, Seat *s) {
-        Device *i;
         bool had_master;
 
         assert(d);
@@ -108,15 +93,16 @@ void device_attach(Device *d, Seat *s) {
 
         if (d->master || !s->devices)
                 LIST_PREPEND(devices, s->devices, d);
-        else {
+        else
                 LIST_FOREACH(devices, i, s->devices) {
                         if (!i->devices_next || !i->master) {
                                 LIST_INSERT_AFTER(devices, s->devices, i, d);
                                 break;
                         }
                 }
-        }
 
-        if (!had_master && d->master)
-                seat_send_changed(s, "CanGraphical", NULL);
+        if (!had_master && d->master && s->started) {
+                seat_save(s);
+                seat_send_changed(s, "CanGraphical");
+        }
 }

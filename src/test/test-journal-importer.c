@@ -1,30 +1,9 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2016 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 
-#include "log.h"
+#include "alloc-util.h"
 #include "journal-importer.h"
-#include "string-util.h"
 #include "tests.h"
 
 static void assert_iovec_entry(const struct iovec *iovec, const char* content) {
@@ -36,11 +15,13 @@ static void assert_iovec_entry(const struct iovec *iovec, const char* content) {
         "COREDUMP_PROC_CGROUP=1:name=systemd:/\n"                       \
         "0::/user.slice/user-1002.slice/user@1002.service/gnome-terminal-server.service\n"
 
-static void test_basic_parsing(void) {
-        _cleanup_(journal_importer_cleanup) JournalImporter imp = {};
+TEST(basic_parsing) {
+        _cleanup_(journal_importer_cleanup) JournalImporter imp = JOURNAL_IMPORTER_INIT(-1);
+        _cleanup_free_ char *journal_data_path = NULL;
         int r;
 
-        imp.fd = open(get_testdata_dir("/journal-data/journal-1.txt"), O_RDONLY|O_CLOEXEC);
+        assert_se(get_testdata_dir("journal-data/journal-1.txt", &journal_data_path) >= 0);
+        imp.fd = open(journal_data_path, O_RDONLY|O_CLOEXEC);
         assert_se(imp.fd >= 0);
 
         do
@@ -65,11 +46,13 @@ static void test_basic_parsing(void) {
         assert_se(journal_importer_eof(&imp));
 }
 
-static void test_bad_input(void) {
-        _cleanup_(journal_importer_cleanup) JournalImporter imp = {};
+TEST(bad_input) {
+        _cleanup_(journal_importer_cleanup) JournalImporter imp = JOURNAL_IMPORTER_INIT(-1);
+        _cleanup_free_ char *journal_data_path = NULL;
         int r;
 
-        imp.fd = open(get_testdata_dir("/journal-data/journal-2.txt"), O_RDONLY|O_CLOEXEC);
+        assert_se(get_testdata_dir("journal-data/journal-1.txt", &journal_data_path) >= 0);
+        imp.fd = open(journal_data_path, O_RDONLY|O_CLOEXEC);
         assert_se(imp.fd >= 0);
 
         do
@@ -80,12 +63,4 @@ static void test_bad_input(void) {
         assert_se(journal_importer_eof(&imp));
 }
 
-int main(int argc, char **argv) {
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
-
-        test_basic_parsing();
-        test_bad_input();
-
-        return 0;
-}
+DEFINE_TEST_MAIN(LOG_DEBUG);

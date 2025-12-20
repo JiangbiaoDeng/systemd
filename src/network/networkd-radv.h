@@ -1,52 +1,78 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 /***
-  This file is part of systemd.
-
-  Copyright 2017 Intel Corporation. All rights reserved.
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  Copyright © 2017 Intel Corporation. All rights reserved.
 ***/
 
-#include "networkd-address.h"
-#include "networkd-link.h"
+#include "ndisc-option.h"
+#include "networkd-forward.h"
 
-typedef struct Prefix Prefix;
+typedef enum RADVPrefixDelegation {
+        RADV_PREFIX_DELEGATION_NONE   = 0,
+        RADV_PREFIX_DELEGATION_STATIC = 1 << 0,
+        RADV_PREFIX_DELEGATION_DHCP6  = 1 << 1,
+        RADV_PREFIX_DELEGATION_BOTH   = RADV_PREFIX_DELEGATION_STATIC | RADV_PREFIX_DELEGATION_DHCP6,
+        _RADV_PREFIX_DELEGATION_MAX,
+        _RADV_PREFIX_DELEGATION_INVALID = -EINVAL,
+} RADVPrefixDelegation;
 
-struct Prefix {
+typedef struct Prefix {
         Network *network;
-        NetworkConfigSection *section;
+        ConfigSection *section;
 
-        sd_radv_prefix *radv_prefix;
+        sd_ndisc_prefix prefix;
 
-        LIST_FIELDS(Prefix, prefixes);
-};
+        bool assign;
+        uint32_t route_metric;
+        Set *tokens;
+} Prefix;
 
-int prefix_new(Prefix **ret);
-void prefix_free(Prefix *prefix);
-int prefix_new_static(Network *network, const char *filename, unsigned section,
-                      Prefix **ret);
+typedef struct RoutePrefix {
+        Network *network;
+        ConfigSection *section;
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(Prefix*, prefix_free);
-#define _cleanup_prefix_free_ _cleanup_(prefix_freep)
+        sd_ndisc_route route;
+} RoutePrefix;
 
-int config_parse_router_prefix_delegation(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_router_preference(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_prefix(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_prefix_flags(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_prefix_lifetime(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+typedef struct Prefix64 {
+        Network *network;
+        ConfigSection *section;
 
-int radv_emit_dns(Link *link);
-int radv_configure(Link *link);
+        sd_ndisc_prefix64 prefix64;
+} Prefix64;
+
+void network_adjust_radv(Network *network);
+
+int link_request_radv_addresses(Link *link);
+int link_reconfigure_radv_address(Address *address, Link *link);
+
+bool link_radv_enabled(Link *link);
+int radv_start(Link *link);
+int radv_update_mac(Link *link);
+int radv_add_prefix(Link *link, const struct in6_addr *prefix, uint8_t prefix_len,
+                    usec_t lifetime_preferred_usec, usec_t lifetime_valid_usec);
+
+int link_request_radv(Link *link);
+int link_drop_radv_config(Link *link, Network *network);
+
+const char* radv_prefix_delegation_to_string(RADVPrefixDelegation i) _const_;
+RADVPrefixDelegation radv_prefix_delegation_from_string(const char *s) _pure_;
+
+CONFIG_PARSER_PROTOTYPE(config_parse_router_prefix_delegation);
+CONFIG_PARSER_PROTOTYPE(config_parse_router_lifetime);
+CONFIG_PARSER_PROTOTYPE(config_parse_router_uint32_msec_usec);
+CONFIG_PARSER_PROTOTYPE(config_parse_router_preference);
+CONFIG_PARSER_PROTOTYPE(config_parse_prefix);
+CONFIG_PARSER_PROTOTYPE(config_parse_prefix_boolean);
+CONFIG_PARSER_PROTOTYPE(config_parse_prefix_lifetime);
+CONFIG_PARSER_PROTOTYPE(config_parse_prefix_metric);
+CONFIG_PARSER_PROTOTYPE(config_parse_prefix_token);
+CONFIG_PARSER_PROTOTYPE(config_parse_radv_dns);
+CONFIG_PARSER_PROTOTYPE(config_parse_radv_search_domains);
+CONFIG_PARSER_PROTOTYPE(config_parse_route_prefix);
+CONFIG_PARSER_PROTOTYPE(config_parse_route_prefix_lifetime);
+CONFIG_PARSER_PROTOTYPE(config_parse_route_prefix_preference);
+CONFIG_PARSER_PROTOTYPE(config_parse_pref64_prefix);
+CONFIG_PARSER_PROTOTYPE(config_parse_pref64_prefix_lifetime);
+CONFIG_PARSER_PROTOTYPE(config_parse_router_home_agent_lifetime);

@@ -1,31 +1,13 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "sd-bus.h"
 
-#include "bus-util.h"
+#include "bus-locator.h"
 #include "fd-util.h"
-#include "macro.h"
-#include "util.h"
+#include "tests.h"
 
 static int inhibit(sd_bus *bus, const char *what) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
@@ -34,21 +16,14 @@ static int inhibit(sd_bus *bus, const char *what) {
         int fd;
         int r;
 
-        r = sd_bus_call_method(bus,
-                        "org.freedesktop.login1",
-                        "/org/freedesktop/login1",
-                        "org.freedesktop.login1.Manager",
-                        "Inhibit",
-                        &error,
-                        &reply,
-                        "ssss", what, who, reason, mode);
+        r = bus_call_method(bus, bus_login_mgr, "Inhibit", &error, &reply, "ssss", what, who, reason, mode);
         assert_se(r >= 0);
 
         r = sd_bus_message_read_basic(reply, SD_BUS_TYPE_UNIX_FD, &fd);
         assert_se(r >= 0);
         assert_se(fd >= 0);
 
-        return dup(fd);
+        return fcntl(fd, F_DUPFD_CLOEXEC, 3);
 }
 
 static void print_inhibitors(sd_bus *bus) {
@@ -59,14 +34,7 @@ static void print_inhibitors(sd_bus *bus) {
         unsigned n = 0;
         int r;
 
-        r = sd_bus_call_method(bus,
-                        "org.freedesktop.login1",
-                        "/org/freedesktop/login1",
-                        "org.freedesktop.login1.Manager",
-                        "ListInhibitors",
-                        &error,
-                        &reply,
-                        "");
+        r = bus_call_method(bus, bus_login_mgr, "ListInhibitors", &error, &reply, NULL);
         assert_se(r >= 0);
 
         r = sd_bus_message_enter_container(reply, SD_BUS_TYPE_ARRAY, "(ssssuu)");
@@ -83,10 +51,12 @@ static void print_inhibitors(sd_bus *bus) {
         printf("%u inhibitors\n", n);
 }
 
-int main(int argc, char*argv[]) {
+int main(int argc, char *argv[]) {
         _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
         int fd1, fd2;
         int r;
+
+        test_setup_logging(LOG_DEBUG);
 
         r = sd_bus_open_system(&bus);
         assert_se(r >= 0);

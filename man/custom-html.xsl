@@ -1,25 +1,5 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2011 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
 <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
 
@@ -39,7 +19,8 @@
 <xsl:template match="citerefentry[not(@project)]">
   <a>
     <xsl:attribute name="href">
-      <xsl:value-of select="refentrytitle"/><xsl:text>.html#</xsl:text>
+      <xsl:value-of select="refentrytitle"/>
+      <xsl:text>.html#</xsl:text>
       <xsl:value-of select="refentrytitle/@target"/>
     </xsl:attribute>
     <xsl:call-template name="inline.charseq"/>
@@ -49,7 +30,7 @@
 <xsl:template match="citerefentry[@project='man-pages'] | citerefentry[manvolnum='2'] | citerefentry[manvolnum='4']">
   <a>
     <xsl:attribute name="href">
-      <xsl:text>http://man7.org/linux/man-pages/man</xsl:text>
+      <xsl:text>https://man7.org/linux/man-pages/man</xsl:text>
       <xsl:value-of select="manvolnum"/>
       <xsl:text>/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
@@ -73,18 +54,6 @@
   </a>
 </xsl:template>
 
-<xsl:template match="citerefentry[@project='wireguard']">
-  <a>
-    <xsl:attribute name="href">
-      <xsl:text>https://git.zx2c4.com/WireGuard/about/src/tools/</xsl:text>
-      <xsl:value-of select="refentrytitle"/>
-      <xsl:text>.</xsl:text>
-      <xsl:value-of select="manvolnum"/>
-    </xsl:attribute>
-    <xsl:call-template name="inline.charseq"/>
-  </a>
-</xsl:template>
-
 <xsl:template match="citerefentry[@project='mankier']">
   <a>
     <xsl:attribute name="href">
@@ -97,16 +66,41 @@
   </a>
 </xsl:template>
 
+<xsl:template match="citerefentry[@project='openssl']">
+  <a>
+    <xsl:attribute name="href">
+      <xsl:text>https://docs.openssl.org/master/man</xsl:text>
+      <xsl:value-of select="manvolnum"/>
+      <xsl:text>/</xsl:text>
+      <xsl:value-of select="refentrytitle"/>
+    </xsl:attribute>
+    <xsl:call-template name="inline.charseq"/>
+  </a>
+</xsl:template>
+
 <xsl:template match="citerefentry[@project='archlinux']">
   <a>
     <xsl:attribute name="href">
-      <xsl:text>https://www.archlinux.org/</xsl:text>
+      <xsl:text>https://man.archlinux.org/man/</xsl:text>
+      <xsl:value-of select="refentrytitle"/>
+      <xsl:text>.</xsl:text>
+      <xsl:value-of select="manvolnum"/>
+      <xsl:text>.en.html</xsl:text>
+    </xsl:attribute>
+    <xsl:call-template name="inline.charseq"/>
+  </a>
+</xsl:template>
+
+<xsl:template match="citerefentry[@project='debian']">
+  <a>
+    <xsl:attribute name="href">
+      <xsl:text>https://manpages.debian.org/unstable/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
       <xsl:text>/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
       <xsl:text>.</xsl:text>
       <xsl:value-of select="manvolnum"/>
-      <xsl:text>.html</xsl:text>
+      <xsl:text>.en.html</xsl:text>
     </xsl:attribute>
     <xsl:call-template name="inline.charseq"/>
   </a>
@@ -128,11 +122,20 @@
 <xsl:template match="citerefentry[@project='dbus']">
   <a>
     <xsl:attribute name="href">
-      <xsl:text>http://dbus.freedesktop.org/doc/</xsl:text>
+      <xsl:text>https://dbus.freedesktop.org/doc/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
       <xsl:text>.</xsl:text>
       <xsl:value-of select="manvolnum"/>
       <xsl:text>.html</xsl:text>
+    </xsl:attribute>
+    <xsl:call-template name="inline.charseq"/>
+  </a>
+</xsl:template>
+
+<xsl:template match="citerefentry[@project='url']">
+  <a>
+    <xsl:attribute name="href">
+      <xsl:value-of select="refentrytitle/@url"/>
     </xsl:attribute>
     <xsl:call-template name="inline.charseq"/>
   </a>
@@ -155,6 +158,8 @@
   <xsl:param name="keyNode"/>
   <!-- suggested value for generatedID output, a contextually meaningful ID string -->
   <xsl:param name="templateID"/>
+  <!-- Strip leading and trailing whitespaces, and replace repeating whitespaces with a single space -->
+  <xsl:variable name="normalizedID" select="normalize-space($templateID)"/>
   <xsl:variable name="conflictSource" select="preceding::refsect1/title|preceding::refsect1/info/title|
 					      preceding::refsect2/title|preceding::refsect2/info/title|
 					      preceding::varlistentry/term[1]"/>
@@ -162,10 +167,10 @@
   <xsl:choose>
     <!-- special case conflictCount = 0 to preserve compatibility with URLs generated by previous versions of this XSL stylesheet where possible -->
     <xsl:when test="$conflictCount = 0">
-      <xsl:value-of select="$templateID"/>
+      <xsl:value-of select="$normalizedID"/>
     </xsl:when>
     <xsl:otherwise>
-      <xsl:value-of select="concat($templateID, $conflictCount)"/>
+      <xsl:value-of select="concat($normalizedID, $conflictCount)"/>
     </xsl:otherwise>
   </xsl:choose>
 </xsl:template>

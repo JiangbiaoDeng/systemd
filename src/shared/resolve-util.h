@@ -1,39 +1,36 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "conf-parser-forward.h"
+#include "shared-forward.h"
 
-  Copyright 2016 Lennart Poettering
+/* 127.0.0.53 in native endian (The IP address we listen on with the full DNS stub, i.e. that does LLMNR/mDNS, and stuff) */
+#define INADDR_DNS_STUB ((in_addr_t) 0x7f000035U)
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+/* 127.0.0.54 in native endian (The IP address we listen on we only implement "proxy" mode) */
+#define INADDR_DNS_PROXY_STUB ((in_addr_t) 0x7f000036U)
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
+/* 127.0.0.2 is an address we always map to the local hostname. This is different from 127.0.0.1 which maps to "localhost" */
+#define INADDR_LOCALADDRESS ((in_addr_t) 0x7f000002U)
 
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+typedef enum DnsCacheMode {
+        DNS_CACHE_MODE_NO,
+        DNS_CACHE_MODE_YES,
+        DNS_CACHE_MODE_NO_NEGATIVE,
+        _DNS_CACHE_MODE_MAX,
+        _DNS_CACHE_MODE_INVALID = -EINVAL,
+} DnsCacheMode;
 
-#include "macro.h"
-
-typedef enum ResolveSupport ResolveSupport;
-typedef enum DnssecMode DnssecMode;
-
-enum ResolveSupport {
+/* Do not change the order, see link_get_llmnr_support() or link_get_mdns_support(). */
+typedef enum ResolveSupport {
         RESOLVE_SUPPORT_NO,
-        RESOLVE_SUPPORT_YES,
         RESOLVE_SUPPORT_RESOLVE,
+        RESOLVE_SUPPORT_YES,
         _RESOLVE_SUPPORT_MAX,
-        _RESOLVE_SUPPORT_INVALID = -1
-};
+        _RESOLVE_SUPPORT_INVALID = -EINVAL,
+} ResolveSupport;
 
-enum DnssecMode {
+typedef enum DnssecMode {
         /* No DNSSEC validation is done */
         DNSSEC_NO,
 
@@ -48,14 +45,48 @@ enum DnssecMode {
         DNSSEC_YES,
 
         _DNSSEC_MODE_MAX,
-        _DNSSEC_MODE_INVALID = -1
-};
+        _DNSSEC_MODE_INVALID = -EINVAL,
+} DnssecMode;
 
-int config_parse_resolve_support(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_dnssec_mode(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+typedef enum DnsOverTlsMode {
+        /* No connection is made for DNS-over-TLS */
+        DNS_OVER_TLS_NO,
+
+        /* Try to connect using DNS-over-TLS, but if connection fails,
+         * fall back to using an unencrypted connection */
+        DNS_OVER_TLS_OPPORTUNISTIC,
+
+        /* Enforce DNS-over-TLS and require valid server certificates */
+        DNS_OVER_TLS_YES,
+
+        _DNS_OVER_TLS_MODE_MAX,
+        _DNS_OVER_TLS_MODE_INVALID = -EINVAL,
+} DnsOverTlsMode;
+
+CONFIG_PARSER_PROTOTYPE(config_parse_resolve_support);
+CONFIG_PARSER_PROTOTYPE(config_parse_dnssec_mode);
+CONFIG_PARSER_PROTOTYPE(config_parse_dns_over_tls_mode);
+CONFIG_PARSER_PROTOTYPE(config_parse_dns_cache_mode);
 
 const char* resolve_support_to_string(ResolveSupport p) _const_;
 ResolveSupport resolve_support_from_string(const char *s) _pure_;
 
 const char* dnssec_mode_to_string(DnssecMode p) _const_;
 DnssecMode dnssec_mode_from_string(const char *s) _pure_;
+
+const char* dns_over_tls_mode_to_string(DnsOverTlsMode p) _const_;
+DnsOverTlsMode dns_over_tls_mode_from_string(const char *s) _pure_;
+
+bool dns_server_address_valid(int family, const union in_addr_union *sa);
+
+const char* dns_cache_mode_to_string(DnsCacheMode p) _const_;
+DnsCacheMode dns_cache_mode_from_string(const char *s) _pure_;
+
+/* A resolv.conf file containing the DNS server and domain data we learnt from uplink, i.e. the full uplink data */
+#define PRIVATE_UPLINK_RESOLV_CONF "/run/systemd/resolve/resolv.conf"
+
+/* A resolv.conf file containing the domain data we learnt from uplink, but our own DNS server address. */
+#define PRIVATE_STUB_RESOLV_CONF "/run/systemd/resolve/stub-resolv.conf"
+
+/* A static resolv.conf file containing no domains, but only our own DNS server address */
+#define PRIVATE_STATIC_RESOLV_CONF LIBEXECDIR "/resolv.conf"

@@ -1,40 +1,38 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-
-#include "time-util.h"
+#include "shared-forward.h"
 
 typedef enum AskPasswordFlags {
-        ASK_PASSWORD_ACCEPT_CACHED = 1U << 0,
-        ASK_PASSWORD_PUSH_CACHE    = 1U << 1,
-        ASK_PASSWORD_ECHO          = 1U << 2, /* show the password literally while reading, instead of "*" */
-        ASK_PASSWORD_SILENT        = 1U << 3, /* do no show any password at all while reading */
-        ASK_PASSWORD_NO_TTY        = 1U << 4,
-        ASK_PASSWORD_NO_AGENT      = 1U << 5,
-        ASK_PASSWORD_CONSOLE_COLOR = 1U << 6, /* Use color if /dev/console points to a console that supports color */
+        ASK_PASSWORD_ACCEPT_CACHED = 1 << 0,  /* read from kernel keyring */
+        ASK_PASSWORD_PUSH_CACHE    = 1 << 1,  /* write to kernel keyring after getting password from elsewhere */
+        ASK_PASSWORD_ECHO          = 1 << 2,  /* show the password literally while reading, instead of "*" */
+        ASK_PASSWORD_SILENT        = 1 << 3,  /* do no show any password at all while reading */
+        ASK_PASSWORD_NO_TTY        = 1 << 4,  /* never ask for password on tty */
+        ASK_PASSWORD_NO_AGENT      = 1 << 5,  /* never ask for password via agent */
+        ASK_PASSWORD_CONSOLE_COLOR = 1 << 6,  /* Use color if /dev/console points to a console that supports color */
+        ASK_PASSWORD_NO_CREDENTIAL = 1 << 7,  /* never use $CREDENTIALS_DIRECTORY data */
+        ASK_PASSWORD_HIDE_EMOJI    = 1 << 8,  /* hide the lock and key emoji */
+        ASK_PASSWORD_HEADLESS      = 1 << 9,  /* headless mode: never query interactively */
+        ASK_PASSWORD_USER          = 1 << 10, /* query only our own agents, not any system password agents */
 } AskPasswordFlags;
 
-int ask_password_tty(int tty_fd, const char *message, const char *keyname, usec_t until, AskPasswordFlags flags, const char *flag_file, char **ret);
-int ask_password_agent(const char *message, const char *icon, const char *id, const char *keyname, usec_t until, AskPasswordFlags flag, char ***ret);
-int ask_password_keyring(const char *keyname, AskPasswordFlags flags, char ***ret);
-int ask_password_auto(const char *message, const char *icon, const char *id, const char *keyname, usec_t until, AskPasswordFlags flag, char ***ret);
+/* Encapsulates the mostly static fields of a password query */
+typedef struct AskPasswordRequest {
+        const char *message;         /* The human-readable password prompt when asking interactively */
+        const char *keyring;         /* kernel keyring key name (key of "user" type) */
+        const char *icon;            /* freedesktop icon spec name */
+        const char *id;              /* some identifier used for this prompt for the "ask-password" protocol */
+        const char *credential;      /* $CREDENTIALS_DIRECTORY credential name */
+        const char *flag_file;       /* Once this flag file disappears abort the query */
+        int tty_fd;                  /* If querying on a TTY, the TTY to query on (or -EBADF) */
+        int hup_fd;                  /* An extra fd to watch for POLLHUP, in which case to abort the query */
+        usec_t until;                /* CLOCK_MONOTONIC time until which to show the prompt (if zero: forever) */
+} AskPasswordRequest;
+
+int ask_password_tty(const AskPasswordRequest *req, AskPasswordFlags flags, char ***ret);
+int ask_password_plymouth(const AskPasswordRequest *req, AskPasswordFlags flags, char ***ret);
+int ask_password_agent(const AskPasswordRequest *req, AskPasswordFlags flags, char ***ret);
+int ask_password_auto(const AskPasswordRequest *req, AskPasswordFlags flags, char ***ret);
+
+int acquire_user_ask_password_directory(char **ret);

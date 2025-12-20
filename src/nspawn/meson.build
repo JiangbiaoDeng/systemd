@@ -1,58 +1,64 @@
-# SPDX-License-Identifier: LGPL-2.1+
-#
-# Copyright 2017 Zbigniew Jędrzejewski-Szmek
-#
-# systemd is free software; you can redistribute it and/or modify it
-# under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation; either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# systemd is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
-systemd_nspawn_sources = files('''
-        nspawn-cgroup.c
-        nspawn-cgroup.h
-        nspawn-def.h
-        nspawn-expose-ports.c
-        nspawn-expose-ports.h
-        nspawn-mount.c
-        nspawn-mount.h
-        nspawn-network.c
-        nspawn-network.h
-        nspawn-patch-uid.c
-        nspawn-patch-uid.h
-        nspawn-register.c
-        nspawn-register.h
-        nspawn-seccomp.c
-        nspawn-seccomp.h
-        nspawn-settings.c
-        nspawn-settings.h
-        nspawn-setuid.c
-        nspawn-setuid.h
-        nspawn-stub-pid1.c
-        nspawn-stub-pid1.h
-        nspawn.c
-'''.split())
+if conf.get('ENABLE_NSPAWN') != 1
+        subdir_done()
+endif
+
+nspawn_sources = files(
+        'nspawn.c',
+        'nspawn-bind-user.c',
+        'nspawn-cgroup.c',
+        'nspawn-register.c',
+        'nspawn-seccomp.c',
+        'nspawn-setuid.c',
+        'nspawn-stub-pid1.c',
+)
+nspawn_extract_sources = files(
+        'nspawn-expose-ports.c',
+        'nspawn-mount.c',
+        'nspawn-network.c',
+        'nspawn-oci.c',
+        'nspawn-settings.c',
+)
 
 nspawn_gperf_c = custom_target(
-        'nspawn-gperf.c',
         input : 'nspawn-gperf.gperf',
         output : 'nspawn-gperf.c',
         command : [gperf, '@INPUT@', '--output-file', '@OUTPUT@'])
 
-systemd_nspawn_sources += [nspawn_gperf_c]
+generated_sources += nspawn_gperf_c
+nspawn_extract_sources += nspawn_gperf_c
 
-tests += [
-        [['src/nspawn/test-patch-uid.c',
-          'src/nspawn/nspawn-patch-uid.c',
-          'src/nspawn/nspawn-patch-uid.h'],
-         [libshared],
-         [libacl],
-         '', 'manual'],
+nspawn_common_template = {
+        'dependencies' : libseccomp_cflags,
+        'objects' : ['systemd-nspawn'],
+}
+nspawn_test_template = test_template + nspawn_common_template
+nspawn_fuzz_template = fuzz_template + nspawn_common_template
+
+executables += [
+        executable_template + {
+                'name' : 'systemd-nspawn',
+                'public' : true,
+                'sources' : nspawn_sources,
+                'extract' : nspawn_extract_sources,
+                'include_directories' : [
+                        executable_template['include_directories'],
+                        include_directories('.')
+                ],
+                'dependencies' : [
+                        libmount_cflags,
+                        libseccomp_cflags,
+                        libselinux_cflags,
+                ],
+        },
+        nspawn_test_template + {
+                'sources' : files('test-nspawn-tables.c'),
+        },
+        nspawn_fuzz_template + {
+                'sources' : files('fuzz-nspawn-settings.c'),
+        },
+        nspawn_fuzz_template + {
+                'sources' : files('fuzz-nspawn-oci.c'),
+        },
 ]

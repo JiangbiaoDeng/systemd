@@ -1,59 +1,7 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
 #include <endian.h>
-
-#include "macro.h"
-
-/* Packet header */
-
-struct _packed_ bus_header {
-        /* The first four fields are identical for dbus1, and dbus2 */
-        uint8_t endian;
-        uint8_t type;
-        uint8_t flags;
-        uint8_t version;
-
-        union _packed_ {
-                /* dbus1: Used for SOCK_STREAM connections */
-                struct _packed_ {
-                        uint32_t body_size;
-
-                        /* Note that what the bus spec calls "serial" we'll call
-                           "cookie" instead, because we don't want to imply that the
-                           cookie was in any way monotonically increasing. */
-                        uint32_t serial;
-                        uint32_t fields_size;
-                } dbus1;
-
-                /* dbus2: Used for kdbus connections */
-                struct _packed_ {
-                        uint32_t _reserved;
-                        uint64_t cookie;
-                } dbus2;
-
-                /* Note that both header versions have the same size! */
-        };
-};
 
 /* Endianness */
 
@@ -73,9 +21,9 @@ enum {
 /* Flags */
 
 enum {
-        BUS_MESSAGE_NO_REPLY_EXPECTED = 1,
-        BUS_MESSAGE_NO_AUTO_START = 2,
-        BUS_MESSAGE_ALLOW_INTERACTIVE_AUTHORIZATION = 4,
+        BUS_MESSAGE_NO_REPLY_EXPECTED               = 1 << 0,
+        BUS_MESSAGE_NO_AUTO_START                   = 1 << 1,
+        BUS_MESSAGE_ALLOW_INTERACTIVE_AUTHORIZATION = 1 << 2,
 };
 
 /* Header fields */
@@ -97,9 +45,9 @@ enum {
 /* RequestName parameters */
 
 enum  {
-        BUS_NAME_ALLOW_REPLACEMENT = 1,
-        BUS_NAME_REPLACE_EXISTING = 2,
-        BUS_NAME_DO_NOT_QUEUE = 4
+        BUS_NAME_ALLOW_REPLACEMENT = 1 << 0,
+        BUS_NAME_REPLACE_EXISTING  = 1 << 1,
+        BUS_NAME_DO_NOT_QUEUE      = 1 << 2,
 };
 
 /* RequestName returns */
@@ -122,60 +70,3 @@ enum {
         BUS_START_REPLY_SUCCESS = 1,
         BUS_START_REPLY_ALREADY_RUNNING = 2,
 };
-
-#define BUS_INTROSPECT_DOCTYPE                                       \
-        "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"\n" \
-        "\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n"
-
-#define BUS_INTROSPECT_INTERFACE_PEER                                \
-        " <interface name=\"org.freedesktop.DBus.Peer\">\n"             \
-        "  <method name=\"Ping\"/>\n"                                   \
-        "  <method name=\"GetMachineId\">\n"                            \
-        "   <arg type=\"s\" name=\"machine_uuid\" direction=\"out\"/>\n" \
-        "  </method>\n"                                                 \
-        " </interface>\n"
-
-#define BUS_INTROSPECT_INTERFACE_INTROSPECTABLE                      \
-        " <interface name=\"org.freedesktop.DBus.Introspectable\">\n"   \
-        "  <method name=\"Introspect\">\n"                              \
-        "   <arg name=\"data\" type=\"s\" direction=\"out\"/>\n"        \
-        "  </method>\n"                                                 \
-        " </interface>\n"
-
-#define BUS_INTROSPECT_INTERFACE_PROPERTIES                          \
-        " <interface name=\"org.freedesktop.DBus.Properties\">\n"       \
-        "  <method name=\"Get\">\n"                                     \
-        "   <arg name=\"interface\" direction=\"in\" type=\"s\"/>\n"    \
-        "   <arg name=\"property\" direction=\"in\" type=\"s\"/>\n"     \
-        "   <arg name=\"value\" direction=\"out\" type=\"v\"/>\n"       \
-        "  </method>\n"                                                 \
-        "  <method name=\"GetAll\">\n"                                  \
-        "   <arg name=\"interface\" direction=\"in\" type=\"s\"/>\n"    \
-        "   <arg name=\"properties\" direction=\"out\" type=\"a{sv}\"/>\n" \
-        "  </method>\n"                                                 \
-        "  <method name=\"Set\">\n"                                     \
-        "   <arg name=\"interface\" direction=\"in\" type=\"s\"/>\n"    \
-        "   <arg name=\"property\" direction=\"in\" type=\"s\"/>\n"     \
-        "   <arg name=\"value\" direction=\"in\" type=\"v\"/>\n"        \
-        "  </method>\n"                                                 \
-        "  <signal name=\"PropertiesChanged\">\n"                       \
-        "   <arg type=\"s\" name=\"interface\"/>\n"                     \
-        "   <arg type=\"a{sv}\" name=\"changed_properties\"/>\n"        \
-        "   <arg type=\"as\" name=\"invalidated_properties\"/>\n"       \
-        "  </signal>\n"                                                 \
-        " </interface>\n"
-
-#define BUS_INTROSPECT_INTERFACE_OBJECT_MANAGER                      \
-        " <interface name=\"org.freedesktop.DBus.ObjectManager\">\n"    \
-        "  <method name=\"GetManagedObjects\">\n"                       \
-        "   <arg type=\"a{oa{sa{sv}}}\" name=\"object_paths_interfaces_and_properties\" direction=\"out\"/>\n" \
-        "  </method>\n"                                                 \
-        "  <signal name=\"InterfacesAdded\">\n"                         \
-        "   <arg type=\"o\" name=\"object_path\"/>\n"                   \
-        "   <arg type=\"a{sa{sv}}\" name=\"interfaces_and_properties\"/>\n" \
-        "  </signal>\n"                                                 \
-        "  <signal name=\"InterfacesRemoved\">\n"                       \
-        "   <arg type=\"o\" name=\"object_path\"/>\n"                   \
-        "   <arg type=\"as\" name=\"interfaces\"/>\n"                   \
-        "  </signal>\n"                                                 \
-        " </interface>\n"

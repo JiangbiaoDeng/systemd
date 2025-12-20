@@ -1,65 +1,41 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <sys/stat.h>
 
-  Copyright 2011 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-
-#include "libudev.h"
-#include "sd-bus.h"
-#include "sd-event.h"
-
-#include "hashmap.h"
+#include "calendarspec.h"
 #include "list.h"
-#include "set.h"
-
-typedef struct Manager Manager;
-
 #include "logind-action.h"
-#include "logind-button.h"
-#include "logind-device.h"
-#include "logind-inhibit.h"
+#include "logind-forward.h"
 
-struct Manager {
+typedef struct Manager {
         sd_event *event;
         sd_bus *bus;
 
         Hashmap *devices;
         Hashmap *seats;
         Hashmap *sessions;
-        Hashmap *users;
+        Hashmap *sessions_by_leader;
+        Hashmap *users;  /* indexed by UID */
         Hashmap *inhibitors;
         Hashmap *buttons;
+        Hashmap *brightness_writers;
 
         LIST_HEAD(Seat, seat_gc_queue);
         LIST_HEAD(Session, session_gc_queue);
         LIST_HEAD(User, user_gc_queue);
 
-        struct udev *udev;
-        struct udev_monitor *udev_seat_monitor, *udev_device_monitor, *udev_vcsa_monitor, *udev_button_monitor;
+        sd_device_monitor *device_seat_monitor;
+        sd_device_monitor *device_monitor;
+        sd_device_monitor *device_vcsa_monitor;
+        sd_device_monitor *device_button_monitor;
+        sd_device_monitor *device_uaccess_monitor;
 
         sd_event_source *console_active_event_source;
-        sd_event_source *udev_seat_event_source;
-        sd_event_source *udev_device_event_source;
-        sd_event_source *udev_vcsa_event_source;
-        sd_event_source *udev_button_event_source;
+
+#if ENABLE_UTMP
+        sd_event_source *utmp_event_source;
+#endif
 
         int console_active_fd;
 
@@ -73,29 +49,24 @@ struct Manager {
         char **kill_only_users, **kill_exclude_users;
         bool kill_user_processes;
 
-        unsigned long session_counter;
-        unsigned long inhibit_counter;
+        uint64_t session_counter;
+        uint64_t inhibit_counter;
 
         Hashmap *session_units;
         Hashmap *user_units;
 
         usec_t inhibit_delay_max;
+        usec_t user_stop_delay;
 
-        /* If an action is currently being executed or is delayed,
-         * this is != 0 and encodes what is being done */
-        InhibitWhat action_what;
+        /* If a shutdown/suspend was delayed due to an inhibitor this contains the action we are supposed to
+         * start after the delay is over */
+        const HandleActionData *delayed_action;
 
-        /* If a shutdown/suspend was delayed due to a inhibitor this
-           contains the unit name we are supposed to start after the
-           delay is over */
-        const char *action_unit;
-
-        /* If a shutdown/suspend is currently executed, then this is
-         * the job of it */
+        /* If a shutdown/suspend is currently executed, then this is the job of it */
         char *action_job;
         sd_event_source *inhibit_timeout_source;
 
-        char *scheduled_shutdown_type;
+        HandleAction scheduled_shutdown_action;
         usec_t scheduled_shutdown_timeout;
         sd_event_source *scheduled_shutdown_timeout_source;
         uid_t scheduled_shutdown_uid;
@@ -104,7 +75,7 @@ struct Manager {
         bool unlink_nologin;
 
         char *wall_message;
-        unsigned enable_wall_messages;
+        bool wall_messages;
         sd_event_source *wall_message_timeout_source;
 
         bool shutdown_dry_run;
@@ -113,10 +84,22 @@ struct Manager {
         usec_t idle_action_usec;
         usec_t idle_action_not_before_usec;
         HandleAction idle_action;
+        bool was_idle;
+
+        usec_t stop_idle_session_usec;
+
+        HandleActionSleepMask handle_action_sleep_mask;
 
         HandleAction handle_power_key;
+        HandleAction handle_power_key_long_press;
+        HandleAction handle_reboot_key;
+        HandleAction handle_reboot_key_long_press;
         HandleAction handle_suspend_key;
+        HandleAction handle_suspend_key_long_press;
         HandleAction handle_hibernate_key;
+        HandleAction handle_hibernate_key_long_press;
+        HandleAction handle_secure_attention_key;
+
         HandleAction handle_lid_switch;
         HandleAction handle_lid_switch_ep;
         HandleAction handle_lid_switch_docked;
@@ -125,6 +108,7 @@ struct Manager {
         bool suspend_key_ignore_inhibited;
         bool hibernate_key_ignore_inhibited;
         bool lid_switch_ignore_inhibited;
+        bool reboot_key_ignore_inhibited;
 
         bool remove_ipc;
 
@@ -133,72 +117,68 @@ struct Manager {
         usec_t holdoff_timeout_usec;
         sd_event_source *lid_switch_ignore_event_source;
 
-        size_t runtime_dir_size;
-        uint64_t user_tasks_max;
+        sd_event_source *power_key_long_press_event_source;
+        sd_event_source *reboot_key_long_press_event_source;
+        sd_event_source *suspend_key_long_press_event_source;
+        sd_event_source *hibernate_key_long_press_event_source;
+
+        uint64_t runtime_dir_size;
+        uint64_t runtime_dir_inodes;
         uint64_t sessions_max;
         uint64_t inhibitors_max;
-};
 
-int manager_add_device(Manager *m, const char *sysfs, bool master, Device **_device);
-int manager_add_button(Manager *m, const char *name, Button **_button);
-int manager_add_seat(Manager *m, const char *id, Seat **_seat);
-int manager_add_session(Manager *m, const char *id, Session **_session);
-int manager_add_user(Manager *m, uid_t uid, gid_t gid, const char *name, User **_user);
-int manager_add_user_by_name(Manager *m, const char *name, User **_user);
-int manager_add_user_by_uid(Manager *m, uid_t uid, User **_user);
-int manager_add_inhibitor(Manager *m, const char* id, Inhibitor **_inhibitor);
+        char **efi_boot_loader_entries;
+        bool efi_boot_loader_entries_set;
 
-int manager_process_seat_device(Manager *m, struct udev_device *d);
-int manager_process_button_device(Manager *m, struct udev_device *d);
+        char *efi_loader_entry_one_shot;
+        struct stat efi_loader_entry_one_shot_stat;
 
-int manager_spawn_autovt(Manager *m, unsigned int vtnr);
+        CalendarSpec *maintenance_time;
+
+        dual_timestamp init_ts;
+
+        sd_varlink_server *varlink_server;
+} Manager;
+
+void manager_reset_config(Manager *m);
+int manager_parse_config_file(Manager *m);
+
+int manager_add_device(Manager *m, const char *sysfs, bool master, Device **ret_device);
+int manager_add_button(Manager *m, const char *name, Button **ret_button);
+int manager_add_seat(Manager *m, const char *id, Seat **ret_seat);
+int manager_add_session(Manager *m, const char *id, Session **ret_session);
+int manager_add_user(Manager *m, UserRecord *ur, User **ret_user);
+int manager_add_user_by_name(Manager *m, const char *name, User **ret_user);
+int manager_add_user_by_uid(Manager *m, uid_t uid, User **ret_user);
+int manager_add_inhibitor(Manager *m, const char* id, Inhibitor **ret_inhibitor);
+
+int manager_process_seat_device(Manager *m, sd_device *d);
+int manager_process_button_device(Manager *m, sd_device *d, Button **ret_button);
+
+int manager_spawn_autovt(Manager *m, unsigned vtnr);
 
 bool manager_shall_kill(Manager *m, const char *user);
 
 int manager_get_idle_hint(Manager *m, dual_timestamp *t);
 
-int manager_get_user_by_pid(Manager *m, pid_t pid, User **user);
-int manager_get_session_by_pid(Manager *m, pid_t pid, Session **session);
+int manager_get_user_by_pid(Manager *m, pid_t pid, User **ret);
+int manager_get_session_by_pidref(Manager *m, const PidRef *pid, Session **ret);
+int manager_get_session_by_leader(Manager *m, const PidRef *pid, Session **ret);
 
+bool manager_is_lid_closed(Manager *m);
 bool manager_is_docked_or_external_displays(Manager *m);
 bool manager_is_on_external_power(void);
 bool manager_all_buttons_ignored(Manager *m);
 
-extern const sd_bus_vtable manager_vtable[];
-
-int match_job_removed(sd_bus_message *message, void *userdata, sd_bus_error *error);
-int match_unit_removed(sd_bus_message *message, void *userdata, sd_bus_error *error);
-int match_properties_changed(sd_bus_message *message, void *userdata, sd_bus_error *error);
-int match_reloading(sd_bus_message *message, void *userdata, sd_bus_error *error);
-int match_name_owner_changed(sd_bus_message *message, void *userdata, sd_bus_error *error);
-
-int bus_manager_shutdown_or_sleep_now_or_later(Manager *m, const char *unit_name, InhibitWhat w, sd_bus_error *error);
-
-int manager_send_changed(Manager *manager, const char *property, ...) _sentinel_;
-
-int manager_start_slice(Manager *manager, const char *slice, const char *description, const char *after, const char *after2, uint64_t tasks_max, sd_bus_error *error, char **job);
-int manager_start_scope(Manager *manager, const char *scope, pid_t pid, const char *slice, const char *description, const char *after, const char *after2, uint64_t tasks_max, sd_bus_error *error, char **job);
-int manager_start_unit(Manager *manager, const char *unit, sd_bus_error *error, char **job);
-int manager_stop_unit(Manager *manager, const char *unit, sd_bus_error *error, char **job);
-int manager_abandon_scope(Manager *manager, const char *scope, sd_bus_error *error);
-int manager_kill_unit(Manager *manager, const char *unit, KillWho who, int signo, sd_bus_error *error);
-int manager_unit_is_active(Manager *manager, const char *unit);
-int manager_job_is_active(Manager *manager, const char *path);
-
 /* gperf lookup function */
-const struct ConfigPerfItem* logind_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
+const struct ConfigPerfItem* logind_gperf_lookup(const char *str, GPERF_LEN_TYPE length);
 
 int manager_set_lid_switch_ignore(Manager *m, usec_t until);
 
-int config_parse_n_autovts(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_tmpfs_size(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_user_tasks_max(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-
-int manager_get_session_from_creds(Manager *m, sd_bus_message *message, const char *name, sd_bus_error *error, Session **ret);
-int manager_get_user_from_creds(Manager *m, sd_bus_message *message, uid_t uid, sd_bus_error *error, User **ret);
-int manager_get_seat_from_creds(Manager *m, sd_bus_message *message, const char *name, sd_bus_error *error, Seat **ret);
+CONFIG_PARSER_PROTOTYPE(config_parse_n_autovts);
+CONFIG_PARSER_PROTOTYPE(config_parse_tmpfs_size);
 
 int manager_setup_wall_message_timer(Manager *m);
-bool logind_wall_tty_filter(const char *tty, void *userdata);
+bool logind_wall_tty_filter(const char *tty, bool is_local, void *userdata);
 
-int manager_dispatch_delayed(Manager *manager, bool timeout);
+int manager_read_efi_boot_loader_entries(Manager *m);

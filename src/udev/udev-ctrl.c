@@ -1,462 +1,362 @@
-/* SPDX-License-Identifier: LGPL-2.1+
- *
- * libudev - interface to udev device information
- *
- * Copyright (C) 2008 Kay Sievers <kay@vrfy.org>
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <poll.h>
-#include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "sd-event.h"
+
 #include "alloc-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "iovec-util.h"
+#include "log.h"
 #include "socket-util.h"
-#include "udev.h"
+#include "strxcpyx.h"
+#include "udev-ctrl.h"
 
 /* wire protocol magic must match */
 #define UDEV_CTRL_MAGIC                                0xdead1dea
 
-enum udev_ctrl_msg_type {
-        UDEV_CTRL_UNKNOWN,
-        UDEV_CTRL_SET_LOG_LEVEL,
-        UDEV_CTRL_STOP_EXEC_QUEUE,
-        UDEV_CTRL_START_EXEC_QUEUE,
-        UDEV_CTRL_RELOAD,
-        UDEV_CTRL_SET_ENV,
-        UDEV_CTRL_SET_CHILDREN_MAX,
-        UDEV_CTRL_PING,
-        UDEV_CTRL_EXIT,
-};
-
-struct udev_ctrl_msg_wire {
+typedef struct UdevCtrlMessageWire {
         char version[16];
-        unsigned int magic;
-        enum udev_ctrl_msg_type type;
-        union {
-                int intval;
-                char buf[256];
-        };
-};
+        unsigned magic;
+        UdevCtrlMessageType type;
+        UdevCtrlMessageValue value;
+} UdevCtrlMessageWire;
 
-struct udev_ctrl_msg {
-        int refcount;
-        struct udev_ctrl_connection *conn;
-        struct udev_ctrl_msg_wire ctrl_msg_wire;
-};
-
-struct udev_ctrl {
-        int refcount;
-        struct udev *udev;
+struct UdevCtrl {
+        unsigned n_ref;
         int sock;
+        int sock_connect;
         union sockaddr_union saddr;
         socklen_t addrlen;
         bool bound;
-        bool cleanup_socket;
         bool connected;
+        sd_event *event;
+        sd_event_source *event_source;
+        sd_event_source *event_source_connect;
+        udev_ctrl_handler_t callback;
+        void *userdata;
 };
 
-struct udev_ctrl_connection {
-        int refcount;
-        struct udev_ctrl *uctrl;
-        int sock;
-};
-
-struct udev_ctrl *udev_ctrl_new_from_fd(struct udev *udev, int fd) {
-        struct udev_ctrl *uctrl;
-        const int on = 1;
+int udev_ctrl_new_from_fd(UdevCtrl **ret, int fd) {
+        _cleanup_close_ int sock = -EBADF;
+        UdevCtrl *uctrl;
         int r;
 
-        uctrl = new0(struct udev_ctrl, 1);
-        if (uctrl == NULL)
-                return NULL;
-        uctrl->refcount = 1;
-        uctrl->udev = udev;
+        assert(ret);
 
         if (fd < 0) {
-                uctrl->sock = socket(AF_LOCAL, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
-                if (uctrl->sock < 0) {
-                        log_error_errno(errno, "error getting socket: %m");
-                        udev_ctrl_unref(uctrl);
-                        return NULL;
-                }
-        } else {
-                uctrl->bound = true;
-                uctrl->sock = fd;
-        }
-
-        /*
-         * FIXME: remove it as soon as we can depend on this:
-         *   http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=90c6bd34f884cd9cee21f1d152baf6c18bcac949
-         */
-        r = setsockopt(uctrl->sock, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on));
-        if (r < 0)
-                log_warning_errno(errno, "could not set SO_PASSCRED: %m");
-
-        uctrl->saddr.un.sun_family = AF_LOCAL;
-        strscpy(uctrl->saddr.un.sun_path, sizeof(uctrl->saddr.un.sun_path), "/run/udev/control");
-        uctrl->addrlen = SOCKADDR_UN_LEN(uctrl->saddr.un);
-        return uctrl;
-}
-
-struct udev_ctrl *udev_ctrl_new(struct udev *udev) {
-        return udev_ctrl_new_from_fd(udev, -1);
-}
-
-int udev_ctrl_enable_receiving(struct udev_ctrl *uctrl) {
-        int err;
-
-        if (!uctrl->bound) {
-                err = bind(uctrl->sock, &uctrl->saddr.sa, uctrl->addrlen);
-                if (err < 0 && errno == EADDRINUSE) {
-                        unlink(uctrl->saddr.un.sun_path);
-                        err = bind(uctrl->sock, &uctrl->saddr.sa, uctrl->addrlen);
-                }
-
-                if (err < 0)
-                        return log_error_errno(errno, "bind failed: %m");
-
-                err = listen(uctrl->sock, 0);
-                if (err < 0)
-                        return log_error_errno(errno, "listen failed: %m");
-
-                uctrl->bound = true;
-                uctrl->cleanup_socket = true;
-        }
-        return 0;
-}
-
-struct udev *udev_ctrl_get_udev(struct udev_ctrl *uctrl) {
-        return uctrl->udev;
-}
-
-static struct udev_ctrl *udev_ctrl_ref(struct udev_ctrl *uctrl) {
-        if (uctrl)
-                uctrl->refcount++;
-
-        return uctrl;
-}
-
-struct udev_ctrl *udev_ctrl_unref(struct udev_ctrl *uctrl) {
-        if (uctrl && -- uctrl->refcount == 0) {
-                if (uctrl->sock >= 0)
-                        close(uctrl->sock);
-                free(uctrl);
-        }
-
-        return NULL;
-}
-
-int udev_ctrl_cleanup(struct udev_ctrl *uctrl) {
-        if (uctrl == NULL)
-                return 0;
-        if (uctrl->cleanup_socket)
-                unlink(uctrl->saddr.un.sun_path);
-        return 0;
-}
-
-int udev_ctrl_get_fd(struct udev_ctrl *uctrl) {
-        if (uctrl == NULL)
-                return -EINVAL;
-        return uctrl->sock;
-}
-
-struct udev_ctrl_connection *udev_ctrl_get_connection(struct udev_ctrl *uctrl) {
-        struct udev_ctrl_connection *conn;
-        struct ucred ucred = {};
-        const int on = 1;
-        int r;
-
-        conn = new(struct udev_ctrl_connection, 1);
-        if (conn == NULL)
-                return NULL;
-        conn->refcount = 1;
-        conn->uctrl = uctrl;
-
-        conn->sock = accept4(uctrl->sock, NULL, NULL, SOCK_CLOEXEC|SOCK_NONBLOCK);
-        if (conn->sock < 0) {
-                if (errno != EINTR)
-                        log_error_errno(errno, "unable to receive ctrl connection: %m");
-                goto err;
-        }
-
-        /* check peer credential of connection */
-        r = getpeercred(conn->sock, &ucred);
-        if (r < 0) {
-                log_error_errno(r, "unable to receive credentials of ctrl connection: %m");
-                goto err;
-        }
-        if (ucred.uid > 0) {
-                log_error("sender uid="UID_FMT", message ignored", ucred.uid);
-                goto err;
+                sock = socket(AF_UNIX, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
+                if (sock < 0)
+                        return log_error_errno(errno, "Failed to create socket: %m");
         }
 
         /* enable receiving of the sender credentials in the messages */
-        r = setsockopt(conn->sock, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on));
+        r = setsockopt_int(fd >= 0 ? fd : sock, SOL_SOCKET, SO_PASSCRED, true);
         if (r < 0)
-                log_warning_errno(errno, "could not set SO_PASSCRED: %m");
+                log_warning_errno(r, "Failed to set SO_PASSCRED, ignoring: %m");
 
-        udev_ctrl_ref(uctrl);
-        return conn;
-err:
-        if (conn->sock >= 0)
-                close(conn->sock);
-        return mfree(conn);
+        r = setsockopt_int(fd >= 0 ? fd : sock, SOL_SOCKET, SO_PASSRIGHTS, false);
+        if (r < 0)
+                log_debug_errno(r, "Failed to turn off SO_PASSRIGHTS, ignoring: %m");
+
+        uctrl = new(UdevCtrl, 1);
+        if (!uctrl)
+                return -ENOMEM;
+
+        *uctrl = (UdevCtrl) {
+                .n_ref = 1,
+                .sock = fd >= 0 ? fd : TAKE_FD(sock),
+                .sock_connect = -EBADF,
+                .bound = fd >= 0,
+        };
+
+        uctrl->saddr.un = (struct sockaddr_un) {
+                .sun_family = AF_UNIX,
+                .sun_path = "/run/udev/control",
+        };
+
+        uctrl->addrlen = sockaddr_un_len(&uctrl->saddr.un);
+
+        *ret = TAKE_PTR(uctrl);
+        return 0;
 }
 
-struct udev_ctrl_connection *udev_ctrl_connection_ref(struct udev_ctrl_connection *conn) {
-        if (conn == NULL)
-                return NULL;
-        conn->refcount++;
-        return conn;
+int udev_ctrl_enable_receiving(UdevCtrl *uctrl) {
+        assert(uctrl);
+
+        if (uctrl->bound)
+                return 0;
+
+        (void) sockaddr_un_unlink(&uctrl->saddr.un);
+        if (bind(uctrl->sock, &uctrl->saddr.sa, uctrl->addrlen) < 0)
+                return log_error_errno(errno, "Failed to bind udev control socket: %m");
+
+        if (listen(uctrl->sock, 0) < 0)
+                return log_error_errno(errno, "Failed to listen udev control socket: %m");
+
+        uctrl->bound = true;
+        return 0;
 }
 
-struct udev_ctrl_connection *udev_ctrl_connection_unref(struct udev_ctrl_connection *conn) {
-        if (conn && -- conn->refcount == 0) {
-                if (conn->sock >= 0)
-                        close(conn->sock);
+static void udev_ctrl_disconnect(UdevCtrl *uctrl) {
+        if (!uctrl)
+                return;
 
-                udev_ctrl_unref(conn->uctrl);
+        uctrl->event_source_connect = sd_event_source_unref(uctrl->event_source_connect);
+        uctrl->sock_connect = safe_close(uctrl->sock_connect);
+}
 
-                free(conn);
+static UdevCtrl *udev_ctrl_free(UdevCtrl *uctrl) {
+        assert(uctrl);
+
+        udev_ctrl_disconnect(uctrl);
+
+        sd_event_source_unref(uctrl->event_source);
+        safe_close(uctrl->sock);
+
+        sd_event_unref(uctrl->event);
+        return mfree(uctrl);
+}
+
+DEFINE_TRIVIAL_REF_UNREF_FUNC(UdevCtrl, udev_ctrl, udev_ctrl_free);
+
+int udev_ctrl_attach_event(UdevCtrl *uctrl, sd_event *event) {
+        int r;
+
+        assert_return(uctrl, -EINVAL);
+        assert_return(!uctrl->event, -EBUSY);
+
+        if (event)
+                uctrl->event = sd_event_ref(event);
+        else {
+                r = sd_event_default(&uctrl->event);
+                if (r < 0)
+                        return r;
         }
 
-        return NULL;
+        return 0;
 }
 
-static int ctrl_send(struct udev_ctrl *uctrl, enum udev_ctrl_msg_type type, int intval, const char *buf, int timeout) {
-        struct udev_ctrl_msg_wire ctrl_msg_wire;
-        int err = 0;
+sd_event_source *udev_ctrl_get_event_source(UdevCtrl *uctrl) {
+        assert(uctrl);
 
-        memzero(&ctrl_msg_wire, sizeof(struct udev_ctrl_msg_wire));
-        strcpy(ctrl_msg_wire.version, "udev-" PACKAGE_VERSION);
-        ctrl_msg_wire.magic = UDEV_CTRL_MAGIC;
-        ctrl_msg_wire.type = type;
-
-        if (buf != NULL)
-                strscpy(ctrl_msg_wire.buf, sizeof(ctrl_msg_wire.buf), buf);
-        else
-                ctrl_msg_wire.intval = intval;
-
-        if (!uctrl->connected) {
-                if (connect(uctrl->sock, &uctrl->saddr.sa, uctrl->addrlen) < 0) {
-                        err = -errno;
-                        goto out;
-                }
-                uctrl->connected = true;
-        }
-        if (send(uctrl->sock, &ctrl_msg_wire, sizeof(ctrl_msg_wire), 0) < 0) {
-                err = -errno;
-                goto out;
-        }
-
-        /* wait for peer message handling or disconnect */
-        for (;;) {
-                struct pollfd pfd[1];
-                int r;
-
-                pfd[0].fd = uctrl->sock;
-                pfd[0].events = POLLIN;
-                r = poll(pfd, 1, timeout * MSEC_PER_SEC);
-                if (r  < 0) {
-                        if (errno == EINTR)
-                                continue;
-                        err = -errno;
-                        break;
-                }
-
-                if (r > 0 && pfd[0].revents & POLLERR) {
-                        err = -EIO;
-                        break;
-                }
-
-                if (r == 0)
-                        err = -ETIMEDOUT;
-                break;
-        }
-out:
-        return err;
+        return uctrl->event_source;
 }
 
-int udev_ctrl_send_set_log_level(struct udev_ctrl *uctrl, int priority, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_SET_LOG_LEVEL, priority, NULL, timeout);
+static void udev_ctrl_disconnect_and_listen_again(UdevCtrl *uctrl) {
+        udev_ctrl_disconnect(uctrl);
+        udev_ctrl_unref(uctrl);
+        (void) sd_event_source_set_enabled(uctrl->event_source, SD_EVENT_ON);
+        /* We don't return NULL here because uctrl is not freed */
 }
 
-int udev_ctrl_send_stop_exec_queue(struct udev_ctrl *uctrl, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_STOP_EXEC_QUEUE, 0, NULL, timeout);
-}
+DEFINE_TRIVIAL_CLEANUP_FUNC_FULL(UdevCtrl*, udev_ctrl_disconnect_and_listen_again, NULL);
 
-int udev_ctrl_send_start_exec_queue(struct udev_ctrl *uctrl, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_START_EXEC_QUEUE, 0, NULL, timeout);
-}
-
-int udev_ctrl_send_reload(struct udev_ctrl *uctrl, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_RELOAD, 0, NULL, timeout);
-}
-
-int udev_ctrl_send_set_env(struct udev_ctrl *uctrl, const char *key, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_SET_ENV, 0, key, timeout);
-}
-
-int udev_ctrl_send_set_children_max(struct udev_ctrl *uctrl, int count, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_SET_CHILDREN_MAX, count, NULL, timeout);
-}
-
-int udev_ctrl_send_ping(struct udev_ctrl *uctrl, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_PING, 0, NULL, timeout);
-}
-
-int udev_ctrl_send_exit(struct udev_ctrl *uctrl, int timeout) {
-        return ctrl_send(uctrl, UDEV_CTRL_EXIT, 0, NULL, timeout);
-}
-
-struct udev_ctrl_msg *udev_ctrl_receive_msg(struct udev_ctrl_connection *conn) {
-        struct udev_ctrl_msg *uctrl_msg;
-        ssize_t size;
-        struct cmsghdr *cmsg;
-        struct iovec iov;
-        char cred_msg[CMSG_SPACE(sizeof(struct ucred))];
+static int udev_ctrl_connection_event_handler(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
+        _cleanup_(udev_ctrl_disconnect_and_listen_againp) UdevCtrl *uctrl = NULL;
+        UdevCtrlMessageWire msg_wire;
+        struct iovec iov = IOVEC_MAKE(&msg_wire, sizeof(UdevCtrlMessageWire));
+        CMSG_BUFFER_TYPE(CMSG_SPACE(sizeof(struct ucred))) control;
         struct msghdr smsg = {
                 .msg_iov = &iov,
                 .msg_iovlen = 1,
-                .msg_control = cred_msg,
-                .msg_controllen = sizeof(cred_msg),
+                .msg_control = &control,
+                .msg_controllen = sizeof(control),
         };
         struct ucred *cred;
+        ssize_t size;
 
-        uctrl_msg = new0(struct udev_ctrl_msg, 1);
-        if (uctrl_msg == NULL)
-                return NULL;
-        uctrl_msg->refcount = 1;
-        uctrl_msg->conn = conn;
-        udev_ctrl_connection_ref(conn);
+        assert(userdata);
 
-        /* wait for the incoming message */
-        for (;;) {
-                struct pollfd pfd[1];
-                int r;
+        /* When UDEV_CTRL_EXIT is received, manager unref udev_ctrl object.
+         * To avoid the object freed, let's increment the refcount. */
+        uctrl = udev_ctrl_ref(userdata);
 
-                pfd[0].fd = conn->sock;
-                pfd[0].events = POLLIN;
-
-                r = poll(pfd, 1, 10000);
-                if (r  < 0) {
-                        if (errno == EINTR)
-                                continue;
-                        goto err;
-                } else if (r == 0) {
-                        log_error("timeout waiting for ctrl message");
-                        goto err;
-                } else {
-                        if (!(pfd[0].revents & POLLIN)) {
-                                log_error_errno(errno, "ctrl connection error: %m");
-                                goto err;
-                        }
-                }
-
-                break;
+        size = recvmsg_safe(fd, &smsg, 0);
+        if (ERRNO_IS_NEG_TRANSIENT(size))
+                return 0;
+        if (size == -ECHRNG) {
+                log_warning_errno(size, "Got message with truncated control data (unexpected fds sent?), ignoring.");
+                return 0;
         }
-
-        iov.iov_base = &uctrl_msg->ctrl_msg_wire;
-        iov.iov_len = sizeof(struct udev_ctrl_msg_wire);
-
-        size = recvmsg(conn->sock, &smsg, 0);
-        if (size <  0) {
-                log_error_errno(errno, "unable to receive ctrl message: %m");
-                goto err;
+        if (size == -EXFULL) {
+                log_warning_errno(size, "Got message with truncated payload data, ignoring.");
+                return 0;
         }
+        if (size < 0)
+                return log_error_errno(size, "Failed to receive ctrl message: %m");
 
         cmsg_close_all(&smsg);
 
-        cmsg = CMSG_FIRSTHDR(&smsg);
-
-        if (cmsg == NULL || cmsg->cmsg_type != SCM_CREDENTIALS) {
-                log_error("no sender credentials received, message ignored");
-                goto err;
+        if (size != sizeof(msg_wire)) {
+                log_warning("Received message with invalid length, ignoring");
+                return 0;
         }
 
-        cred = (struct ucred *) CMSG_DATA(cmsg);
+        cred = CMSG_FIND_DATA(&smsg, SOL_SOCKET, SCM_CREDENTIALS, struct ucred);
+        if (!cred) {
+                log_warning("No sender credentials received, ignoring message");
+                return 0;
+        }
 
         if (cred->uid != 0) {
-                log_error("sender uid="UID_FMT", message ignored", cred->uid);
-                goto err;
+                log_warning("Invalid sender uid "UID_FMT", ignoring message", cred->uid);
+                return 0;
         }
 
-        if (uctrl_msg->ctrl_msg_wire.magic != UDEV_CTRL_MAGIC) {
-                log_error("message magic 0x%08x doesn't match, ignore it", uctrl_msg->ctrl_msg_wire.magic);
-                goto err;
+        if (msg_wire.magic != UDEV_CTRL_MAGIC) {
+                log_warning("Message magic 0x%08x doesn't match, ignoring message", msg_wire.magic);
+                return 0;
         }
 
-        return uctrl_msg;
-err:
-        udev_ctrl_msg_unref(uctrl_msg);
-        return NULL;
+        if (msg_wire.type == _UDEV_CTRL_END_MESSAGES)
+                return 0;
+
+        if (uctrl->callback)
+                (void) uctrl->callback(uctrl, msg_wire.type, &msg_wire.value, uctrl->userdata);
+
+        /* Do not disconnect and wait for next message. */
+        uctrl = udev_ctrl_unref(uctrl);
+        return 0;
 }
 
-struct udev_ctrl_msg *udev_ctrl_msg_unref(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg && -- ctrl_msg->refcount == 0) {
-                udev_ctrl_connection_unref(ctrl_msg->conn);
-                free(ctrl_msg);
+static int udev_ctrl_event_handler(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
+        UdevCtrl *uctrl = ASSERT_PTR(userdata);
+        _cleanup_close_ int sock = -EBADF;
+        struct ucred ucred;
+        int r;
+
+        sock = accept4(fd, NULL, NULL, SOCK_CLOEXEC|SOCK_NONBLOCK);
+        if (sock < 0) {
+                if (ERRNO_IS_ACCEPT_AGAIN(errno))
+                        return 0;
+
+                return log_error_errno(errno, "Failed to accept ctrl connection: %m");
         }
 
-        return NULL;
+        /* check peer credential of connection */
+        r = getpeercred(sock, &ucred);
+        if (r < 0) {
+                log_error_errno(r, "Failed to receive credentials of ctrl connection: %m");
+                return 0;
+        }
+
+        if (ucred.uid > 0) {
+                log_error("Invalid sender uid "UID_FMT", closing connection", ucred.uid);
+                return 0;
+        }
+
+        r = sd_event_add_io(uctrl->event, &uctrl->event_source_connect, sock, EPOLLIN, udev_ctrl_connection_event_handler, uctrl);
+        if (r < 0) {
+                log_error_errno(r, "Failed to create event source for udev control connection: %m");
+                return 0;
+        }
+
+        (void) sd_event_source_set_description(uctrl->event_source_connect, "udev-ctrl-connection");
+
+        /* Do not accept multiple connection. */
+        (void) sd_event_source_set_enabled(uctrl->event_source, SD_EVENT_OFF);
+
+        uctrl->sock_connect = TAKE_FD(sock);
+        return 0;
 }
 
-int udev_ctrl_get_set_log_level(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_SET_LOG_LEVEL)
-                return ctrl_msg->ctrl_msg_wire.intval;
-        return -1;
+int udev_ctrl_start(UdevCtrl *uctrl, udev_ctrl_handler_t callback, void *userdata) {
+        int r;
+
+        assert(uctrl);
+
+        if (!uctrl->event) {
+                r = udev_ctrl_attach_event(uctrl, NULL);
+                if (r < 0)
+                        return r;
+        }
+
+        r = udev_ctrl_enable_receiving(uctrl);
+        if (r < 0)
+                return r;
+
+        uctrl->callback = callback;
+        uctrl->userdata = userdata;
+
+        r = sd_event_add_io(uctrl->event, &uctrl->event_source, uctrl->sock, EPOLLIN, udev_ctrl_event_handler, uctrl);
+        if (r < 0)
+                return r;
+
+        (void) sd_event_source_set_description(uctrl->event_source, "udev-ctrl");
+
+        return 0;
 }
 
-int udev_ctrl_get_stop_exec_queue(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_STOP_EXEC_QUEUE)
-                return 1;
-        return -1;
+int udev_ctrl_send(UdevCtrl *uctrl, UdevCtrlMessageType type, const void *data) {
+        UdevCtrlMessageWire ctrl_msg_wire = {
+                .version = "udev-" PROJECT_VERSION_STR,
+                .magic = UDEV_CTRL_MAGIC,
+                .type = type,
+        };
+
+        if (type == UDEV_CTRL_SET_ENV) {
+                assert(data);
+                strscpy(ctrl_msg_wire.value.buf, sizeof(ctrl_msg_wire.value.buf), data);
+        } else if (IN_SET(type, UDEV_CTRL_SET_LOG_LEVEL, UDEV_CTRL_SET_CHILDREN_MAX))
+                ctrl_msg_wire.value.intval = PTR_TO_INT(data);
+
+        if (!uctrl->connected) {
+                if (connect(uctrl->sock, &uctrl->saddr.sa, uctrl->addrlen) < 0)
+                        return -errno;
+                uctrl->connected = true;
+        }
+
+        if (send(uctrl->sock, &ctrl_msg_wire, sizeof(ctrl_msg_wire), 0) < 0)
+                return -errno;
+
+        return 0;
 }
 
-int udev_ctrl_get_start_exec_queue(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_START_EXEC_QUEUE)
-                return 1;
-        return -1;
-}
+int udev_ctrl_wait(UdevCtrl *uctrl, usec_t timeout) {
+        _cleanup_(sd_event_source_disable_unrefp) sd_event_source *source_io = NULL, *source_timeout = NULL;
+        int r;
 
-int udev_ctrl_get_reload(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_RELOAD)
-                return 1;
-        return -1;
-}
+        assert(uctrl);
 
-const char *udev_ctrl_get_set_env(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_SET_ENV)
-                return ctrl_msg->ctrl_msg_wire.buf;
-        return NULL;
-}
+        if (uctrl->sock < 0)
+                return 0;
+        if (!uctrl->connected)
+                return 0;
 
-int udev_ctrl_get_set_children_max(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_SET_CHILDREN_MAX)
-                return ctrl_msg->ctrl_msg_wire.intval;
-        return -1;
-}
+        r = udev_ctrl_send(uctrl, _UDEV_CTRL_END_MESSAGES, NULL);
+        if (r < 0)
+                return r;
 
-int udev_ctrl_get_ping(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_PING)
-                return 1;
-        return -1;
-}
+        if (timeout == 0)
+                return 0;
 
-int udev_ctrl_get_exit(struct udev_ctrl_msg *ctrl_msg) {
-        if (ctrl_msg->ctrl_msg_wire.type == UDEV_CTRL_EXIT)
-                return 1;
-        return -1;
+        if (!uctrl->event) {
+                r = udev_ctrl_attach_event(uctrl, NULL);
+                if (r < 0)
+                        return r;
+        }
+
+        r = sd_event_add_io(uctrl->event, &source_io, uctrl->sock, EPOLLIN, NULL, INT_TO_PTR(0));
+        if (r < 0)
+                return r;
+
+        (void) sd_event_source_set_description(source_io, "udev-ctrl-wait-io");
+
+        if (timeout != USEC_INFINITY) {
+                r = sd_event_add_time_relative(
+                                uctrl->event, &source_timeout, CLOCK_BOOTTIME,
+                                timeout,
+                                0, NULL, INT_TO_PTR(-ETIMEDOUT));
+                if (r < 0)
+                        return r;
+
+                (void) sd_event_source_set_description(source_timeout, "udev-ctrl-wait-timeout");
+        }
+
+        return sd_event_loop(uctrl->event);
 }

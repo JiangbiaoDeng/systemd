@@ -1,50 +1,39 @@
 #!/bin/sh
-# SPDX-License-Identifier: LGPL-2.1+
+# SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # Call built systemd-hwdb update on our hwdb files to ensure that they parse
 # without error
 #
 # (C) 2016 Canonical Ltd.
 # Author: Martin Pitt <martin.pitt@ubuntu.com>
-#
-# systemd is free software; you can redistribute it and/or modify it
-# under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation; either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# systemd is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
 
 set -e
 
 export SYSTEMD_LOG_LEVEL=info
-ROOTDIR=$(dirname $(dirname $(readlink -f $0)))
-SYSTEMD_HWDB=./systemd-hwdb
+export SYSTEMD_HWDB_UPDATE_BYPASS=0
+ROOTDIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
+SYSTEMD_HWDB="${1:?}"
 
 if [ ! -x "$SYSTEMD_HWDB" ]; then
-    echo "$SYSTEMD_HWDB does not exist, please build first"
+    echo "$SYSTEMD_HWDB is not executable" >&2
     exit 1
 fi
 
-D=$(mktemp --directory)
+D="$(mktemp --tmpdir --directory "hwdb-test.XXXXXXXXXX")"
+# shellcheck disable=SC2064
 trap "rm -rf '$D'" EXIT INT QUIT PIPE
 mkdir -p "$D/etc/udev"
-ln -s "$ROOTDIR/hwdb" "$D/etc/udev/hwdb.d"
+cp -a "$ROOTDIR/hwdb.d" "$D/etc/udev/hwdb.d"
 
 # Test "good" properties" — no warnings or errors allowed
 err=$("$SYSTEMD_HWDB" update --root "$D" 2>&1 >/dev/null) && rc= || rc=$?
 if [ -n "$err" ]; then
     echo "$err"
-    exit ${rc:-1}
+    exit "${rc:-1}"
 fi
 if [ -n "$rc" ]; then
     echo "$SYSTEMD_HWDB returned $rc"
-    exit $rc
+    exit "$rc"
 fi
 
 if [ ! -e "$D/etc/udev/hwdb.bin" ]; then
@@ -53,13 +42,13 @@ if [ ! -e "$D/etc/udev/hwdb.bin" ]; then
 fi
 
 # Test "bad" properties" — warnings required, errors not allowed
-rm -f "$D/etc/udev/hwdb.bin" "$D/etc/udev/hwdb.d"
+rm -rf "$D/etc/udev/hwdb.bin" "$D/etc/udev/hwdb.d"
 
-ln -s "$ROOTDIR/test/hwdb" "$D/etc/udev/hwdb.d"
+cp -a "$ROOTDIR/test/hwdb.d" "$D/etc/udev/hwdb.d"
 err=$("$SYSTEMD_HWDB" update --root "$D" 2>&1 >/dev/null) && rc= || rc=$?
 if [ -n "$rc" ]; then
     echo "$SYSTEMD_HWDB returned $rc"
-    exit $rc
+    exit "$rc"
 fi
 if [ -n "$err" ]; then
     echo "Expected warnings"

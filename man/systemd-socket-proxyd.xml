@@ -1,41 +1,14 @@
 <?xml version="1.0"?>
 <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-     "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2013 David Strauss
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 <refentry id="systemd-socket-proxyd"
     xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>systemd-socket-proxyd</title>
     <productname>systemd</productname>
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>David</firstname>
-        <surname>Strauss</surname>
-        <email>david@davidstrauss.net</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
   <refmeta>
     <refentrytitle>systemd-socket-proxyd</refentrytitle>
@@ -43,7 +16,7 @@
   </refmeta>
   <refnamediv>
     <refname>systemd-socket-proxyd</refname>
-    <refpurpose>Bidirectionally proxy local sockets to another (possibly remote) socket.</refpurpose>
+    <refpurpose>Bidirectionally proxy local sockets to another (possibly remote) socket</refpurpose>
   </refnamediv>
   <refsynopsisdiv>
     <cmdsynopsis>
@@ -77,9 +50,14 @@
     <citerefentry project='die-net'><refentrytitle>socat</refentrytitle><manvolnum>1</manvolnum></citerefentry>.
     The main differences for <command>systemd-socket-proxyd</command>
     are support for socket activation with
-    <literal>Accept=false</literal> and an event-driven
+    <literal>Accept=no</literal> and an event-driven
     design that scales better with the number of
     connections.</para>
+
+    <para>Note that <command>systemd-socket-proxyd</command> will not forward socket side channel
+    information, i.e. will not forward <constant>SCM_RIGHTS</constant>, <constant>SCM_CREDENTIALS</constant>,
+    <constant>SCM_SECURITY</constant>, <constant>SO_PEERCRED</constant>, <constant>SO_PEERPIDFD</constant>,
+    <constant>SO_PEERSEC</constant>, <constant>SO_PEERGROUPS</constant> and similar.</para>
   </refsect1>
   <refsect1>
     <title>Options</title>
@@ -92,7 +70,18 @@
         <term><option>-c</option></term>
 
         <listitem><para>Sets the maximum number of simultaneous connections, defaults to 256.
-        If the limit of concurrent connections is reached further connections will be refused.</para></listitem>
+        If the limit of concurrent connections is reached further connections will be refused.</para>
+
+        <xi:include href="version-info.xml" xpointer="v233"/></listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><option>--exit-idle-time=</option></term>
+
+        <listitem><para>Sets the time before exiting when there are no connections, defaults to
+        <constant>infinity</constant>. Takes a unit-less value in seconds, or a time span value such
+        as <literal>5min 20s</literal>.</para>
+
+        <xi:include href="version-info.xml" xpointer="v246"/></listitem>
       </varlistentry>
     </variablelist>
   </refsect1>
@@ -124,7 +113,8 @@ Requires=proxy-to-nginx.socket
 After=proxy-to-nginx.socket
 
 [Service]
-ExecStart=/usr/lib/systemd/systemd-socket-proxyd /tmp/nginx.sock
+Type=notify
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd /run/nginx/socket
 PrivateTmp=yes
 PrivateNetwork=yes]]></programlisting>
       </example>
@@ -133,7 +123,7 @@ PrivateNetwork=yes]]></programlisting>
         <programlisting>
 <![CDATA[[…]
 server {
-    listen       unix:/tmp/nginx.sock;
+    listen       unix:/run/nginx/socket;
     […]]]>
 </programlisting>
       </example>
@@ -142,6 +132,9 @@ server {
         <programlisting><![CDATA[# systemctl enable --now proxy-to-nginx.socket
 $ curl http://localhost:80/]]></programlisting>
       </example>
+      <para>If <filename>nginx.service</filename> has <varname>StopWhenUnneeded=</varname> set, then
+      passing <option>--exit-idle-time=</option> to <command>systemd-socket-proxyd</command> allows
+      both services to stop during idle periods.</para>
     </refsect2>
     <refsect2>
       <title>Namespace Example</title>
@@ -168,6 +161,7 @@ After=proxy-to-nginx.socket
 JoinsNamespaceOf=nginx.service
 
 [Service]
+Type=notify
 ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8080
 PrivateTmp=yes
 PrivateNetwork=yes]]></programlisting>
@@ -188,14 +182,14 @@ $ curl http://localhost:80/]]></programlisting>
   </refsect1>
   <refsect1>
     <title>See Also</title>
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.socket</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.service</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemctl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry project='die-net'><refentrytitle>socat</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry project='die-net'><refentrytitle>nginx</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry project='die-net'><refentrytitle>curl</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd.socket</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd.service</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemctl</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry project='die-net'><refentrytitle>socat</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry project='die-net'><refentrytitle>nginx</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry project='die-net'><refentrytitle>curl</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 </refentry>

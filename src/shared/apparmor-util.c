@@ -1,40 +1,70 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013 Lennart Poettering
+#if HAVE_APPARMOR
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stddef.h>
+#include <syslog.h>
 
 #include "alloc-util.h"
 #include "apparmor-util.h"
 #include "fileio.h"
+#include "log.h"
 #include "parse-util.h"
+
+static void *libapparmor_dl = NULL;
+
+DLSYM_PROTOTYPE(aa_change_onexec) = NULL;
+DLSYM_PROTOTYPE(aa_change_profile) = NULL;
+DLSYM_PROTOTYPE(aa_features_new_from_kernel) = NULL;
+DLSYM_PROTOTYPE(aa_features_unref) = NULL;
+DLSYM_PROTOTYPE(aa_policy_cache_dir_path_preview) = NULL;
+DLSYM_PROTOTYPE(aa_policy_cache_new) = NULL;
+DLSYM_PROTOTYPE(aa_policy_cache_replace_all) = NULL;
+DLSYM_PROTOTYPE(aa_policy_cache_unref) = NULL;
+
+int dlopen_libapparmor(void) {
+        ELF_NOTE_DLOPEN("apparmor",
+                        "Support for AppArmor policies",
+                        ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED,
+                        "libapparmor.so.1");
+
+        return dlopen_many_sym_or_warn(
+                        &libapparmor_dl,
+                        "libapparmor.so.1",
+                        LOG_DEBUG,
+                        DLSYM_ARG(aa_change_onexec),
+                        DLSYM_ARG(aa_change_profile),
+                        DLSYM_ARG(aa_features_new_from_kernel),
+                        DLSYM_ARG(aa_features_unref),
+                        DLSYM_ARG(aa_policy_cache_dir_path_preview),
+                        DLSYM_ARG(aa_policy_cache_new),
+                        DLSYM_ARG(aa_policy_cache_replace_all),
+                        DLSYM_ARG(aa_policy_cache_unref));
+}
 
 bool mac_apparmor_use(void) {
         static int cached_use = -1;
+        int r;
 
-        if (cached_use < 0) {
-                _cleanup_free_ char *p = NULL;
+        if (cached_use >= 0)
+                return cached_use;
 
-                cached_use =
-                        read_one_line_file("/sys/module/apparmor/parameters/enabled", &p) >= 0 &&
-                        parse_boolean(p) > 0;
+        _cleanup_free_ char *p = NULL;
+        r = read_one_line_file("/sys/module/apparmor/parameters/enabled", &p);
+        if (r < 0) {
+                if (r != -ENOENT)
+                        log_debug_errno(r, "Failed to read /sys/module/apparmor/parameters/enabled, assuming AppArmor is not available: %m");
+                return (cached_use = false);
         }
 
-        return cached_use;
+        r = parse_boolean(p);
+        if (r < 0)
+                log_debug_errno(r, "Failed to parse /sys/module/apparmor/parameters/enabled, assuming AppArmor is not available: %m");
+        if (r <= 0)
+                return (cached_use = false);
+
+        if (dlopen_libapparmor() < 0)
+                return (cached_use = false);
+
+        return (cached_use = true);
 }
+#endif

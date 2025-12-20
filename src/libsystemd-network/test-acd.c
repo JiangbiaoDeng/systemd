@@ -1,37 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright (C) 2014 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <errno.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-#include <linux/veth.h>
-#include <net/if.h>
+#include <net/ethernet.h>
 
 #include "sd-event.h"
 #include "sd-ipv4acd.h"
 #include "sd-netlink.h"
 
 #include "in-addr-util.h"
-#include "netlink-util.h"
-#include "util.h"
+#include "log.h"
+#include "tests.h"
 
 static void acd_handler(sd_ipv4acd *acd, int event, void *userdata) {
         assert_se(acd);
@@ -47,7 +24,7 @@ static void acd_handler(sd_ipv4acd *acd, int event, void *userdata) {
                 log_error("the client was stopped");
                 break;
         default:
-                assert_not_reached("invalid ACD event");
+                assert_not_reached();
         }
 }
 
@@ -64,7 +41,7 @@ static int client_run(int ifindex, const struct in_addr *pa, const struct ether_
 
         log_info("starting IPv4ACD client");
 
-        assert_se(sd_ipv4acd_start(acd) >= 0);
+        assert_se(sd_ipv4acd_start(acd, true) >= 0);
 
         assert_se(sd_event_loop(e) >= 0);
 
@@ -101,9 +78,7 @@ static int test_acd(const char *ifname, const char *address) {
 }
 
 int main(int argc, char *argv[]) {
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
-        log_open();
+        test_setup_logging(LOG_DEBUG);
 
         if (argc == 3)
                 return test_acd(argv[1], argv[2]);

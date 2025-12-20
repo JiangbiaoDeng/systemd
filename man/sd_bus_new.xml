@@ -1,42 +1,13 @@
-<?xml version='1.0'?> <!--*- Mode: nxml; nxml-child-indent: 2; indent-tabs-mode: nil -*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-"http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<?xml version='1.0'?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2014 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
-
-<refentry id="sd_bus_new">
+<refentry id="sd_bus_new" xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>sd_bus_new</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>A monkey with a typewriter</contrib>
-        <firstname>Zbigniew</firstname>
-        <surname>Jędrzejewski-Szmek</surname>
-        <email>zbyszek@in.waw.pl</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -49,6 +20,10 @@
     <refname>sd_bus_ref</refname>
     <refname>sd_bus_unref</refname>
     <refname>sd_bus_unrefp</refname>
+    <refname>sd_bus_close_unref</refname>
+    <refname>sd_bus_close_unrefp</refname>
+    <refname>sd_bus_flush_close_unref</refname>
+    <refname>sd_bus_flush_close_unrefp</refname>
 
     <refpurpose>Create a new bus object and create or destroy references to it</refpurpose>
   </refnamediv>
@@ -73,8 +48,28 @@
       </funcprototype>
 
       <funcprototype>
+        <funcdef>sd_bus *<function>sd_bus_close_unref</function></funcdef>
+        <paramdef>sd_bus *<parameter>bus</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>sd_bus *<function>sd_bus_flush_close_unref</function></funcdef>
+        <paramdef>sd_bus *<parameter>bus</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
         <funcdef>void <function>sd_bus_unrefp</function></funcdef>
-        <paramdef>sd_bus **<parameter>bus</parameter></paramdef>
+        <paramdef>sd_bus **<parameter>busp</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>void <function>sd_bus_close_unrefp</function></funcdef>
+        <paramdef>sd_bus **<parameter>busp</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>void <function>sd_bus_flush_close_unrefp</function></funcdef>
+        <paramdef>sd_bus **<parameter>busp</parameter></paramdef>
       </funcprototype>
     </funcsynopsis>
   </refsynopsisdiv>
@@ -92,14 +87,12 @@
     or a related call, and then start the connection with
     <citerefentry><refentrytitle>sd_bus_start</refentrytitle><manvolnum>3</manvolnum></citerefentry>.</para>
 
-    <para>In most cases, it is a better idea to invoke
+    <para>In most cases, it is better to use
     <citerefentry><refentrytitle>sd_bus_default_user</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
     <citerefentry><refentrytitle>sd_bus_default_system</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    or related calls instead of the more low-level
-    <function>sd_bus_new()</function> and
-    <function>sd_bus_start()</function>. The higher-level calls not
-    only allocate a bus object but also start the connection to a
-    well-known bus in a single function invocation.</para>
+    or related calls instead of the more low-level <function>sd_bus_new()</function> and
+    <function>sd_bus_start()</function>. The higher-level functions not only allocate a bus object but also
+    start the connection to a well-known bus in a single function call.</para>
 
     <para><function>sd_bus_ref()</function> increases the reference
     counter of <parameter>bus</parameter> by one.</para>
@@ -116,25 +109,47 @@
     pointer to an <type>sd_bus</type> object. This call is useful in
     conjunction with GCC's and LLVM's <ulink
     url="https://gcc.gnu.org/onlinedocs/gcc/Common-Variable-Attributes.html">Clean-up
-    Variable Attribute</ulink>. Note that this function is defined as
+    Variable Attribute</ulink>. Note that this function is defined as an
     inline function. Use a declaration like the following, in order to
     allocate a bus object that is freed automatically as the code
     block is left:</para>
 
     <programlisting>{
-        __attribute__((cleanup(sd_bus_unrefp)) sd_bus *bus = NULL;
-        int r;
-        …
-        r = sd_bus_default(&amp;bus);
-        if (r &lt; 0)
-                fprintf(stderr, "Failed to allocate bus: %s\n", strerror(-r));
-        …
+  __attribute__((cleanup(sd_bus_unrefp))) sd_bus *bus = NULL;
+  int r;
+  …
+  r = sd_bus_default(&amp;bus);
+  if (r &lt; 0) {
+    errno = -r;
+    fprintf(stderr, "Failed to allocate bus: %m\n");
+  }
+  …
 }</programlisting>
 
-    <para><function>sd_bus_ref()</function>,
-    <function>sd_bus_unref()</function> and
-    <function>sd_bus_unrefp()</function> execute no operation if the
-    passed in bus object is <constant>NULL</constant>.</para>
+    <para><function>sd_bus_ref()</function> and <function>sd_bus_unref()</function> execute no operation if
+    the argument is <constant>NULL</constant>. <function>sd_bus_unrefp()</function> will first dereference
+    its argument, which must not be <constant>NULL</constant>, and will execute no operation if
+    <emphasis>that</emphasis> is <constant>NULL</constant>.</para>
+
+    <para><function>sd_bus_close_unref()</function> is similar to <function>sd_bus_unref()</function>, but
+    first executes
+    <citerefentry><refentrytitle>sd_bus_close</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
+    ensuring that the connection is terminated before the reference to the connection is dropped and possibly
+    the object freed.</para>
+
+    <para><function>sd_bus_flush_close_unref()</function> is similar to <function>sd_bus_unref()</function>,
+    but first executes
+    <citerefentry><refentrytitle>sd_bus_flush</refentrytitle><manvolnum>3</manvolnum></citerefentry> as well
+    as <citerefentry><refentrytitle>sd_bus_close</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
+    ensuring that any pending messages are synchronously flushed out before the reference to the connection
+    is dropped and possibly the object freed. This call is particularly useful immediately before exiting
+    from a program as it ensures that any pending outgoing messages are written out, and unprocessed but
+    queued incoming messages released before the connection is terminated and released.</para>
+
+    <para><function>sd_bus_close_unrefp()</function> is similar to
+    <function>sd_bus_close_unref()</function>, but may be used in GCC's and LLVM's Clean-up Variable
+    Attribute, see above. Similarly, <function>sd_bus_flush_close_unrefp()</function> is similar to
+    <function>sd_bus_flush_close_unref()</function>.</para>
   </refsect1>
 
   <refsect1>
@@ -147,45 +162,50 @@
     <para><function>sd_bus_ref()</function> always returns the argument.
     </para>
 
-    <para><function>sd_bus_unref()</function> always returns
+    <para><function>sd_bus_unref()</function> and <function>sd_bus_flush_close_unref()</function> always return
     <constant>NULL</constant>.</para>
+
+    <refsect2>
+      <title>Errors</title>
+
+      <para>Returned errors may indicate the following problems:</para>
+
+      <variablelist>
+        <varlistentry>
+          <term><constant>-ENOMEM</constant></term>
+
+          <listitem><para>Memory allocation failed.</para></listitem>
+        </varlistentry>
+      </variablelist>
+    </refsect2>
   </refsect1>
 
-  <refsect1>
-    <title>Errors</title>
-
-    <para>Returned errors may indicate the following problems:</para>
-
-    <variablelist>
-      <varlistentry>
-        <term><constant>-ENOMEM</constant></term>
-
-        <listitem><para>Memory allocation failed.</para></listitem>
-      </varlistentry>
-    </variablelist>
-  </refsect1>
+  <xi:include href="libsystemd-pkgconfig.xml" />
 
   <refsect1>
-    <title>Notes</title>
-
-    <para><function>sd_bus_new()</function> and other functions
-    described here are available as a shared library, which can be
-    compiled and linked to with the
-    <constant>libsystemd</constant> <citerefentry project='die-net'><refentrytitle>pkg-config</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-    file.</para>
+    <title>History</title>
+    <para><function>sd_bus_new()</function>,
+    <function>sd_bus_ref()</function>, and
+    <function>sd_bus_unref()</function> were added in version 209.</para>
+    <para><function>sd_bus_unrefp()</function> was added in version 229.</para>
+    <para><function>sd_bus_flush_close_unref()</function> and
+    <function>sd_bus_flush_close_unrefp()</function> were added in version 240.</para>
+    <para><function>sd_bus_close_unref()</function> and
+    <function>sd_bus_close_unrefp()</function> were added in version 241.</para>
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_default_user</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_default_system</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_open_user</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_open_system</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_default_user</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_default_system</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_open_user</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_open_system</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_close</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

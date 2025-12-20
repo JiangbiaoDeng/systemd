@@ -1,41 +1,20 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "sd-bus.h"
 
 #include "bus-dump.h"
-#include "bus-util.h"
 #include "cgroup-util.h"
+#include "errno-util.h"
+#include "tests.h"
 
 int main(int argc, char *argv[]) {
         _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
         int r;
 
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
-        log_open();
+        test_setup_logging(LOG_DEBUG);
 
-        if (cg_unified_flush() == -ENOMEDIUM) {
-                log_info("Skipping test: /sys/fs/cgroup/ not available");
-                return EXIT_TEST_SKIP;
-        }
+        if (cg_is_available() <= 0)
+                return log_tests_skipped("cgroupfs v2 is not mounted");
 
         r = sd_bus_creds_new_from_pid(&creds, 0, _SD_BUS_CREDS_ALL);
         log_full_errno(r < 0 ? LOG_ERR : LOG_DEBUG, r, "sd_bus_creds_new_from_pid: %m");
@@ -46,8 +25,27 @@ int main(int argc, char *argv[]) {
         creds = sd_bus_creds_unref(creds);
 
         r = sd_bus_creds_new_from_pid(&creds, 1, _SD_BUS_CREDS_ALL);
-        if (r != -EACCES) {
+        if (!ERRNO_IS_NEG_PRIVILEGE(r)) {
                 assert_se(r >= 0);
+                putchar('\n');
+                bus_creds_dump(creds, NULL, true);
+        }
+
+        creds = sd_bus_creds_unref(creds);
+
+        _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
+        r = sd_bus_default_system(&bus);
+        if (r < 0)
+                log_warning_errno(r, "Unable to connect to system bus, skipping rest of test.");
+        else {
+                const char *unique;
+
+                assert_se(sd_bus_get_unique_name(bus, &unique) >= 0);
+
+                r = sd_bus_get_name_creds(bus, unique, _SD_BUS_CREDS_ALL, &creds);
+                log_full_errno(r < 0 ? LOG_ERR : LOG_DEBUG, r, "sd_bus_get_name_creds: %m");
+                assert_se(r >= 0);
+
                 putchar('\n');
                 bus_creds_dump(creds, NULL, true);
         }

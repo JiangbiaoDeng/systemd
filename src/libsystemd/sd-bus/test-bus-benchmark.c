@@ -1,35 +1,19 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#include <pthread.h>
+#include <sched.h>
+#include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "sd-bus.h"
 
 #include "alloc-util.h"
 #include "bus-internal.h"
-#include "bus-kernel.h"
-#include "bus-util.h"
-#include "def.h"
 #include "fd-util.h"
+#include "tests.h"
 #include "time-util.h"
-#include "util.h"
 
 #define MAX_SIZE (2*1024*1024)
 
@@ -73,7 +57,7 @@ static void server(sd_bus *b, size_t *result) {
                         return;
 
                 } else if (!sd_bus_message_is_signal(m, NULL, NULL))
-                        assert_not_reached("Unknown method");
+                        assert_not_reached();
         }
 }
 
@@ -228,15 +212,17 @@ int main(int argc, char *argv[]) {
                 MODE_CHART,
         } mode = MODE_BISECT;
         Type type = TYPE_LEGACY;
-        int i, pair[2] = { -1, -1 };
+        int i, pair[2] = EBADF_PAIR;
         _cleanup_free_ char *address = NULL, *server_name = NULL;
-        _cleanup_close_ int bus_ref = -1;
+        _cleanup_close_ int bus_ref = -EBADF;
         const char *unique;
         cpu_set_t cpuset;
         size_t result;
         sd_bus *b;
         pid_t pid;
         int r;
+
+        test_setup_logging(LOG_DEBUG);
 
         for (i = 1; i < argc; i++) {
                 if (streq(argv[i], "chart")) {

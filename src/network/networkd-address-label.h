@@ -1,59 +1,39 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <netinet/in.h>
 
-  Copyright 2017 Susant Sahani
+#include "networkd-forward.h"
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <inttypes.h>
-#include <stdbool.h>
-
-#include "in-addr-util.h"
-
-typedef struct AddressLabel AddressLabel;
-
-#include "networkd-link.h"
-#include "networkd-network.h"
-
-typedef struct Network Network;
-typedef struct Link Link;
-typedef struct NetworkConfigSection NetworkConfigSection;
-
-struct AddressLabel {
+typedef struct AddressLabel {
+        Manager *manager;
         Network *network;
-        Link *link;
-        NetworkConfigSection *section;
+        ConfigSection *section;
 
-        unsigned char prefixlen;
         uint32_t label;
+        struct in6_addr prefix;
+        unsigned char prefixlen;
+        bool prefix_set;
+} AddressLabel;
 
-        union in_addr_union in_addr;
+AddressLabel *address_label_free(AddressLabel *label);
 
-        LIST_FIELDS(AddressLabel, labels);
-};
+void network_drop_invalid_address_labels(Network *network);
+void manager_drop_invalid_address_labels(Manager *manager);
 
-int address_label_new(AddressLabel **ret);
-void address_label_free(AddressLabel *label);
+int link_request_static_address_labels(Link *link);
+int manager_request_static_address_labels(Manager *manager);
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(AddressLabel*, address_label_free);
-#define _cleanup_address_label_free_ _cleanup_(address_label_freep)
+typedef enum IPv6AddressLabelConfParserType {
+        IPV6_ADDRESS_LABEL,
+        IPV6_ADDRESS_LABEL_PREFIX,
+        _IPV6_ADDRESS_LABEL_CONF_PARSER_MAX,
+        _IPV6_ADDRESS_LABEL_CONF_PARSER_INVALID = -EINVAL,
 
-int address_label_configure(AddressLabel *address, Link *link, sd_netlink_message_handler_t callback, bool update);
+        IPV6_ADDRESS_LABEL_BY_MANAGER           = 1 << 16,
+        IPV6_ADDRESS_LABEL_SECTION_MASK         = IPV6_ADDRESS_LABEL_BY_MANAGER - 1,
+} IPv6AddressLabelConfParserType;
 
-int config_parse_address_label(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_address_label_prefix(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+assert_cc(IPV6_ADDRESS_LABEL_BY_MANAGER >= _IPV6_ADDRESS_LABEL_CONF_PARSER_MAX);
+
+CONFIG_PARSER_PROTOTYPE(config_parse_ipv6_address_label_section);

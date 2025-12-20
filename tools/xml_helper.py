@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
-#  -*- Mode: python; coding: utf-8; indent-tabs-mode: nil -*- */
-#  SPDX-License-Identifier: LGPL-2.1+
-#
-#  This file is part of systemd.
-#
-#  Copyright 2012-2013 Zbigniew Jędrzejewski-Szmek
-#
-#  systemd is free software; you can redistribute it and/or modify it
-#  under the terms of the GNU Lesser General Public License as published by
-#  the Free Software Foundation; either version 2.1 of the License, or
-#  (at your option) any later version.
-#
-#  systemd is distributed in the hope that it will be useful, but
-#  WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-#  Lesser General Public License for more details.
-#
-#  You should have received a copy of the GNU Lesser General Public License
-#  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 from lxml import etree as tree
 
+
 class CustomResolver(tree.Resolver):
-    def resolve(self, url, id, context):
+    def resolve(self, url, _id, context):
         if 'custom-entities.ent' in url:
             return self.resolve_filename('man/custom-entities.ent', context)
+        if 'ethtool-link-mode' in url:
+            return self.resolve_filename('src/shared/ethtool-link-mode.xml', context)
+        if 'bpf-delegate' in url:
+            return self.resolve_filename('src/core/bpf-delegate.xml', context)
+
+        return None
 
 _parser = tree.XMLParser()
+# pylint: disable=no-member
 _parser.resolvers.add(CustomResolver())
 
 def xml_parse(page):

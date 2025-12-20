@@ -1,103 +1,153 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
- This file is part of systemd.
+#include "sd-device.h"
 
- Copyright (C) 2013 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "libudev.h"
-
-#include "condition.h"
+#include "cpu-set-util.h"
+#include "ether-addr-util.h"
 #include "ethtool-util.h"
+#include "shared-forward.h"
 #include "list.h"
+#include "net-condition.h"
 
-typedef struct link_config_ctx link_config_ctx;
-typedef struct link_config link_config;
+typedef struct LinkConfigContext LinkConfigContext;
+typedef struct LinkConfig LinkConfig;
+typedef struct UdevEvent UdevEvent;
 
-typedef enum MACPolicy {
-        MACPOLICY_PERSISTENT,
-        MACPOLICY_RANDOM,
-        MACPOLICY_NONE,
-        _MACPOLICY_MAX,
-        _MACPOLICY_INVALID = -1
-} MACPolicy;
+typedef enum MACAddressPolicy {
+        MAC_ADDRESS_POLICY_PERSISTENT,
+        MAC_ADDRESS_POLICY_RANDOM,
+        MAC_ADDRESS_POLICY_NONE,
+        _MAC_ADDRESS_POLICY_MAX,
+        _MAC_ADDRESS_POLICY_INVALID = -EINVAL,
+} MACAddressPolicy;
 
-typedef enum NamePolicy {
-        NAMEPOLICY_KERNEL,
-        NAMEPOLICY_DATABASE,
-        NAMEPOLICY_ONBOARD,
-        NAMEPOLICY_SLOT,
-        NAMEPOLICY_PATH,
-        NAMEPOLICY_MAC,
-        _NAMEPOLICY_MAX,
-        _NAMEPOLICY_INVALID = -1
-} NamePolicy;
+typedef struct Link {
+        UdevEvent *event;
+        LinkConfig *config;
 
-struct link_config {
+        /* from sd_device */
+        const char *ifname;
+        int ifindex;
+        sd_device_action_t action;
+
+        /* from rtnl */
+        char *kind;
+        const char *driver;
+        uint16_t iftype;
+        uint32_t flags;
+        struct hw_addr_data hw_addr;
+        struct hw_addr_data permanent_hw_addr;
+        unsigned name_assign_type;
+        unsigned addr_assign_type;
+
+        /* generated name */
+        const char *new_name;
+} Link;
+
+struct LinkConfig {
         char *filename;
+        char **dropins;
 
-        struct ether_addr *match_mac;
-        char **match_path;
-        char **match_driver;
-        char **match_type;
-        char **match_name;
-        Condition *match_host;
-        Condition *match_virt;
-        Condition *match_kernel_cmdline;
-        Condition *match_kernel_version;
-        Condition *match_arch;
+        NetMatch match;
+        LIST_HEAD(Condition, conditions);
 
         char *description;
-        struct ether_addr *mac;
-        MACPolicy mac_policy;
+
+        /* udev property */
+        char **properties;
+        char **import_properties;
+        char **unset_properties;
+
+        /* rtnl setlink */
+        struct hw_addr_data hw_addr;
+        MACAddressPolicy mac_address_policy;
         NamePolicy *name_policy;
+        NamePolicy *alternative_names_policy;
         char *name;
+        char **alternative_names;
         char *alias;
-        size_t mtu;
-        size_t speed;
+        uint32_t txqueues;
+        uint32_t rxqueues;
+        uint32_t txqueuelen;
+        uint32_t mtu;
+        uint32_t gso_max_segments;
+        size_t gso_max_size;
+
+        /* ethtool link settings */
+        uint64_t speed;
         Duplex duplex;
         int autonegotiation;
-        WakeOnLan wol;
+        uint32_t advertise[N_ADVERTISE];
         NetDevPort port;
-        NetDevFeature features[_NET_DEV_FEAT_MAX];
+        uint8_t mdi;
 
-        LIST_FIELDS(link_config, links);
+        /* ethtool WoL */
+        uint32_t wol;
+        char *wol_password_file;
+        uint8_t *wol_password;
+
+        /* ethtool features */
+        int features[_NET_DEV_FEAT_MAX];
+
+        /* ethtool channels */
+        netdev_channels channels;
+
+        /* ethtool ring parameters */
+        netdev_ring_param ring;
+
+        /* ethtool pause parameters */
+        int rx_flow_control;
+        int tx_flow_control;
+        int autoneg_flow_control;
+
+        /* ethtool coalesce settings */
+        netdev_coalesce_param coalesce;
+
+        /* ethtool energy efficient ethernet settings */
+        int eee_enabled;
+        int eee_tx_lpi_enabled;
+        usec_t eee_tx_lpi_timer_usec;
+        uint32_t eee_advertise[N_ADVERTISE];
+
+        /* Rx RPS CPU mask */
+        CPUSet rps_cpu_mask;
+
+        /* SR-IOV */
+        uint32_t sr_iov_num_vfs;
+        OrderedHashmap *sr_iov_by_section;
+
+        LIST_FIELDS(LinkConfig, configs);
 };
 
-int link_config_ctx_new(link_config_ctx **ret);
-void link_config_ctx_free(link_config_ctx *ctx);
+int link_config_ctx_new(LinkConfigContext **ret);
+LinkConfigContext* link_config_ctx_free(LinkConfigContext *ctx);
+DEFINE_TRIVIAL_CLEANUP_FUNC(LinkConfigContext*, link_config_ctx_free);
 
-int link_config_load(link_config_ctx *ctx);
-bool link_config_should_reload(link_config_ctx *ctx);
+int link_load_one(LinkConfigContext *ctx, const char *filename);
+int link_config_load(LinkConfigContext *ctx);
+bool link_config_should_reload(LinkConfigContext *ctx);
 
-int link_config_get(link_config_ctx *ctx, struct udev_device *device, struct link_config **ret);
-int link_config_apply(link_config_ctx *ctx, struct link_config *config, struct udev_device *device, const char **name);
+int link_new(LinkConfigContext *ctx, UdevEvent *event, Link **ret);
+Link* link_free(Link *link);
+DEFINE_TRIVIAL_CLEANUP_FUNC(Link*, link_free);
 
-int link_get_driver(link_config_ctx *ctx, struct udev_device *device, char **ret);
+int link_get_config(LinkConfigContext *ctx, Link *link);
+int link_apply_config(LinkConfigContext *ctx, Link *link);
 
-const char *name_policy_to_string(NamePolicy p) _const_;
-NamePolicy name_policy_from_string(const char *p) _pure_;
-
-const char *mac_policy_to_string(MACPolicy p) _const_;
-MACPolicy mac_policy_from_string(const char *p) _pure_;
+const char* mac_address_policy_to_string(MACAddressPolicy p) _const_;
+MACAddressPolicy mac_address_policy_from_string(const char *s) _pure_;
 
 /* gperf lookup function */
-const struct ConfigPerfItem* link_config_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
+const struct ConfigPerfItem* link_config_gperf_lookup(const char *str, GPERF_LEN_TYPE length);
 
-int config_parse_mac_policy(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_name_policy(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+CONFIG_PARSER_PROTOTYPE(config_parse_udev_property);
+CONFIG_PARSER_PROTOTYPE(config_parse_udev_property_name);
+CONFIG_PARSER_PROTOTYPE(config_parse_ifalias);
+CONFIG_PARSER_PROTOTYPE(config_parse_rx_tx_queues);
+CONFIG_PARSER_PROTOTYPE(config_parse_txqueuelen);
+CONFIG_PARSER_PROTOTYPE(config_parse_wol_password);
+CONFIG_PARSER_PROTOTYPE(config_parse_mac_address_policy);
+CONFIG_PARSER_PROTOTYPE(config_parse_name_policy);
+CONFIG_PARSER_PROTOTYPE(config_parse_alternative_names_policy);
+CONFIG_PARSER_PROTOTYPE(config_parse_rps_cpu_mask);

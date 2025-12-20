@@ -1,60 +1,37 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <alloca.h>
-#include <errno.h>
 #include <getopt.h>
 #include <signal.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
-#include "sd-bus.h"
-
 #include "alloc-util.h"
-#include "bus-error.h"
-#include "bus-util.h"
+#include "build.h"
 #include "cgroup-show.h"
 #include "cgroup-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "hashmap.h"
+#include "log.h"
+#include "main-func.h"
+#include "parse-argument.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "process-util.h"
 #include "procfs-util.h"
-#include "stdio-util.h"
-#include "strv.h"
+#include "sort-util.h"
+#include "string-table.h"
 #include "terminal-util.h"
-#include "unit-name.h"
-#include "util.h"
+#include "time-util.h"
 #include "virt.h"
 
 typedef struct Group {
         char *path;
 
-        bool n_tasks_valid:1;
-        bool cpu_valid:1;
-        bool memory_valid:1;
-        bool io_valid:1;
+        bool n_tasks_valid;
+        bool cpu_valid;
+        bool memory_valid;
+        bool io_valid;
 
         uint64_t n_tasks;
 
@@ -71,8 +48,32 @@ typedef struct Group {
         uint64_t io_input_bps, io_output_bps;
 } Group;
 
+/* Counted objects, enum order matters */
+typedef enum PidsCount {
+        COUNT_USERSPACE_PROCESSES,      /* least */
+        COUNT_ALL_PROCESSES,
+        COUNT_PIDS,                     /* most, requires pids controller */
+} PidsCount;
+
+typedef enum {
+        ORDER_PATH,
+        ORDER_TASKS,
+        ORDER_CPU,
+        ORDER_MEMORY,
+        ORDER_IO,
+        _ORDER_MAX,
+        _ORDER_INVALID = -EINVAL,
+} Order;
+
+typedef enum {
+        CPU_PERCENTAGE,
+        CPU_TIME,
+        _CPU_MAX,
+        _CPU_INVALID = -EINVAL,
+} CPUType;
+
 static unsigned arg_depth = 3;
-static unsigned arg_iterations = (unsigned) -1;
+static unsigned arg_iterations = UINT_MAX;
 static bool arg_batch = false;
 static bool arg_raw = false;
 static usec_t arg_delay = 1*USEC_PER_SEC;
@@ -80,78 +81,248 @@ static char* arg_machine = NULL;
 static char* arg_root = NULL;
 static bool arg_recursive = true;
 static bool arg_recursive_unset = false;
+static PidsCount arg_count = COUNT_PIDS;
+static Order arg_order = ORDER_CPU;
+static CPUType arg_cpu_type = CPU_PERCENTAGE;
 
-static enum {
-        COUNT_PIDS,
-        COUNT_USERSPACE_PROCESSES,
-        COUNT_ALL_PROCESSES,
-} arg_count = COUNT_PIDS;
+static const char *order_table[_ORDER_MAX] = {
+        [ORDER_PATH]   = "path",
+        [ORDER_TASKS]  = "tasks",
+        [ORDER_CPU]    = "cpu",
+        [ORDER_MEMORY] = "memory",
+        [ORDER_IO]     = "io",
+};
 
-static enum {
-        ORDER_PATH,
-        ORDER_TASKS,
-        ORDER_CPU,
-        ORDER_MEMORY,
-        ORDER_IO,
-} arg_order = ORDER_CPU;
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING(order, Order);
 
-static enum {
-        CPU_PERCENT,
-        CPU_TIME,
-} arg_cpu_type = CPU_PERCENT;
+static const char *cpu_type_table[_CPU_MAX] = {
+        [CPU_PERCENTAGE] = "percentage",
+        [CPU_TIME]       = "time",
+};
 
-static void group_free(Group *g) {
-        assert(g);
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING(cpu_type, CPUType);
+
+static Group *group_free(Group *g) {
+        if (!g)
+                return NULL;
 
         free(g->path);
-        free(g);
+        return mfree(g);
 }
 
-static void group_hashmap_clear(Hashmap *h) {
-        hashmap_clear_with_destructor(h, group_free);
+DEFINE_PRIVATE_HASH_OPS_WITH_VALUE_DESTRUCTOR(group_hash_ops, char, path_hash_func, path_compare, Group, group_free);
+
+static const char *maybe_format_timespan(char *buf, size_t l, usec_t t, usec_t accuracy) {
+        if (arg_raw) {
+               (void) snprintf(buf, l, USEC_FMT, t);
+               return buf;
+        }
+        return format_timespan(buf, l, t, accuracy);
 }
 
-static void group_hashmap_free(Hashmap *h) {
-        group_hashmap_clear(h);
-        hashmap_free(h);
-}
+#define BUFSIZE1 CONST_MAX(FORMAT_TIMESPAN_MAX, DECIMAL_STR_MAX(usec_t))
+#define MAYBE_FORMAT_TIMESPAN(t, accuracy) \
+        maybe_format_timespan((char[BUFSIZE1]){}, BUFSIZE1, t, accuracy)
 
 static const char *maybe_format_bytes(char *buf, size_t l, bool is_valid, uint64_t t) {
         if (!is_valid)
                 return "-";
         if (arg_raw) {
-                snprintf(buf, l, "%" PRIu64, t);
+                (void) snprintf(buf, l, "%" PRIu64, t);
                 return buf;
         }
         return format_bytes(buf, l, t);
 }
 
+#define BUFSIZE2 CONST_MAX(FORMAT_BYTES_MAX, DECIMAL_STR_MAX(uint64_t))
+#define MAYBE_FORMAT_BYTES(is_valid, t) \
+        maybe_format_bytes((char[BUFSIZE2]){}, BUFSIZE2, is_valid, t)
+
 static bool is_root_cgroup(const char *path) {
 
-        /* Returns true if the specified path belongs to the root cgroup. The root cgroup is special on cgroupsv2 as it
+        /* Returns true if the specified path belongs to the root cgroup. The root cgroup is special on cgroup v2 as it
          * carries only very few attributes in order not to export multiple truth about system state as most
          * information is available elsewhere in /proc anyway. We need to be able to deal with that, and need to get
          * our data from different sources in that case.
          *
          * There's one extra complication in all of this, though 😣: if the path to the cgroup indicates we are in the
          * root cgroup this might actually not be the case, because cgroup namespacing might be in effect
-         * (CLONE_NEWCGROUP). Since there's no nice way to distuingish a real cgroup root from a fake namespaced one we
+         * (CLONE_NEWCGROUP). Since there's no nice way to distinguish a real cgroup root from a fake namespaced one we
          * do an explicit container check here, under the assumption that CLONE_NEWCGROUP is generally used when
          * container managers are used too.
          *
          * Note that checking for a container environment is kinda ugly, since in theory people could use cgtop from
          * inside a container where cgroup namespacing is turned off to watch the host system. However, that's mostly a
-         * theoretic usecase, and if people actually try all they'll lose is accounting for the top-level cgroup. Which
+         * theoretic use case, and if people actually try all they'll lose is accounting for the top-level cgroup. Which
          * isn't too bad. */
 
         if (detect_container() > 0)
                 return false;
 
-        return isempty(path) || path_equal(path, "/");
+        return empty_or_root(path);
+}
+
+static int process_memory(Group *g) {
+        int r;
+
+        assert(g);
+
+        if (is_root_cgroup(g->path))
+                r = procfs_memory_get_used(&g->memory);
+        else {
+                _cleanup_free_ char *p = NULL, *v = NULL;
+
+                r = cg_get_path(g->path, "memory.current", &p);
+                if (r < 0)
+                        return r;
+
+                r = read_one_line_file(p, &v);
+                if (r == -ENOENT)
+                        return 0;
+                if (r < 0)
+                        return r;
+
+                r = safe_atou64(v, &g->memory);
+        }
+        if (r < 0)
+                return r;
+
+        if (g->memory > 0)
+                g->memory_valid = true;
+
+        return 0;
+}
+
+static int process_io(Group *g, unsigned iteration) {
+        _cleanup_fclose_ FILE *f = NULL;
+        _cleanup_free_ char *p = NULL;
+        uint64_t wr = 0, rd = 0;
+        nsec_t timestamp;
+        int r;
+
+        assert(g);
+
+        r = cg_get_path(g->path, "io.stat", &p);
+        if (r < 0)
+                return r;
+
+        f = fopen(p, "re");
+        if (!f) {
+                if (errno == ENOENT)
+                        return 0;
+
+                return -errno;
+        }
+
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
+                uint64_t k;
+                char *l;
+
+                r = read_stripped_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        break;
+
+                /* Skip the device */
+                l = line + strcspn(line, WHITESPACE);
+                l += strspn(l, WHITESPACE);
+
+                while (!isempty(l)) {
+                        if (sscanf(l, "rbytes=%" SCNu64, &k) == 1)
+                                rd += k;
+                        else if (sscanf(l, "wbytes=%" SCNu64, &k) == 1)
+                                wr += k;
+
+                        l += strcspn(l, WHITESPACE);
+                        l += strspn(l, WHITESPACE);
+                }
+        }
+
+        timestamp = now_nsec(CLOCK_MONOTONIC);
+
+        if (g->io_iteration == iteration - 1) {
+                uint64_t x, yr, yw;
+
+                x = (uint64_t) (timestamp - g->io_timestamp);
+                if (x < 1)
+                        x = 1;
+
+                if (rd > g->io_input)
+                        yr = rd - g->io_input;
+                else
+                        yr = 0;
+
+                if (wr > g->io_output)
+                        yw = wr - g->io_output;
+                else
+                        yw = 0;
+
+                if (yr > 0 || yw > 0) {
+                        g->io_input_bps = (yr * 1000000000ULL) / x;
+                        g->io_output_bps = (yw * 1000000000ULL) / x;
+                        g->io_valid = true;
+                }
+        }
+
+        g->io_input = rd;
+        g->io_output = wr;
+        g->io_timestamp = timestamp;
+        g->io_iteration = iteration;
+
+        return 0;
+}
+
+static int process_cpu(Group *g, unsigned iteration) {
+        nsec_t new_usage, timestamp;
+        int r;
+
+        assert(g);
+
+        if (is_root_cgroup(g->path)) {
+                r = procfs_cpu_get_usage(&new_usage);
+                if (r < 0)
+                        return r;
+        } else {
+                _cleanup_free_ char *val = NULL;
+                uint64_t u;
+
+                r = cg_get_keyed_attribute(g->path, "cpu.stat", STRV_MAKE("usage_usec"), &val);
+                if (IN_SET(r, -ENOENT, -ENXIO))
+                        return 0;
+                if (r < 0)
+                        return r;
+
+                r = safe_atou64(val, &u);
+                if (r < 0)
+                        return r;
+
+                new_usage = u * NSEC_PER_USEC;
+        }
+
+        timestamp = now_nsec(CLOCK_MONOTONIC);
+
+        if (g->cpu_iteration == iteration - 1 && new_usage > g->cpu_usage) {
+                nsec_t x, y;
+
+                x = timestamp - g->cpu_timestamp;
+                if (x < 1)
+                        x = 1;
+
+                y = new_usage - g->cpu_usage;
+                g->cpu_fraction = (double) y / (double) x;
+                g->cpu_valid = true;
+        }
+
+        g->cpu_usage = new_usage;
+        g->cpu_timestamp = timestamp;
+        g->cpu_iteration = iteration;
+
+        return 0;
 }
 
 static int process(
-                const char *controller,
                 const char *path,
                 Hashmap *a,
                 Hashmap *b,
@@ -159,15 +330,10 @@ static int process(
                 Group **ret) {
 
         Group *g;
-        int r, all_unified;
+        int r;
 
-        assert(controller);
         assert(path);
         assert(a);
-
-        all_unified = cg_all_unified();
-        if (all_unified < 0)
-                return all_unified;
 
         g = hashmap_get(a, path);
         if (!g) {
@@ -197,250 +363,77 @@ static int process(
                 }
         }
 
-        if (streq(controller, SYSTEMD_CGROUP_CONTROLLER) &&
-            IN_SET(arg_count, COUNT_ALL_PROCESSES, COUNT_USERSPACE_PROCESSES)) {
+        if (IN_SET(arg_count, COUNT_ALL_PROCESSES, COUNT_USERSPACE_PROCESSES)) {
                 _cleanup_fclose_ FILE *f = NULL;
                 pid_t pid;
 
-                r = cg_enumerate_processes(controller, path, &f);
-                if (r == -ENOENT)
-                        return 0;
-                if (r < 0)
+                r = cg_enumerate_processes(path, &f);
+                if (r < 0 && r != -ENOENT)
                         return r;
+                if (r >= 0) {
+                        g->n_tasks = 0;
+                        while (cg_read_pid(f, &pid, CGROUP_DONT_SKIP_UNMAPPED) > 0) {
 
-                g->n_tasks = 0;
-                while (cg_read_pid(f, &pid) > 0) {
+                                if (arg_count == COUNT_USERSPACE_PROCESSES && pid_is_kernel_thread(pid) > 0)
+                                        continue;
 
-                        if (arg_count == COUNT_USERSPACE_PROCESSES && is_kernel_thread(pid) > 0)
-                                continue;
+                                g->n_tasks++;
+                        }
 
-                        g->n_tasks++;
+                        if (g->n_tasks > 0)
+                                g->n_tasks_valid = true;
                 }
 
-                if (g->n_tasks > 0)
-                        g->n_tasks_valid = true;
-
-        } else if (streq(controller, "pids") && arg_count == COUNT_PIDS) {
+        } else if (arg_count == COUNT_PIDS) {
 
                 if (is_root_cgroup(path)) {
                         r = procfs_tasks_get_current(&g->n_tasks);
                         if (r < 0)
                                 return r;
-                } else {
-                        _cleanup_free_ char *p = NULL, *v = NULL;
 
-                        r = cg_get_path(controller, path, "pids.current", &p);
-                        if (r < 0)
-                                return r;
-
-                        r = read_one_line_file(p, &v);
-                        if (r == -ENOENT)
-                                return 0;
-                        if (r < 0)
-                                return r;
-
-                        r = safe_atou64(v, &g->n_tasks);
-                        if (r < 0)
-                                return r;
-                }
-
-                if (g->n_tasks > 0)
                         g->n_tasks_valid = true;
-
-        } else if (STR_IN_SET(controller, "cpu", "cpuacct")) {
-                _cleanup_free_ char *p = NULL, *v = NULL;
-                uint64_t new_usage;
-                nsec_t timestamp;
-
-                if (is_root_cgroup(path)) {
-                        r = procfs_cpu_get_usage(&new_usage);
-                        if (r < 0)
-                                return r;
-                } else if (all_unified) {
-                        _cleanup_free_ char *val = NULL;
-
-                        if (!streq(controller, "cpu"))
-                                return 0;
-
-                        r = cg_get_keyed_attribute("cpu", path, "cpu.stat", STRV_MAKE("usage_usec"), &val);
-                        if (IN_SET(r, -ENOENT, -ENXIO))
-                                return 0;
-                        if (r < 0)
-                                return r;
-
-                        r = safe_atou64(val, &new_usage);
-                        if (r < 0)
-                                return r;
-
-                        new_usage *= NSEC_PER_USEC;
-                } else {
-                        if (!streq(controller, "cpuacct"))
-                                return 0;
-
-                        r = cg_get_path(controller, path, "cpuacct.usage", &p);
-                        if (r < 0)
-                                return r;
-
-                        r = read_one_line_file(p, &v);
-                        if (r == -ENOENT)
-                                return 0;
-                        if (r < 0)
-                                return r;
-
-                        r = safe_atou64(v, &new_usage);
-                        if (r < 0)
-                                return r;
-                }
-
-                timestamp = now_nsec(CLOCK_MONOTONIC);
-
-                if (g->cpu_iteration == iteration - 1 &&
-                    (nsec_t) new_usage > g->cpu_usage) {
-
-                        nsec_t x, y;
-
-                        x = timestamp - g->cpu_timestamp;
-                        if (x < 1)
-                                x = 1;
-
-                        y = (nsec_t) new_usage - g->cpu_usage;
-                        g->cpu_fraction = (double) y / (double) x;
-                        g->cpu_valid = true;
-                }
-
-                g->cpu_usage = (nsec_t) new_usage;
-                g->cpu_timestamp = timestamp;
-                g->cpu_iteration = iteration;
-
-        } else if (streq(controller, "memory")) {
-
-                if (is_root_cgroup(path)) {
-                        r = procfs_memory_get_current(&g->memory);
-                        if (r < 0)
-                                return r;
                 } else {
                         _cleanup_free_ char *p = NULL, *v = NULL;
 
-                        if (all_unified)
-                                r = cg_get_path(controller, path, "memory.current", &p);
-                        else
-                                r = cg_get_path(controller, path, "memory.usage_in_bytes", &p);
+                        r = cg_get_path(path, "pids.current", &p);
                         if (r < 0)
                                 return r;
 
                         r = read_one_line_file(p, &v);
-                        if (r == -ENOENT)
-                                return 0;
-                        if (r < 0)
+                        if (r < 0 && r != -ENOENT)
                                 return r;
-
-                        r = safe_atou64(v, &g->memory);
-                        if (r < 0)
-                                return r;
-                }
-
-                if (g->memory > 0)
-                        g->memory_valid = true;
-
-        } else if ((streq(controller, "io") && all_unified) ||
-                   (streq(controller, "blkio") && !all_unified)) {
-                _cleanup_fclose_ FILE *f = NULL;
-                _cleanup_free_ char *p = NULL;
-                uint64_t wr = 0, rd = 0;
-                nsec_t timestamp;
-
-                r = cg_get_path(controller, path, all_unified ? "io.stat" : "blkio.io_service_bytes", &p);
-                if (r < 0)
-                        return r;
-
-                f = fopen(p, "re");
-                if (!f) {
-                        if (errno == ENOENT)
-                                return 0;
-                        return -errno;
-                }
-
-                for (;;) {
-                        char line[LINE_MAX], *l;
-                        uint64_t k, *q;
-
-                        if (!fgets(line, sizeof(line), f))
-                                break;
-
-                        /* Trim and skip the device */
-                        l = strstrip(line);
-                        l += strcspn(l, WHITESPACE);
-                        l += strspn(l, WHITESPACE);
-
-                        if (all_unified) {
-                                while (!isempty(l)) {
-                                        if (sscanf(l, "rbytes=%" SCNu64, &k))
-                                                rd += k;
-                                        else if (sscanf(l, "wbytes=%" SCNu64, &k))
-                                                wr += k;
-
-                                        l += strcspn(l, WHITESPACE);
-                                        l += strspn(l, WHITESPACE);
-                                }
-                        } else {
-                                if (first_word(l, "Read")) {
-                                        l += 4;
-                                        q = &rd;
-                                } else if (first_word(l, "Write")) {
-                                        l += 5;
-                                        q = &wr;
-                                } else
-                                        continue;
-
-                                l += strspn(l, WHITESPACE);
-                                r = safe_atou64(l, &k);
+                        if (r >= 0) {
+                                r = safe_atou64(v, &g->n_tasks);
                                 if (r < 0)
-                                        continue;
+                                        return r;
 
-                                *q += k;
+                                if (g->n_tasks > 0)
+                                        g->n_tasks_valid = true;
                         }
                 }
 
-                timestamp = now_nsec(CLOCK_MONOTONIC);
+        } else
+                assert_not_reached();
 
-                if (g->io_iteration == iteration - 1) {
-                        uint64_t x, yr, yw;
+        r = process_memory(g);
+        if (r < 0)
+                return r;
 
-                        x = (uint64_t) (timestamp - g->io_timestamp);
-                        if (x < 1)
-                                x = 1;
+        r = process_io(g, iteration);
+        if (r < 0)
+                return r;
 
-                        if (rd > g->io_input)
-                                yr = rd - g->io_input;
-                        else
-                                yr = 0;
-
-                        if (wr > g->io_output)
-                                yw = wr - g->io_output;
-                        else
-                                yw = 0;
-
-                        if (yr > 0 || yw > 0) {
-                                g->io_input_bps = (yr * 1000000000ULL) / x;
-                                g->io_output_bps = (yw * 1000000000ULL) / x;
-                                g->io_valid = true;
-                        }
-                }
-
-                g->io_input = rd;
-                g->io_output = wr;
-                g->io_timestamp = timestamp;
-                g->io_iteration = iteration;
-        }
+        r = process_cpu(g, iteration);
+        if (r < 0)
+                return r;
 
         if (ret)
                 *ret = g;
 
-        return 0;
+        return 1;
 }
 
-static int refresh_one(
-                const char *controller,
+static int refresh(
                 const char *path,
                 Hashmap *a,
                 Hashmap *b,
@@ -449,29 +442,34 @@ static int refresh_one(
                 Group **ret) {
 
         _cleanup_closedir_ DIR *d = NULL;
-        Group *ours = NULL;
+        Group *ours;
         int r;
 
-        assert(controller);
         assert(path);
         assert(a);
 
-        if (depth > arg_depth)
+        if (depth > arg_depth) {
+                if (ret)
+                        *ret = NULL;
                 return 0;
+        }
 
-        r = process(controller, path, a, b, iteration, &ours);
+        r = process(path, a, b, iteration, &ours);
         if (r < 0)
                 return r;
 
-        r = cg_enumerate_subgroups(controller, path, &d);
-        if (r == -ENOENT)
+        r = cg_enumerate_subgroups(path, &d);
+        if (r == -ENOENT) {
+                if (ret)
+                        *ret = NULL;
                 return 0;
+        }
         if (r < 0)
                 return r;
 
         for (;;) {
                 _cleanup_free_ char *fn = NULL, *p = NULL;
-                Group *child = NULL;
+                Group *child;
 
                 r = cg_read_subgroup(d, &fn);
                 if (r < 0)
@@ -479,21 +477,19 @@ static int refresh_one(
                 if (r == 0)
                         break;
 
-                p = strjoin(path, "/", fn);
+                p = path_join(path, fn);
                 if (!p)
                         return -ENOMEM;
 
-                path_kill_slashes(p);
+                path_simplify(p);
 
-                r = refresh_one(controller, p, a, b, iteration, depth + 1, &child);
+                r = refresh(p, a, b, iteration, depth + 1, &child);
                 if (r < 0)
                         return r;
-
-                if (arg_recursive &&
+                if (r > 0 &&
+                    arg_recursive &&
                     IN_SET(arg_count, COUNT_ALL_PROCESSES, COUNT_USERSPACE_PROCESSES) &&
-                    child &&
-                    child->n_tasks_valid &&
-                    streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
+                    child->n_tasks_valid) {
 
                         /* Recursively sum up processes */
 
@@ -512,42 +508,9 @@ static int refresh_one(
         return 1;
 }
 
-static int refresh(const char *root, Hashmap *a, Hashmap *b, unsigned iteration) {
+static int group_compare(Group * const *a, Group * const *b) {
+        const Group *x = *a, *y = *b;
         int r;
-
-        assert(a);
-
-        r = refresh_one(SYSTEMD_CGROUP_CONTROLLER, root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("cpu", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("cpuacct", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("memory", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("io", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("blkio", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("pids", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-
-        return 0;
-}
-
-static const char *empty_to_slash(const char *p) {
-        return isempty(p) ? "/" : p;
-}
-
-static int group_compare(const void*a, const void *b) {
-        const Group *x = *(Group**)a, *y = *(Group**)b;
 
         if (arg_order != ORDER_TASKS || arg_recursive) {
                 /* Let's make sure that the parent is always before
@@ -555,9 +518,9 @@ static int group_compare(const void*a, const void *b) {
                  * recursive summing is off, since that is actually
                  * not accumulative for all children. */
 
-                if (path_startswith(empty_to_slash(y->path), empty_to_slash(x->path)))
+                if (path_startswith(empty_to_root(y->path), empty_to_root(x->path)))
                         return -1;
-                if (path_startswith(empty_to_slash(x->path), empty_to_slash(y->path)))
+                if (path_startswith(empty_to_root(x->path), empty_to_root(y->path)))
                         return 1;
         }
 
@@ -567,31 +530,28 @@ static int group_compare(const void*a, const void *b) {
                 break;
 
         case ORDER_CPU:
-                if (arg_cpu_type == CPU_PERCENT) {
+                if (arg_cpu_type == CPU_PERCENTAGE) {
                         if (x->cpu_valid && y->cpu_valid) {
-                                if (x->cpu_fraction > y->cpu_fraction)
-                                        return -1;
-                                else if (x->cpu_fraction < y->cpu_fraction)
-                                        return 1;
+                                r = CMP(y->cpu_fraction, x->cpu_fraction);
+                                if (r != 0)
+                                        return r;
                         } else if (x->cpu_valid)
                                 return -1;
                         else if (y->cpu_valid)
                                 return 1;
                 } else {
-                        if (x->cpu_usage > y->cpu_usage)
-                                return -1;
-                        else if (x->cpu_usage < y->cpu_usage)
-                                return 1;
+                        r = CMP(y->cpu_usage, x->cpu_usage);
+                        if (r != 0)
+                                return r;
                 }
 
                 break;
 
         case ORDER_TASKS:
                 if (x->n_tasks_valid && y->n_tasks_valid) {
-                        if (x->n_tasks > y->n_tasks)
-                                return -1;
-                        else if (x->n_tasks < y->n_tasks)
-                                return 1;
+                        r = CMP(y->n_tasks, x->n_tasks);
+                        if (r != 0)
+                                return r;
                 } else if (x->n_tasks_valid)
                         return -1;
                 else if (y->n_tasks_valid)
@@ -601,10 +561,9 @@ static int group_compare(const void*a, const void *b) {
 
         case ORDER_MEMORY:
                 if (x->memory_valid && y->memory_valid) {
-                        if (x->memory > y->memory)
-                                return -1;
-                        else if (x->memory < y->memory)
-                                return 1;
+                        r = CMP(y->memory, x->memory);
+                        if (r != 0)
+                                return r;
                 } else if (x->memory_valid)
                         return -1;
                 else if (y->memory_valid)
@@ -614,56 +573,50 @@ static int group_compare(const void*a, const void *b) {
 
         case ORDER_IO:
                 if (x->io_valid && y->io_valid) {
-                        if (x->io_input_bps + x->io_output_bps > y->io_input_bps + y->io_output_bps)
-                                return -1;
-                        else if (x->io_input_bps + x->io_output_bps < y->io_input_bps + y->io_output_bps)
-                                return 1;
+                        r = CMP(y->io_input_bps + y->io_output_bps, x->io_input_bps + x->io_output_bps);
+                        if (r != 0)
+                                return r;
                 } else if (x->io_valid)
                         return -1;
                 else if (y->io_valid)
                         return 1;
+
+                break;
+
+        case _ORDER_MAX:
+        case _ORDER_INVALID:
+                assert_not_reached();
         }
 
         return path_compare(x->path, y->path);
 }
 
 static void display(Hashmap *a) {
-        Iterator i;
         Group *g;
         Group **array;
         signed path_columns;
-        unsigned rows, n = 0, j, maxtcpu = 0, maxtpath = 3; /* 3 for ellipsize() to work properly */
-        char buffer[MAX3(21, FORMAT_BYTES_MAX, FORMAT_TIMESPAN_MAX)];
+        unsigned rows, n = 0, maxtcpu = 0, maxtpath = 3; /* 3 for ellipsize() to work properly */
 
         assert(a);
 
         if (!terminal_is_dumb())
                 fputs(ANSI_HOME_CLEAR, stdout);
 
-        array = alloca(sizeof(Group*) * hashmap_size(a));
+        array = newa(Group*, hashmap_size(a));
 
-        HASHMAP_FOREACH(g, a, i)
+        HASHMAP_FOREACH(g, a)
                 if (g->n_tasks_valid || g->cpu_valid || g->memory_valid || g->io_valid)
                         array[n++] = g;
 
-        qsort_safe(array, n, sizeof(Group*), group_compare);
+        typesafe_qsort(array, n, group_compare);
 
         /* Find the longest names in one run */
-        for (j = 0; j < n; j++) {
-                unsigned cputlen, pathtlen;
-
-                format_timespan(buffer, sizeof(buffer), (usec_t) (array[j]->cpu_usage / NSEC_PER_USEC), 0);
-                cputlen = strlen(buffer);
-                maxtcpu = MAX(maxtcpu, cputlen);
-
-                pathtlen = strlen(array[j]->path);
-                maxtpath = MAX(maxtpath, pathtlen);
+        for (unsigned j = 0; j < n; j++) {
+                maxtcpu = MAX(maxtcpu,
+                              strlen(MAYBE_FORMAT_TIMESPAN((usec_t) (array[j]->cpu_usage / NSEC_PER_USEC), 0)));
+                maxtpath = MAX(maxtpath,
+                               strlen(array[j]->path));
         }
-
-        if (arg_cpu_type == CPU_PERCENT)
-                xsprintf(buffer, "%6s", "%CPU");
-        else
-                xsprintf(buffer, "%*s", maxtcpu, "CPU Time");
 
         rows = lines();
         if (rows <= 10)
@@ -671,21 +624,25 @@ static void display(Hashmap *a) {
 
         if (on_tty()) {
                 const char *on, *off;
+                int cpu_len = arg_cpu_type == CPU_PERCENTAGE ? 6 : maxtcpu;
 
-                path_columns = columns() - 36 - strlen(buffer);
+                path_columns = columns() - 36 - cpu_len;
                 if (path_columns < 10)
                         path_columns = 10;
 
                 on = ansi_highlight_underline();
                 off = ansi_underline();
 
-                printf("%s%s%-*s%s %s%7s%s %s%s%s %s%8s%s %s%8s%s %s%8s%s%s\n",
+                printf("%s%s%-*s%s %s%7s%s %s%*s%s %s%8s%s %s%8s%s %s%8s%s%s\n",
                        ansi_underline(),
-                       arg_order == ORDER_PATH ? on : "", path_columns, "Control Group",
+                       arg_order == ORDER_PATH ? on : "", path_columns, "CGroup",
                        arg_order == ORDER_PATH ? off : "",
-                       arg_order == ORDER_TASKS ? on : "", arg_count == COUNT_PIDS ? "Tasks" : arg_count == COUNT_USERSPACE_PROCESSES ? "Procs" : "Proc+",
+                       arg_order == ORDER_TASKS ? on : "",
+                       arg_count == COUNT_PIDS ? "Tasks" : arg_count == COUNT_USERSPACE_PROCESSES ? "Procs" : "Proc+",
                        arg_order == ORDER_TASKS ? off : "",
-                       arg_order == ORDER_CPU ? on : "", buffer,
+                       arg_order == ORDER_CPU ? on : "",
+                       cpu_len,
+                       arg_cpu_type == CPU_PERCENTAGE ? "%CPU" : "CPU Time",
                        arg_order == ORDER_CPU ? off : "",
                        arg_order == ORDER_MEMORY ? on : "", "Memory",
                        arg_order == ORDER_MEMORY ? off : "",
@@ -697,7 +654,7 @@ static void display(Hashmap *a) {
         } else
                 path_columns = maxtpath;
 
-        for (j = 0; j < n; j++) {
+        for (unsigned j = 0; j < n; j++) {
                 _cleanup_free_ char *ellipsized = NULL;
                 const char *path;
 
@@ -706,7 +663,7 @@ static void display(Hashmap *a) {
 
                 g = array[j];
 
-                path = empty_to_slash(g->path);
+                path = empty_to_root(g->path);
                 ellipsized = ellipsize(path, path_columns, 33);
                 printf("%-*s", path_columns, ellipsized ?: path);
 
@@ -715,23 +672,32 @@ static void display(Hashmap *a) {
                 else
                         fputs("       -", stdout);
 
-                if (arg_cpu_type == CPU_PERCENT) {
+                if (arg_cpu_type == CPU_PERCENTAGE) {
                         if (g->cpu_valid)
                                 printf(" %6.1f", g->cpu_fraction*100);
                         else
                                 fputs("      -", stdout);
                 } else
-                        printf(" %*s", maxtcpu, format_timespan(buffer, sizeof(buffer), (usec_t) (g->cpu_usage / NSEC_PER_USEC), 0));
+                        printf(" %*s",
+                               (int) maxtcpu,
+                               MAYBE_FORMAT_TIMESPAN((usec_t) (g->cpu_usage / NSEC_PER_USEC), 0));
 
-                printf(" %8s", maybe_format_bytes(buffer, sizeof(buffer), g->memory_valid, g->memory));
-                printf(" %8s", maybe_format_bytes(buffer, sizeof(buffer), g->io_valid, g->io_input_bps));
-                printf(" %8s", maybe_format_bytes(buffer, sizeof(buffer), g->io_valid, g->io_output_bps));
+                printf(" %8s", MAYBE_FORMAT_BYTES(g->memory_valid, g->memory));
+                printf(" %8s", MAYBE_FORMAT_BYTES(g->io_valid, g->io_input_bps));
+                printf(" %8s", MAYBE_FORMAT_BYTES(g->io_valid, g->io_output_bps));
 
                 putchar('\n');
         }
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-cgtop", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [CGROUP]\n\n"
                "Show top control groups by their resource usage.\n\n"
                "  -h --help           Show this help\n"
@@ -753,11 +719,15 @@ static void help(void) {
                "  -b --batch          Run in batch mode, accepting no input\n"
                "     --depth=DEPTH    Maximum traversal depth (default: %u)\n"
                "  -M --machine=       Show container\n"
-               , program_invocation_short_name, arg_depth);
+               "\nSee the %s for details.\n",
+               program_invocation_short_name,
+               arg_depth,
+               link);
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
-
         enum {
                 ARG_VERSION = 0x100,
                 ARG_DEPTH,
@@ -791,22 +761,18 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
 
                 case ARG_CPU_TYPE:
                         if (optarg) {
-                                if (streq(optarg, "time"))
-                                        arg_cpu_type = CPU_TIME;
-                                else if (streq(optarg, "percentage"))
-                                        arg_cpu_type = CPU_PERCENT;
-                                else {
-                                        log_error("Unknown argument to --cpu=: %s", optarg);
-                                        return -EINVAL;
-                                }
+                                arg_cpu_type = cpu_type_from_string(optarg);
+                                if (arg_cpu_type < 0)
+                                        return log_error_errno(arg_cpu_type,
+                                                               "Unknown argument to --cpu=: %s",
+                                                               optarg);
                         } else
                                 arg_cpu_type = CPU_TIME;
 
@@ -815,23 +781,25 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_DEPTH:
                         r = safe_atou(optarg, &arg_depth);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse depth parameter: %s", optarg);
+                                return log_error_errno(r, "Failed to parse depth parameter '%s': %m", optarg);
 
                         break;
 
                 case 'd':
                         r = parse_sec(optarg, &arg_delay);
-                        if (r < 0 || arg_delay <= 0) {
-                                log_error("Failed to parse delay parameter: %s", optarg);
-                                return -EINVAL;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse delay parameter '%s': %m", optarg);
+                        if (arg_delay <= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Invalid delay parameter '%s'",
+                                                       optarg);
 
                         break;
 
                 case 'n':
                         r = safe_atou(optarg, &arg_iterations);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse iterations parameter: %s", optarg);
+                                return log_error_errno(r, "Failed to parse iterations parameter '%s': %m", optarg);
 
                         break;
 
@@ -868,20 +836,11 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_ORDER:
-                        if (streq(optarg, "path"))
-                                arg_order = ORDER_PATH;
-                        else if (streq(optarg, "tasks"))
-                                arg_order = ORDER_TASKS;
-                        else if (streq(optarg, "cpu"))
-                                arg_order = ORDER_CPU;
-                        else if (streq(optarg, "memory"))
-                                arg_order = ORDER_MEMORY;
-                        else if (streq(optarg, "io"))
-                                arg_order = ORDER_IO;
-                        else {
-                                log_error("Invalid argument to --order=: %s", optarg);
-                                return -EINVAL;
-                        }
+                        arg_order = order_from_string(optarg);
+                        if (arg_order < 0)
+                                return log_error_errno(arg_order,
+                                                       "Invalid argument to --order=: %s",
+                                                       optarg);
                         break;
 
                 case 'k':
@@ -893,12 +852,11 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_RECURSIVE:
-                        r = parse_boolean(optarg);
+                        r = parse_boolean_argument("--recursive=", optarg, &arg_recursive);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse --recursive= argument: %s", optarg);
+                                return r;
 
-                        arg_recursive = r;
-                        arg_recursive_unset = r == 0;
+                        arg_recursive_unset = !r;
                         break;
 
                 case 'M':
@@ -909,15 +867,14 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         if (optind == argc - 1)
                 arg_root = argv[optind];
-        else if (optind < argc) {
-                log_error("Too many arguments.");
-                return -EINVAL;
-        }
+        else if (optind < argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Too many arguments.");
 
         return 1;
 }
@@ -931,75 +888,32 @@ static const char* counting_what(void) {
                 return "userspace processes (excl. kernel)";
 }
 
-int main(int argc, char *argv[]) {
-        int r;
-        Hashmap *a = NULL, *b = NULL;
+static int loop(const char *root) {
+        _cleanup_hashmap_free_ Hashmap *a = NULL, *b = NULL;
         unsigned iteration = 0;
         usec_t last_refresh = 0;
-        bool quit = false, immediate_refresh = false;
-        _cleanup_free_ char *root = NULL;
-        CGroupMask mask;
+        bool immediate_refresh = false;
+        int r;
 
-        log_parse_environment();
-        log_open();
+        a = hashmap_new(&group_hash_ops);
+        b = hashmap_new(&group_hash_ops);
+        if (!a || !b)
+                return log_oom();
 
-        r = parse_argv(argc, argv);
-        if (r <= 0)
-                goto finish;
-
-        r = cg_mask_supported(&mask);
-        if (r < 0) {
-                log_error_errno(r, "Failed to determine supported controllers: %m");
-                goto finish;
-        }
-
-        arg_count = (mask & CGROUP_MASK_PIDS) ? COUNT_PIDS : COUNT_USERSPACE_PROCESSES;
-
-        if (arg_recursive_unset && arg_count == COUNT_PIDS) {
-                log_error("Non-recursive counting is only supported when counting processes, not tasks. Use -P or -k.");
-                return -EINVAL;
-        }
-
-        r = show_cgroup_get_path_and_warn(arg_machine, arg_root, &root);
-        if (r < 0) {
-                log_error_errno(r, "Failed to get root control group path: %m");
-                goto finish;
-        } else
-                log_debug("Cgroup path: %s", root);
-
-        a = hashmap_new(&path_hash_ops);
-        b = hashmap_new(&path_hash_ops);
-        if (!a || !b) {
-                r = log_oom();
-                goto finish;
-        }
-
-        signal(SIGWINCH, columns_lines_cache_reset);
-
-        if (arg_iterations == (unsigned) -1)
-                arg_iterations = on_tty() ? 0 : 1;
-
-        while (!quit) {
-                Hashmap *c;
+        for (;;) {
                 usec_t t;
                 char key;
-                char h[FORMAT_TIMESPAN_MAX];
 
                 t = now(CLOCK_MONOTONIC);
 
-                if (t >= last_refresh + arg_delay || immediate_refresh) {
+                if (t >= usec_add(last_refresh, arg_delay) || immediate_refresh) {
 
-                        r = refresh(root, a, b, iteration++);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to refresh: %m");
-                                goto finish;
-                        }
+                        r = refresh(root, a, b, iteration++, /* depth= */ 0, /* ret= */ NULL);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to refresh: %m");
 
-                        group_hashmap_clear(b);
-
-                        c = a;
-                        a = b;
-                        b = c;
+                        hashmap_clear(b);
+                        SWAP_TWO(a, b);
 
                         last_refresh = t;
                         immediate_refresh = false;
@@ -1008,22 +922,20 @@ int main(int argc, char *argv[]) {
                 display(b);
 
                 if (arg_iterations && iteration >= arg_iterations)
-                        break;
+                        return 0;
 
                 if (!on_tty()) /* non-TTY: Empty newline as delimiter between polls */
                         fputs("\n", stdout);
                 fflush(stdout);
 
                 if (arg_batch)
-                        (void) usleep(last_refresh + arg_delay - t);
+                        (void) usleep_safe(usec_add(usec_sub_unsigned(last_refresh, t), arg_delay));
                 else {
-                        r = read_one_char(stdin, &key, last_refresh + arg_delay - t, NULL);
+                        r = read_one_char(stdin, &key, usec_add(usec_sub_unsigned(last_refresh, t), arg_delay), /* echo= */ false, /* need_nl= */ NULL);
                         if (r == -ETIMEDOUT)
                                 continue;
-                        if (r < 0) {
-                                log_error_errno(r, "Couldn't read key: %m");
-                                goto finish;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Couldn't read key: %m");
                 }
 
                 if (on_tty()) { /* TTY: Clear any user keystroke */
@@ -1041,8 +953,7 @@ int main(int argc, char *argv[]) {
                         break;
 
                 case 'q':
-                        quit = true;
-                        break;
+                        return 0;
 
                 case 'p':
                         arg_order = ORDER_PATH;
@@ -1065,7 +976,7 @@ int main(int argc, char *argv[]) {
                         break;
 
                 case '%':
-                        arg_cpu_type = arg_cpu_type == CPU_TIME ? CPU_PERCENT : CPU_TIME;
+                        arg_cpu_type = arg_cpu_type == CPU_TIME ? CPU_PERCENTAGE : CPU_TIME;
                         break;
 
                 case 'k':
@@ -1094,12 +1005,9 @@ int main(int argc, char *argv[]) {
                         break;
 
                 case '+':
-                        if (arg_delay < USEC_PER_SEC)
-                                arg_delay += USEC_PER_MSEC*250;
-                        else
-                                arg_delay += USEC_PER_SEC;
+                        arg_delay = usec_add(arg_delay, arg_delay < USEC_PER_SEC ? USEC_PER_MSEC * 250 : USEC_PER_SEC);
 
-                        fprintf(stdout, "\nIncreased delay to %s.", format_timespan(h, sizeof(h), arg_delay, 0));
+                        fprintf(stdout, "\nIncreased delay to %s.", FORMAT_TIMESPAN(arg_delay, 0));
                         fflush(stdout);
                         sleep(1);
                         break;
@@ -1107,12 +1015,10 @@ int main(int argc, char *argv[]) {
                 case '-':
                         if (arg_delay <= USEC_PER_MSEC*500)
                                 arg_delay = USEC_PER_MSEC*250;
-                        else if (arg_delay < USEC_PER_MSEC*1250)
-                                arg_delay -= USEC_PER_MSEC*250;
                         else
-                                arg_delay -= USEC_PER_SEC;
+                                arg_delay = usec_sub_unsigned(arg_delay, arg_delay < USEC_PER_MSEC * 1250 ? USEC_PER_MSEC * 250 : USEC_PER_SEC);
 
-                        fprintf(stdout, "\nDecreased delay to %s.", format_timespan(h, sizeof(h), arg_delay, 0));
+                        fprintf(stdout, "\nDecreased delay to %s.", FORMAT_TIMESPAN(arg_delay, 0));
                         fflush(stdout);
                         sleep(1);
                         break;
@@ -1120,34 +1026,61 @@ int main(int argc, char *argv[]) {
                 case '?':
                 case 'h':
 
-#define ON ANSI_HIGHLIGHT
-#define OFF ANSI_NORMAL
-
                         fprintf(stdout,
-                                "\t<" ON "p" OFF "> By path; <" ON "t" OFF "> By tasks/procs; <" ON "c" OFF "> By CPU; <" ON "m" OFF "> By memory; <" ON "i" OFF "> By I/O\n"
-                                "\t<" ON "+" OFF "> Inc. delay; <" ON "-" OFF "> Dec. delay; <" ON "%%" OFF "> Toggle time; <" ON "SPACE" OFF "> Refresh\n"
-                                "\t<" ON "P" OFF "> Toggle count userspace processes; <" ON "k" OFF "> Toggle count all processes\n"
-                                "\t<" ON "r" OFF "> Count processes recursively; <" ON "q" OFF "> Quit");
+                                "\t<%1$sp%2$s> By path; <%1$st%2$s> By tasks/procs; <%1$sc%2$s> By CPU; <%1$sm%2$s> By memory; <%1$si%2$s> By I/O\n"
+                                "\t<%1$s+%2$s> Inc. delay; <%1$s-%2$s> Dec. delay; <%1$s%%%2$s> Toggle time; <%1$sSPACE%2$s> Refresh\n"
+                                "\t<%1$sP%2$s> Toggle count userspace processes; <%1$sk%2$s> Toggle count all processes\n"
+                                "\t<%1$sr%2$s> Count processes recursively; <%1$sq%2$s> Quit",
+                                ansi_highlight(), ansi_normal());
                         fflush(stdout);
                         sleep(3);
                         break;
 
                 default:
                         if (key < ' ')
-                                fprintf(stdout, "\nUnknown key '\\x%x'. Ignoring.", key);
+                                fprintf(stdout, "\nUnknown key '\\x%x'. Ignoring.", (unsigned) key);
                         else
                                 fprintf(stdout, "\nUnknown key '%c'. Ignoring.", key);
                         fflush(stdout);
                         sleep(1);
-                        break;
                 }
         }
-
-        r = 0;
-
-finish:
-        group_hashmap_free(a);
-        group_hashmap_free(b);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
+
+static int run(int argc, char *argv[]) {
+        _cleanup_free_ char *root = NULL;
+        CGroupMask mask;
+        int r;
+
+        log_setup();
+
+        r = parse_argv(argc, argv);
+        if (r <= 0)
+                return r;
+
+        r = cg_mask_supported(&mask);
+        if (r < 0)
+                return log_error_errno(r, "Failed to determine supported controllers: %m");
+
+        /* honor user selection unless pids controller is unavailable */
+        PidsCount possible_count = (mask & CGROUP_MASK_PIDS) ? COUNT_PIDS : COUNT_ALL_PROCESSES;
+        arg_count = MIN(possible_count, arg_count);
+
+        if (arg_recursive_unset && arg_count == COUNT_PIDS)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Non-recursive counting is only supported when counting processes, not tasks. Use -P or -k.");
+
+        r = show_cgroup_get_path_and_warn(arg_machine, arg_root, &root);
+        if (r < 0)
+                return log_error_errno(r, "Failed to get root control group path: %m");
+        log_debug("CGroup path: %s", root);
+
+        signal(SIGWINCH, columns_lines_cache_reset);
+
+        if (arg_iterations == UINT_MAX)
+                arg_iterations = on_tty() ? 0 : 1;
+
+        return loop(root);
+}
+
+DEFINE_MAIN_FUNCTION(run);

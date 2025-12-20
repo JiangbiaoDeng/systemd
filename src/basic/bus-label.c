@@ -1,31 +1,13 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <stdlib.h>
 
 #include "alloc-util.h"
 #include "bus-label.h"
 #include "hexdecoct.h"
-#include "macro.h"
+#include "string-util.h"
 
-char *bus_label_escape(const char *s) {
+char* bus_label_escape(const char *s) {
         char *r, *t;
         const char *f;
 
@@ -44,12 +26,10 @@ char *bus_label_escape(const char *s) {
 
         for (f = s, t = r; *f; f++) {
 
-                /* Escape everything that is not a-zA-Z0-9. We also
-                 * escape 0-9 if it's the first character */
+                /* Escape everything that is not a-zA-Z0-9. We also escape 0-9 if it's the first character */
 
-                if (!(*f >= 'A' && *f <= 'Z') &&
-                    !(*f >= 'a' && *f <= 'z') &&
-                    !(f > s && *f >= '0' && *f <= '9')) {
+                if (!ascii_isalpha(*f) &&
+                    !(f > s && ascii_isdigit(*f))) {
                         *(t++) = '_';
                         *(t++) = hexchar(*f >> 4);
                         *(t++) = hexchar(*f);
@@ -62,11 +42,14 @@ char *bus_label_escape(const char *s) {
         return r;
 }
 
-char *bus_label_unescape_n(const char *f, size_t l) {
+char* bus_label_unescape_n(const char *f, size_t l) {
         char *r, *t;
         size_t i;
 
         assert_return(f, NULL);
+
+        if (l == SIZE_MAX)
+                l = strlen(f);
 
         /* Special case for the empty string */
         if (l == 1 && *f == '_')

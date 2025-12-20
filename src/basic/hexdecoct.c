@@ -1,33 +1,12 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <ctype.h>
-#include <errno.h>
-#include <stdint.h>
-#include <stdlib.h>
+#include <stdio.h>
 
 #include "alloc-util.h"
 #include "hexdecoct.h"
-#include "macro.h"
+#include "memory-util.h"
 #include "string-util.h"
-#include "util.h"
 
 char octchar(int x) {
         return '0' + (x & 7);
@@ -54,7 +33,7 @@ int undecchar(char c) {
 }
 
 char hexchar(int x) {
-        static const char table[16] = "0123456789abcdef";
+        static const char table[] = "0123456789abcdef";
 
         return table[x & 15];
 }
@@ -73,15 +52,17 @@ int unhexchar(char c) {
         return -EINVAL;
 }
 
-char *hexmem(const void *p, size_t l) {
+char* hexmem(const void *p, size_t l) {
         const uint8_t *x;
         char *r, *z;
+
+        assert(p || l == 0);
 
         z = r = new(char, l * 2 + 1);
         if (!r)
                 return NULL;
 
-        for (x = p; x < (const uint8_t*) p + l; x++) {
+        for (x = p; x && x < (const uint8_t*) p + l; x++) {
                 *(z++) = hexchar(*x >> 4);
                 *(z++) = hexchar(*x & 15);
         }
@@ -90,33 +71,77 @@ char *hexmem(const void *p, size_t l) {
         return r;
 }
 
-int unhexmem(const char *p, size_t l, void **mem, size_t *len) {
-        _cleanup_free_ uint8_t *r = NULL;
-        uint8_t *z;
-        const char *x;
+static int unhex_next(const char **p, size_t *l) {
+        int r;
 
-        assert(mem);
-        assert(len);
+        assert(p);
+        assert(l);
+
+        /* Find the next non-whitespace character, and decode it. We
+         * greedily skip all preceding and all following whitespace. */
+
+        for (;;) {
+                if (*l == 0)
+                        return -EPIPE;
+
+                if (!strchr(WHITESPACE, **p))
+                        break;
+
+                /* Skip leading whitespace */
+                (*p)++, (*l)--;
+        }
+
+        r = unhexchar(**p);
+        if (r < 0)
+                return r;
+
+        for (;;) {
+                (*p)++, (*l)--;
+
+                if (*l == 0 || !strchr(WHITESPACE, **p))
+                        break;
+
+                /* Skip following whitespace */
+        }
+
+        return r;
+}
+
+int unhexmem_full(
+                const char *p,
+                size_t l,
+                bool secure,
+                void **ret_data,
+                size_t *ret_size) {
+
+        _cleanup_free_ uint8_t *buf = NULL;
+        size_t buf_size;
+        const char *x;
+        uint8_t *z;
+
         assert(p || l == 0);
 
-        if (l == (size_t) -1)
+        if (l == SIZE_MAX)
                 l = strlen(p);
 
-        if (l % 2 != 0)
-                return -EINVAL;
-
-        z = r = malloc((l + 1) / 2 + 1);
-        if (!r)
+        /* Note that the calculation of memory size is an upper boundary, as we ignore whitespace while decoding */
+        buf_size = (l + 1) / 2 + 1;
+        buf = malloc(buf_size);
+        if (!buf)
                 return -ENOMEM;
 
-        for (x = p; x < p + l; x += 2) {
+        CLEANUP_ERASE_PTR(secure ? &buf : NULL, buf_size);
+
+        for (x = p, z = buf;;) {
                 int a, b;
 
-                a = unhexchar(x[0]);
+                a = unhex_next(&x, &l);
+                if (a == -EPIPE) /* End of string */
+                        break;
                 if (a < 0)
                         return a;
 
-                b = unhexchar(x[1]);
+                b = unhex_next(&x, &l);
                 if (b < 0)
                         return b;
 
@@ -125,9 +150,10 @@ int unhexmem(const char *p, size_t l, void **mem, size_t *len) {
 
         *z = 0;
 
-        *mem = r;
-        r = NULL;
-        *len = (l + 1) / 2;
+        if (ret_size)
+                *ret_size = (size_t) (z - buf);
+        if (ret_data)
+                *ret_data = TAKE_PTR(buf);
 
         return 0;
 }
@@ -139,8 +165,8 @@ int unhexmem(const char *p, size_t l, void **mem, size_t *len) {
  * useful when representing NSEC3 hashes, as one can then verify the
  * order of hashes directly from their representation. */
 char base32hexchar(int x) {
-        static const char table[32] = "0123456789"
-                                      "ABCDEFGHIJKLMNOPQRSTUV";
+        static const char table[] = "0123456789"
+                                    "ABCDEFGHIJKLMNOPQRSTUV";
 
         return table[x & 31];
 }
@@ -159,7 +185,7 @@ int unbase32hexchar(char c) {
         return -EINVAL;
 }
 
-char *base32hexmem(const void *p, size_t l, bool padding) {
+char* base32hexmem(const void *p, size_t l, bool padding) {
         char *r, *z;
         const uint8_t *x;
         size_t len;
@@ -195,7 +221,7 @@ char *base32hexmem(const void *p, size_t l, bool padding) {
 
         for (x = p; x < (const uint8_t*) p + (l / 5) * 5; x += 5) {
                 /* x[0] == XXXXXXXX; x[1] == YYYYYYYY; x[2] == ZZZZZZZZ
-                   x[3] == QQQQQQQQ; x[4] == WWWWWWWW */
+                 * x[3] == QQQQQQQQ; x[4] == WWWWWWWW */
                 *(z++) = base32hexchar(x[0] >> 3);                    /* 000XXXXX */
                 *(z++) = base32hexchar((x[0] & 7) << 2 | x[1] >> 6);  /* 000XXXYY */
                 *(z++) = base32hexchar((x[1] & 63) >> 1);             /* 000YYYYY */
@@ -279,7 +305,7 @@ int unbase32hexmem(const char *p, size_t l, bool padding, void **mem, size_t *_l
         assert(mem);
         assert(_len);
 
-        if (l == (size_t) -1)
+        if (l == SIZE_MAX)
                 l = strlen(p);
 
         /* padding ensures any base32hex input has input divisible by 8 */
@@ -295,7 +321,7 @@ int unbase32hexmem(const char *p, size_t l, bool padding, void **mem, size_t *_l
         }
 
         /* a group of eight input bytes needs five output bytes, in case of
-           padding we need to add some extra bytes */
+         * padding we need to add some extra bytes */
         len = (l / 8) * 5;
 
         switch (l % 8) {
@@ -323,7 +349,7 @@ int unbase32hexmem(const char *p, size_t l, bool padding, void **mem, size_t *_l
 
         for (x = p; x < p + (l / 8) * 8; x += 8) {
                 /* a == 000XXXXX; b == 000YYYYY; c == 000ZZZZZ; d == 000WWWWW
-                   e == 000SSSSS; f == 000QQQQQ; g == 000VVVVV; h == 000RRRRR */
+                 * e == 000SSSSS; f == 000QQQQQ; g == 000VVVVV; h == 000RRRRR */
                 a = unbase32hexchar(x[0]);
                 if (a < 0)
                         return -EINVAL;
@@ -482,8 +508,7 @@ int unbase32hexmem(const char *p, size_t l, bool padding, void **mem, size_t *_l
 
         *z = 0;
 
-        *mem = r;
-        r = NULL;
+        *mem = TAKE_PTR(r);
         *_len = len;
 
         return 0;
@@ -491,9 +516,19 @@ int unbase32hexmem(const char *p, size_t l, bool padding, void **mem, size_t *_l
 
 /* https://tools.ietf.org/html/rfc4648#section-4 */
 char base64char(int x) {
-        static const char table[64] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                                      "abcdefghijklmnopqrstuvwxyz"
-                                      "0123456789+/";
+        static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                    "abcdefghijklmnopqrstuvwxyz"
+                                    "0123456789+/";
+        return table[x & 63];
+}
+
+/* This is almost base64char(), but not entirely, as it uses the "url and filename safe" alphabet,
+ * since we don't want "/" appear in interface names (since interfaces appear in sysfs as filenames).
+ * See section #5 of RFC 4648. */
+char urlsafe_base64char(int x) {
+        static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                    "abcdefghijklmnopqrstuvwxyz"
+                                    "0123456789-_";
         return table[x & 63];
 }
 
@@ -515,113 +550,171 @@ int unbase64char(char c) {
 
         offset += '9' - '0' + 1;
 
-        if (c == '+')
+        if (IN_SET(c, '+', '-')) /* Support both the regular and the URL safe character set (see above) */
                 return offset;
 
         offset++;
 
-        if (c == '/')
+        if (IN_SET(c, '/', '_')) /* ditto */
                 return offset;
 
         return -EINVAL;
 }
 
-ssize_t base64mem(const void *p, size_t l, char **out) {
-        char *r, *z;
+static void maybe_line_break(char **x, char *start, size_t line_break) {
+        size_t n;
+
+        assert(x);
+        assert(*x);
+        assert(start);
+        assert(*x >= start);
+
+        if (line_break == SIZE_MAX)
+                return;
+
+        n = *x - start;
+
+        if (n % (line_break + 1) == line_break)
+                *((*x)++) = '\n';
+}
+
+ssize_t base64mem_full(
+                const void *p,
+                size_t l,
+                size_t line_break,
+                char **ret) {
+
         const uint8_t *x;
+        char *b, *z;
+        size_t m;
 
         assert(p || l == 0);
-        assert(out);
+        assert(line_break > 0);
+        assert(ret);
 
         /* three input bytes makes four output bytes, padding is added so we must round up */
-        z = r = malloc(4 * (l + 2) / 3 + 1);
-        if (!r)
+        m = 4 * (l + 2) / 3 + 1;
+        if (line_break != SIZE_MAX)
+                m += m / line_break;
+
+        z = b = malloc(m);
+        if (!b)
                 return -ENOMEM;
 
-        for (x = p; x < (const uint8_t*) p + (l / 3) * 3; x += 3) {
+        for (x = p; x && x < (const uint8_t*) p + (l / 3) * 3; x += 3) {
                 /* x[0] == XXXXXXXX; x[1] == YYYYYYYY; x[2] == ZZZZZZZZ */
+                maybe_line_break(&z, b, line_break);
                 *(z++) = base64char(x[0] >> 2);                    /* 00XXXXXX */
+                maybe_line_break(&z, b, line_break);
                 *(z++) = base64char((x[0] & 3) << 4 | x[1] >> 4);  /* 00XXYYYY */
+                maybe_line_break(&z, b, line_break);
                 *(z++) = base64char((x[1] & 15) << 2 | x[2] >> 6); /* 00YYYYZZ */
+                maybe_line_break(&z, b, line_break);
                 *(z++) = base64char(x[2] & 63);                    /* 00ZZZZZZ */
         }
 
         switch (l % 3) {
         case 2:
+                maybe_line_break(&z, b, line_break);
                 *(z++) = base64char(x[0] >> 2);                   /* 00XXXXXX */
+                maybe_line_break(&z, b, line_break);
                 *(z++) = base64char((x[0] & 3) << 4 | x[1] >> 4); /* 00XXYYYY */
+                maybe_line_break(&z, b, line_break);
                 *(z++) = base64char((x[1] & 15) << 2);            /* 00YYYY00 */
+                maybe_line_break(&z, b, line_break);
                 *(z++) = '=';
-
                 break;
-        case 1:
-                *(z++) = base64char(x[0] >> 2);        /* 00XXXXXX */
-                *(z++) = base64char((x[0] & 3) << 4);  /* 00XX0000 */
-                *(z++) = '=';
-                *(z++) = '=';
 
+        case 1:
+                maybe_line_break(&z, b, line_break);
+                *(z++) = base64char(x[0] >> 2);        /* 00XXXXXX */
+                maybe_line_break(&z, b, line_break);
+                *(z++) = base64char((x[0] & 3) << 4);  /* 00XX0000 */
+                maybe_line_break(&z, b, line_break);
+                *(z++) = '=';
+                maybe_line_break(&z, b, line_break);
+                *(z++) = '=';
                 break;
         }
 
         *z = 0;
-        *out = r;
-        return z - r;
+        *ret = b;
+
+        assert(z >= b); /* Let static analyzers know that the answer is non-negative. */
+        return z - b;
 }
 
-static int base64_append_width(
-                char **prefix, int plen,
-                const char *sep, int indent,
-                const void *p, size_t l,
-                int width) {
+static ssize_t base64_append_width(
+                char **prefix,
+                size_t plen,
+                char sep,
+                size_t indent,
+                const void *p,
+                size_t l,
+                size_t width) {
 
         _cleanup_free_ char *x = NULL;
         char *t, *s;
-        ssize_t slen, len, avail;
-        int line, lines;
+        size_t lines;
+        ssize_t len;
+
+        assert(prefix);
+        assert(*prefix || plen == 0);
+        assert(p || l == 0);
 
         len = base64mem(p, l, &x);
-        if (len <= 0)
+        if (len < 0)
                 return len;
+        if (len == 0)
+                return plen;
 
         lines = DIV_ROUND_UP(len, width);
 
-        slen = strlen_ptr(sep);
-        t = realloc(*prefix, plen + 1 + slen + (indent + width + 1) * lines);
+        if (plen >= SSIZE_MAX - 1 - 1 ||
+            lines > (SSIZE_MAX - plen - 1 - 1) / (indent + width + 1))
+                return -ENOMEM;
+
+        t = realloc(*prefix, plen + 1 + 1 + (indent + width + 1) * lines);
         if (!t)
                 return -ENOMEM;
 
-        memcpy_safe(t + plen, sep, slen);
+        s = t + plen;
+        for (size_t line = 0; line < lines; line++) {
+                size_t act = MIN(width, (size_t) len);
 
-        for (line = 0, s = t + plen + slen, avail = len; line < lines; line++) {
-                int act = MIN(width, avail);
+                if (line > 0)
+                        sep = '\n';
 
-                if (line > 0 || sep) {
-                        memset(s, ' ', indent);
-                        s += indent;
+                if (s > t) {
+                        *s++ = sep;
+                        if (sep == '\n')
+                                s = mempset(s, ' ', indent);
                 }
 
-                memcpy(s, x + width * line, act);
-                s += act;
-                *(s++) = line < lines - 1 ? '\n' : '\0';
-                avail -= act;
+                s = mempcpy(s, x + width * line, act);
+                len -= act;
         }
-        assert(avail == 0);
+        assert(len == 0);
 
+        *s = '\0';
         *prefix = t;
-        return 0;
+        return s - t;
 }
 
-int base64_append(
-                char **prefix, int plen,
-                const void *p, size_t l,
-                int indent, int width) {
+ssize_t base64_append(
+                char **prefix,
+                size_t plen,
+                const void *p,
+                size_t l,
+                size_t indent,
+                size_t width) {
 
         if (plen > width / 2 || plen + indent > width)
                 /* leave indent on the left, keep last column free */
-                return base64_append_width(prefix, plen, "\n", indent, p, l, width - indent - 1);
+                return base64_append_width(prefix, plen, '\n', indent, p, l, width - indent);
         else
                 /* leave plen on the left, keep last column free */
-                return base64_append_width(prefix, plen, NULL, plen, p, l, width - plen - 1);
+                return base64_append_width(prefix, plen, ' ', plen + 1, p, l, width - plen - 1);
 }
 
 static int unbase64_next(const char **p, size_t *l) {
@@ -631,7 +724,7 @@ static int unbase64_next(const char **p, size_t *l) {
         assert(l);
 
         /* Find the next non-whitespace character, and decode it. If we find padding, we return it as INT_MAX. We
-         * greedily skip all preceeding and all following whitespace. */
+         * greedily skip all preceding and all following whitespace. */
 
         for (;;) {
                 if (*l == 0)
@@ -666,26 +759,32 @@ static int unbase64_next(const char **p, size_t *l) {
         return ret;
 }
 
-int unbase64mem(const char *p, size_t l, void **ret, size_t *ret_size) {
+int unbase64mem_full(
+                const char *p,
+                size_t l,
+                bool secure,
+                void **ret_data,
+                size_t *ret_size) {
+
         _cleanup_free_ uint8_t *buf = NULL;
         const char *x;
         uint8_t *z;
         size_t len;
 
         assert(p || l == 0);
-        assert(ret);
-        assert(ret_size);
 
-        if (l == (size_t) -1)
+        if (l == SIZE_MAX)
                 l = strlen(p);
 
         /* A group of four input bytes needs three output bytes, in case of padding we need to add two or three extra
-           bytes. Note that this calculation is an upper boundary, as we ignore whitespace while decoding */
+         * bytes. Note that this calculation is an upper boundary, as we ignore whitespace while decoding */
         len = (l / 4) * 3 + (l % 4 != 0 ? (l % 4) - 1 : 0);
 
         buf = malloc(len + 1);
         if (!buf)
                 return -ENOMEM;
+
+        CLEANUP_ERASE_PTR(secure ? &buf : NULL, len);
 
         for (x = p, z = buf;;) {
                 int a, b, c, d; /* a == 00XXXXXX; b == 00YYYYYY; c == 00ZZZZZZ; d == 00WWWWWW */
@@ -748,11 +847,12 @@ int unbase64mem(const char *p, size_t l, void **ret, size_t *ret_size) {
 
         *z = 0;
 
+        assert((size_t) (z - buf) <= len);
+
         if (ret_size)
                 *ret_size = (size_t) (z - buf);
-
-        *ret = buf;
-        buf = NULL;
+        if (ret_data)
+                *ret_data = TAKE_PTR(buf);
 
         return 0;
 }
@@ -762,6 +862,9 @@ void hexdump(FILE *f, const void *p, size_t s) {
         unsigned n = 0;
 
         assert(b || s == 0);
+
+        if (s == SIZE_MAX)
+                s = strlen(p);
 
         if (!f)
                 f = stdout;

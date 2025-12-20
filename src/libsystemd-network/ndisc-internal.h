@@ -1,45 +1,36 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 /***
-  This file is part of systemd.
-
-  Copyright (C) 2014 Intel Corporation. All rights reserved.
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  Copyright © 2014 Intel Corporation. All rights reserved.
 ***/
 
-#include "log.h"
+#include <net/ethernet.h>
+#include <netinet/in.h>
 
-#include "sd-ndisc.h"
+#include "sd-event.h"
+#include "sd-ndisc.h" /* IWYU pragma: export */
+
+#include "sd-forward.h"
+#include "network-common.h"
+#include "time-util.h"
 
 #define NDISC_ROUTER_SOLICITATION_INTERVAL (4U * USEC_PER_SEC)
 #define NDISC_MAX_ROUTER_SOLICITATION_INTERVAL (3600U * USEC_PER_SEC)
 #define NDISC_MAX_ROUTER_SOLICITATIONS 3U
 
-struct sd_ndisc {
+typedef struct sd_ndisc {
         unsigned n_ref;
 
         int ifindex;
+        char *ifname;
         int fd;
 
         sd_event *event;
         int event_priority;
 
+        struct in6_addr link_local_addr;
         struct ether_addr mac_addr;
-        uint8_t hop_limit;
-        uint32_t mtu;
 
         sd_event_source *recv_event_source;
         sd_event_source *timeout_event_source;
@@ -49,7 +40,18 @@ struct sd_ndisc {
 
         sd_ndisc_callback_t callback;
         void *userdata;
-};
+} sd_ndisc;
 
-#define log_ndisc_errno(error, fmt, ...) log_internal(LOG_DEBUG, error, __FILE__, __LINE__, __func__, "NDISC: " fmt, ##__VA_ARGS__)
-#define log_ndisc(fmt, ...) log_ndisc_errno(0, fmt, ##__VA_ARGS__)
+const char* ndisc_event_to_string(sd_ndisc_event_t e) _const_;
+sd_ndisc_event_t ndisc_event_from_string(const char *s) _pure_;
+
+#define log_ndisc_errno(ndisc, error, fmt, ...)         \
+        log_interface_prefix_full_errno(                \
+                "NDISC: ",                              \
+                sd_ndisc, ndisc,                        \
+                error, fmt, ##__VA_ARGS__)
+#define log_ndisc(ndisc, fmt, ...)                      \
+        log_interface_prefix_full_errno_zerook(         \
+                "NDISC: ",                              \
+                sd_ndisc, ndisc,                        \
+                0, fmt, ##__VA_ARGS__)

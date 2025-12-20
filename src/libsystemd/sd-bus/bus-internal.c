@@ -1,27 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+#include "sd-bus.h"
 
 #include "alloc-util.h"
+#include "bus-error.h"
 #include "bus-internal.h"
 #include "bus-message.h"
+#include "escape.h"
 #include "hexdecoct.h"
+#include "log.h"
 #include "string-util.h"
 
 bool object_path_is_valid(const char *p) {
@@ -46,10 +33,8 @@ bool object_path_is_valid(const char *p) {
                 } else {
                         bool good;
 
-                        good =
-                                (*q >= 'a' && *q <= 'z') ||
-                                (*q >= 'A' && *q <= 'Z') ||
-                                (*q >= '0' && *q <= '9') ||
+                        good = ascii_isalpha(*q) ||
+                                ascii_isdigit(*q) ||
                                 *q == '_';
 
                         if (!good)
@@ -61,7 +46,7 @@ bool object_path_is_valid(const char *p) {
         if (slash)
                 return false;
 
-        return true;
+        return (q - p) <= BUS_PATH_SIZE_MAX;
 }
 
 char* object_path_startswith(const char *a, const char *b) {
@@ -104,18 +89,22 @@ bool interface_name_is_valid(const char *p) {
                         bool good;
 
                         good =
-                                (*q >= 'a' && *q <= 'z') ||
-                                (*q >= 'A' && *q <= 'Z') ||
-                                (!dot && *q >= '0' && *q <= '9') ||
+                                ascii_isalpha(*q) ||
+                                (!dot && ascii_isdigit(*q)) ||
                                 *q == '_';
 
-                        if (!good)
+                        if (!good) {
+                                if (DEBUG_LOGGING) {
+                                        _cleanup_free_ char *iface = cescape(p);
+                                        log_debug("The interface %s is invalid as it contains special character", strnull(iface));
+                                }
                                 return false;
+                        }
 
                         dot = false;
                 }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         if (dot)
@@ -146,9 +135,8 @@ bool service_name_is_valid(const char *p) {
                         bool good;
 
                         good =
-                                (*q >= 'a' && *q <= 'z') ||
-                                (*q >= 'A' && *q <= 'Z') ||
-                                ((!dot || unique) && *q >= '0' && *q <= '9') ||
+                                ascii_isalpha(*q) ||
+                                ((!dot || unique) && ascii_isdigit(*q)) ||
                                 IN_SET(*q, '_', '-');
 
                         if (!good)
@@ -157,7 +145,7 @@ bool service_name_is_valid(const char *p) {
                         dot = false;
                 }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         if (dot)
@@ -167,26 +155,6 @@ bool service_name_is_valid(const char *p) {
                 return false;
 
         return true;
-}
-
-char* service_name_startswith(const char *a, const char *b) {
-        const char *p;
-
-        if (!service_name_is_valid(a) ||
-            !service_name_is_valid(b))
-                return NULL;
-
-        p = startswith(a, b);
-        if (!p)
-                return NULL;
-
-        if (*p == 0)
-                return (char*) p;
-
-        if (*p == '.')
-                return (char*) p + 1;
-
-        return NULL;
 }
 
 bool member_name_is_valid(const char *p) {
@@ -199,16 +167,15 @@ bool member_name_is_valid(const char *p) {
                 bool good;
 
                 good =
-                        (*q >= 'a' && *q <= 'z') ||
-                        (*q >= 'A' && *q <= 'Z') ||
-                        (*q >= '0' && *q <= '9') ||
+                        ascii_isalpha(*q) ||
+                        ascii_isdigit(*q) ||
                         *q == '_';
 
                 if (!good)
                         return false;
         }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         return true;
@@ -218,7 +185,7 @@ bool member_name_is_valid(const char *p) {
  * Complex pattern match
  * This checks whether @a is a 'complex-prefix' of @b, or @b is a
  * 'complex-prefix' of @a, based on strings that consist of labels with @c as
- * spearator. This function returns true if:
+ * separator. This function returns true if:
  *   - both strings are equal
  *   - either is a prefix of the other and ends with @c
  * The second rule makes sure that either string needs to be fully included in
@@ -310,7 +277,7 @@ int bus_message_type_from_string(const char *s, uint8_t *u) {
         return 0;
 }
 
-const char *bus_message_type_to_string(uint8_t u) {
+const char* bus_message_type_to_string(uint8_t u) {
         if (u == SD_BUS_MESSAGE_SIGNAL)
                 return "signal";
         else if (u == SD_BUS_MESSAGE_METHOD_CALL)
@@ -323,7 +290,7 @@ const char *bus_message_type_to_string(uint8_t u) {
                 return NULL;
 }
 
-char *bus_address_escape(const char *v) {
+char* bus_address_escape(const char *v) {
         const char *a;
         char *r, *b;
 
@@ -333,9 +300,8 @@ char *bus_address_escape(const char *v) {
 
         for (a = v, b = r; *a; a++) {
 
-                if ((*a >= '0' && *a <= '9') ||
-                    (*a >= 'a' && *a <= 'z') ||
-                    (*a >= 'A' && *a <= 'Z') ||
+                if (ascii_isdigit(*a) ||
+                    ascii_isalpha(*a) ||
                     strchr("_-/.", *a))
                         *(b++) = *a;
                 else {
@@ -349,16 +315,12 @@ char *bus_address_escape(const char *v) {
         return r;
 }
 
-int bus_maybe_reply_error(sd_bus_message *m, int r, sd_bus_error *error) {
+int bus_maybe_reply_error(sd_bus_message *m, int r, const sd_bus_error *e) {
         assert(m);
 
-        if (r < 0) {
+        if (sd_bus_error_is_set(e) || r < 0) {
                 if (m->header->type == SD_BUS_MESSAGE_METHOD_CALL)
-                        sd_bus_reply_method_errno(m, r, error);
-
-        } else if (sd_bus_error_is_set(error)) {
-                if (m->header->type == SD_BUS_MESSAGE_METHOD_CALL)
-                        sd_bus_reply_method_error(m, error);
+                        sd_bus_reply_method_errno(m, r, e);
         } else
                 return r;
 
@@ -374,7 +336,7 @@ int bus_maybe_reply_error(sd_bus_message *m, int r, sd_bus_error *error) {
                   strna(m->root_container.signature),
                   strna(m->error.name),
                   strna(m->error.message),
-                  bus_error_message(error, r));
+                  bus_error_message(e, r));
 
         return 1;
 }

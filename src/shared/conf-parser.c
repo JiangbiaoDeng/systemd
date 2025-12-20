@@ -1,70 +1,68 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <errno.h>
-#include <limits.h>
-#include <stdint.h>
+#include <linux/ipv6.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
+
+#include "sd-id128.h"
 
 #include "alloc-util.h"
+#include "calendarspec.h"
+#include "chase.h"
 #include "conf-files.h"
 #include "conf-parser.h"
-#include "def.h"
+#include "constants.h"
+#include "dns-domain.h"
+#include "escape.h"
+#include "ether-addr-util.h"
 #include "extract-word.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "hash-funcs.h"
+#include "hostname-util.h"
+#include "id128-util.h"
+#include "in-addr-prefix-util.h"
+#include "ip-protocol-list.h"
 #include "log.h"
-#include "macro.h"
+#include "missing-network.h"
+#include "nulstr-util.h"
+#include "parse-helpers.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "percent-util.h"
 #include "process-util.h"
+#include "rlimit-util.h"
+#include "set.h"
 #include "signal-util.h"
+#include "siphash24.h"
 #include "socket-util.h"
+#include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "syslog-util.h"
 #include "time-util.h"
 #include "utf8.h"
 
+DEFINE_PRIVATE_HASH_OPS_WITH_VALUE_DESTRUCTOR(config_file_hash_ops_fclose,
+                                              char, path_hash_func, path_compare,
+                                              FILE, safe_fclose);
+
 int config_item_table_lookup(
                 const void *table,
                 const char *section,
                 const char *lvalue,
-                ConfigParserCallback *func,
-                int *ltype,
-                void **data,
+                ConfigParserCallback *ret_func,
+                int *ret_ltype,
+                void **ret_data,
                 void *userdata) {
-
-        const ConfigTableItem *t;
 
         assert(table);
         assert(lvalue);
-        assert(func);
-        assert(ltype);
-        assert(data);
+        assert(ret_func);
+        assert(ret_ltype);
+        assert(ret_data);
 
-        for (t = table; t->lvalue; t++) {
+        for (const ConfigTableItem *t = table; t->lvalue; t++) {
 
                 if (!streq(lvalue, t->lvalue))
                         continue;
@@ -72,12 +70,15 @@ int config_item_table_lookup(
                 if (!streq_ptr(section, t->section))
                         continue;
 
-                *func = t->parse;
-                *ltype = t->ltype;
-                *data = t->data;
+                *ret_func = t->parse;
+                *ret_ltype = t->ltype;
+                *ret_data = t->data;
                 return 1;
         }
 
+        *ret_func = NULL;
+        *ret_ltype = 0;
+        *ret_data = NULL;
         return 0;
 }
 
@@ -85,9 +86,9 @@ int config_item_perf_lookup(
                 const void *table,
                 const char *section,
                 const char *lvalue,
-                ConfigParserCallback *func,
-                int *ltype,
-                void **data,
+                ConfigParserCallback *ret_func,
+                int *ret_ltype,
+                void **ret_data,
                 void *userdata) {
 
         ConfigPerfItemLookup lookup = (ConfigPerfItemLookup) table;
@@ -95,29 +96,27 @@ int config_item_perf_lookup(
 
         assert(table);
         assert(lvalue);
-        assert(func);
-        assert(ltype);
-        assert(data);
+        assert(ret_func);
+        assert(ret_ltype);
+        assert(ret_data);
 
-        if (!section)
-                p = lookup(lvalue, strlen(lvalue));
-        else {
-                char *key;
+        if (section) {
+                const char *key;
 
-                key = strjoin(section, ".", lvalue);
-                if (!key)
-                        return -ENOMEM;
-
+                key = strjoina(section, ".", lvalue);
                 p = lookup(key, strlen(key));
-                free(key);
+        } else
+                p = lookup(lvalue, strlen(lvalue));
+        if (!p) {
+                *ret_func = NULL;
+                *ret_ltype = 0;
+                *ret_data = NULL;
+                return 0;
         }
 
-        if (!p)
-                return 0;
-
-        *func = p->parse;
-        *ltype = p->ltype;
-        *data = (uint8_t*) userdata + p->offset;
+        *ret_func = p->parse;
+        *ret_ltype = p->ltype;
+        *ret_data = (uint8_t*) userdata + p->offset;
         return 1;
 }
 
@@ -149,25 +148,29 @@ static int next_assignment(
         r = lookup(table, section, lvalue, &func, &ltype, &data, userdata);
         if (r < 0)
                 return r;
-
         if (r > 0) {
-                if (func)
-                        return func(unit, filename, line, section, section_line,
-                                    lvalue, ltype, rvalue, data, userdata);
+                if (!func)
+                        return 0;
 
-                return 0;
+                return func(unit, filename, line, section, section_line,
+                            lvalue, ltype, rvalue, data, userdata);
         }
 
         /* Warn about unknown non-extension fields. */
         if (!(flags & CONFIG_PARSE_RELAXED) && !startswith(lvalue, "X-"))
-                log_syntax(unit, LOG_WARNING, filename, line, 0, "Unknown lvalue '%s' in section '%s'", lvalue, section);
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Unknown key '%s'%s%s%s, ignoring.",
+                           lvalue,
+                           section ? " in section [" : "",
+                           strempty(section),
+                           section ? "]" : "");
 
         return 0;
 }
 
 /* Parse a single logical line */
 static int parse_line(
-                const char* unit,
+                const char *unit,
                 const char *filename,
                 unsigned line,
                 const char *sections,
@@ -177,10 +180,10 @@ static int parse_line(
                 char **section,
                 unsigned *section_line,
                 bool *section_ignored,
-                char *l,
+                char *l, /* is modified */
                 void *userdata) {
 
-        char *e, *include;
+        char *e;
 
         assert(filename);
         assert(line > 0);
@@ -188,69 +191,52 @@ static int parse_line(
         assert(l);
 
         l = strstrip(l);
-        if (!*l)
+        if (isempty(l))
                 return 0;
 
-        if (strchr(COMMENTS "\n", *l))
+        if (l[0] == '\n')
                 return 0;
 
-        include = first_word(l, ".include");
-        if (include) {
-                _cleanup_free_ char *fn = NULL;
+        if (!utf8_is_valid(l))
+                return log_syntax_invalid_utf8(unit, LOG_WARNING, filename, line, l);
 
-                /* .includes are a bad idea, we only support them here
-                 * for historical reasons. They create cyclic include
-                 * problems and make it difficult to detect
-                 * configuration file changes with an easy
-                 * stat(). Better approaches, such as .d/ drop-in
-                 * snippets exist.
-                 *
-                 * Support for them should be eventually removed. */
-
-                if (!(flags & CONFIG_PARSE_ALLOW_INCLUDE)) {
-                        log_syntax(unit, LOG_ERR, filename, line, 0, ".include not allowed here. Ignoring.");
-                        return 0;
-                }
-
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           ".include directives are deprecated, and support for them will be removed in a future version of systemd. "
-                           "Please use drop-in files instead.");
-
-                fn = file_in_same_dir(filename, strstrip(include));
-                if (!fn)
-                        return -ENOMEM;
-
-                return config_parse(unit, fn, NULL, sections, lookup, table, flags, userdata);
-        }
-
-        if (*l == '[') {
+        if (l[0] == '[') {
+                _cleanup_free_ char *n = NULL;
                 size_t k;
-                char *n;
 
                 k = strlen(l);
                 assert(k > 0);
 
-                if (l[k-1] != ']') {
-                        log_syntax(unit, LOG_ERR, filename, line, 0, "Invalid section header '%s'", l);
-                        return -EBADMSG;
-                }
+                if (l[k-1] != ']')
+                        return log_syntax(unit, LOG_ERR, filename, line, SYNTHETIC_ERRNO(EBADMSG), "Invalid section header '%s'", l);
 
                 n = strndup(l+1, k-2);
                 if (!n)
-                        return -ENOMEM;
+                        return log_oom();
+
+                if (!string_is_safe(n))
+                        return log_syntax(unit, LOG_ERR, filename, line, SYNTHETIC_ERRNO(EBADMSG), "Bad characters in section header '%s'", l);
 
                 if (sections && !nulstr_contains(sections, n)) {
+                        bool ignore;
 
-                        if (!(flags & CONFIG_PARSE_RELAXED) && !startswith(n, "X-"))
+                        ignore = (flags & CONFIG_PARSE_RELAXED) || startswith(n, "X-");
+
+                        if (!ignore)
+                                NULSTR_FOREACH(t, sections)
+                                        if (streq_ptr(n, startswith(t, "-"))) { /* Ignore sections prefixed with "-" in valid section list */
+                                                ignore = true;
+                                                break;
+                                        }
+
+                        if (!ignore)
                                 log_syntax(unit, LOG_WARNING, filename, line, 0, "Unknown section '%s'. Ignoring.", n);
 
-                        free(n);
                         *section = mfree(*section);
                         *section_line = 0;
                         *section_ignored = true;
                 } else {
-                        free(*section);
-                        *section = n;
+                        free_and_replace(*section, n);
                         *section_line = line;
                         *section_ignored = false;
                 }
@@ -259,7 +245,6 @@ static int parse_line(
         }
 
         if (sections && !*section) {
-
                 if (!(flags & CONFIG_PARSE_RELAXED) && !*section_ignored)
                         log_syntax(unit, LOG_WARNING, filename, line, 0, "Assignment outside of section. Ignoring.");
 
@@ -267,10 +252,12 @@ static int parse_line(
         }
 
         e = strchr(l, '=');
-        if (!e) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0, "Missing '='.");
-                return -EINVAL;
-        }
+        if (!e)
+                return log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                  "Missing '=', ignoring line.");
+        if (e == l)
+                return log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                  "Missing key name before '=', ignoring line.");
 
         *e = 0;
         e++;
@@ -289,20 +276,23 @@ static int parse_line(
 }
 
 /* Go through the file and parse each line */
-int config_parse(const char *unit,
-                 const char *filename,
-                 FILE *f,
-                 const char *sections,
-                 ConfigItemLookup lookup,
-                 const void *table,
-                 ConfigParseFlags flags,
-                 void *userdata) {
+int config_parse(
+                const char *unit,
+                const char *filename,
+                FILE *f,
+                const char *sections,
+                ConfigItemLookup lookup,
+                const void *table,
+                ConfigParseFlags flags,
+                void *userdata,
+                struct stat *ret_stat) {
 
         _cleanup_free_ char *section = NULL, *continuation = NULL;
         _cleanup_fclose_ FILE *ours = NULL;
         unsigned line = 0, section_line = 0;
-        bool section_ignored = false;
-        int r;
+        bool section_ignored = false, bom_seen = false;
+        struct stat st;
+        int r, fd;
 
         assert(filename);
         assert(lookup);
@@ -313,13 +303,30 @@ int config_parse(const char *unit,
                         /* Only log on request, except for ENOENT,
                          * since we return 0 to the caller. */
                         if ((flags & CONFIG_PARSE_WARN) || errno == ENOENT)
-                                log_full(errno == ENOENT ? LOG_DEBUG : LOG_ERR,
-                                         "Failed to open configuration file '%s': %m", filename);
-                        return errno == ENOENT ? 0 : -errno;
+                                log_full_errno(errno == ENOENT ? LOG_DEBUG : LOG_ERR, errno,
+                                               "Failed to open configuration file '%s': %m", filename);
+
+                        if (errno == ENOENT) {
+                                if (ret_stat)
+                                        *ret_stat = (struct stat) {};
+
+                                return 0;
+                        }
+
+                        return -errno;
                 }
         }
 
-        fd_warn_permissions(filename, fileno(f));
+        fd = fileno(f);
+        if (fd >= 0) { /* stream might not have an fd, let's be careful hence */
+
+                if (fstat(fd, &st) < 0)
+                        return log_full_errno(FLAGS_SET(flags, CONFIG_PARSE_WARN) ? LOG_ERR : LOG_DEBUG, errno,
+                                              "Failed to fstat(%s): %m", filename);
+
+                (void) stat_warn_permissions(filename, &st);
+        } else
+                st = (struct stat) {};
 
         for (;;) {
                 _cleanup_free_ char *buf = NULL;
@@ -336,20 +343,26 @@ int config_parse(const char *unit,
                         return r;
                 }
                 if (r < 0) {
-                        if (CONFIG_PARSE_WARN)
+                        if (FLAGS_SET(flags, CONFIG_PARSE_WARN))
                                 log_error_errno(r, "%s:%u: Error while reading configuration file: %m", filename, line);
 
                         return r;
                 }
 
+                line++;
+
+                l = skip_leading_chars(buf, WHITESPACE);
+                if (*l != '\0' && strchr(COMMENTS, *l))
+                        continue;
+
                 l = buf;
-                if (!(flags & CONFIG_PARSE_REFUSE_BOM)) {
+                if (!bom_seen) {
                         char *q;
 
                         q = startswith(buf, UTF8_BYTE_ORDER_MARK);
                         if (q) {
                                 l = q;
-                                flags |= CONFIG_PARSE_REFUSE_BOM;
+                                bom_seen = true;
                         }
                 }
 
@@ -360,7 +373,7 @@ int config_parse(const char *unit,
                                 return -ENOBUFS;
                         }
 
-                        if (!strextend(&continuation, l, NULL)) {
+                        if (!strextend(&continuation, l)) {
                                 if (flags & CONFIG_PARSE_WARN)
                                         log_oom();
                                 return -ENOMEM;
@@ -394,7 +407,7 @@ int config_parse(const char *unit,
 
                 r = parse_line(unit,
                                filename,
-                               ++line,
+                               line,
                                sections,
                                lookup,
                                table,
@@ -408,35 +421,290 @@ int config_parse(const char *unit,
                         if (flags & CONFIG_PARSE_WARN)
                                 log_warning_errno(r, "%s:%u: Failed to parse file: %m", filename, line);
                         return r;
-
                 }
 
                 continuation = mfree(continuation);
         }
 
+        if (continuation) {
+                r = parse_line(unit,
+                               filename,
+                               ++line,
+                               sections,
+                               lookup,
+                               table,
+                               flags,
+                               &section,
+                               &section_line,
+                               &section_ignored,
+                               continuation,
+                               userdata);
+                if (r < 0) {
+                        if (flags & CONFIG_PARSE_WARN)
+                                log_warning_errno(r, "%s:%u: Failed to parse file: %m", filename, line);
+                        return r;
+                }
+        }
+
+        if (ret_stat)
+                *ret_stat = st;
+
+        return 1;
+}
+
+int hashmap_put_stats_by_path(Hashmap **stats_by_path, const char *path, const struct stat *st) {
+        _cleanup_free_ struct stat *st_copy = NULL;
+        _cleanup_free_ char *path_copy = NULL;
+        int r;
+
+        assert(stats_by_path);
+        assert(path);
+        assert(st);
+
+        st_copy = newdup(struct stat, st, 1);
+        if (!st_copy)
+                return -ENOMEM;
+
+        path_copy = strdup(path);
+        if (!path_copy)
+                return -ENOMEM;
+
+        r = hashmap_ensure_put(stats_by_path, &path_hash_ops_free_free, path_copy, st_copy);
+        if (r < 0)
+                return r;
+
+        assert(r > 0);
+        TAKE_PTR(path_copy);
+        TAKE_PTR(st_copy);
         return 0;
 }
 
 static int config_parse_many_files(
-                const char *conf_file,
+                const char *root,
+                const char* const* conf_files,
                 char **files,
                 const char *sections,
                 ConfigItemLookup lookup,
                 const void *table,
                 ConfigParseFlags flags,
-                void *userdata) {
+                void *userdata,
+                Hashmap **ret_stats_by_path) {
 
-        char **fn;
-        int r;
+        _cleanup_hashmap_free_ Hashmap *stats_by_path = NULL;
+        _cleanup_ordered_hashmap_free_ OrderedHashmap *dropins = NULL;
+        _cleanup_set_free_ Set *inodes = NULL;
+        struct stat st;
+        int r, level = FLAGS_SET(flags, CONFIG_PARSE_WARN) ? LOG_WARNING : LOG_DEBUG;
 
-        if (conf_file) {
-                r = config_parse(NULL, conf_file, NULL, sections, lookup, table, flags, userdata);
-                if (r < 0)
-                        return r;
+        if (ret_stats_by_path) {
+                stats_by_path = hashmap_new(&path_hash_ops_free_free);
+                if (!stats_by_path)
+                        return log_oom_full(level);
         }
 
         STRV_FOREACH(fn, files) {
-                r = config_parse(NULL, *fn, NULL, sections, lookup, table, flags, userdata);
+                _cleanup_fclose_ FILE *f = NULL;
+                _cleanup_free_ char *fname = NULL;
+
+                r = chase_and_fopen_unlocked(*fn, root, CHASE_AT_RESOLVE_IN_ROOT, "re", &fname, &f);
+                if (r == -ENOENT)
+                        continue;
+                if (r < 0)
+                        return log_full_errno(level, r, "Failed to open %s: %m", *fn);
+
+                int fd = fileno(f);
+
+                r = ordered_hashmap_ensure_put(&dropins, &config_file_hash_ops_fclose, *fn, f);
+                if (r < 0) {
+                        assert(r == -ENOMEM);
+                        return log_oom_full(level);
+                }
+                assert(r > 0);
+                TAKE_PTR(f);
+
+                /* Get inodes for all drop-ins. Later we'll verify if main config is a symlink to or is
+                 * symlinked as one of them. If so, we skip reading main config file directly. */
+
+                _cleanup_free_ struct stat *st_dropin = new(struct stat, 1);
+                if (!st_dropin)
+                        return log_oom_full(level);
+
+                if (fstat(fd, st_dropin) < 0)
+                        return log_full_errno(level, errno, "Failed to stat %s: %m", *fn);
+
+                r = set_ensure_consume(&inodes, &inode_hash_ops, TAKE_PTR(st_dropin));
+                if (r < 0)
+                        return log_oom_full(level);
+        }
+
+        /* First read the first found main config file. */
+        STRV_FOREACH(fn, conf_files) {
+                _cleanup_fclose_ FILE *f = NULL;
+
+                r = chase_and_fopen_unlocked(*fn, root, CHASE_AT_RESOLVE_IN_ROOT, "re", NULL, &f);
+                if (r == -ENOENT)
+                        continue;
+                if (r < 0)
+                        return log_full_errno(level, r, "Failed to open %s: %m", *fn);
+
+                if (inodes) {
+                        if (fstat(fileno(f), &st) < 0)
+                                return log_full_errno(level, errno, "Failed to stat %s: %m", *fn);
+
+                        if (set_contains(inodes, &st)) {
+                                log_debug("%s: symlink to/symlinked as drop-in, will be read later.", *fn);
+                                break;
+                        }
+                }
+
+                r = config_parse(/* unit= */ NULL, *fn, f, sections, lookup, table, flags, userdata, &st);
+                if (r < 0)
+                        return r; /* config_parse() logs internally. */
+                assert(r > 0);
+
+                if (ret_stats_by_path) {
+                        r = hashmap_put_stats_by_path(&stats_by_path, *fn, &st);
+                        if (r < 0)
+                                return log_full_errno(level, r, "Failed to save stats of %s: %m", *fn);
+                }
+
+                break;
+        }
+
+        /* Then read all the drop-ins. */
+
+        const char *path_dropin;
+        FILE *f_dropin;
+        ORDERED_HASHMAP_FOREACH_KEY(f_dropin, path_dropin, dropins) {
+                r = config_parse(/* unit= */ NULL, path_dropin, f_dropin, sections, lookup, table, flags, userdata, &st);
+                if (r < 0)
+                        return r; /* config_parse() logs internally. */
+                assert(r > 0);
+
+                if (ret_stats_by_path) {
+                        r = hashmap_put_stats_by_path(&stats_by_path, path_dropin, &st);
+                        if (r < 0)
+                                return log_full_errno(level, r, "Failed to save stats of %s: %m", path_dropin);
+                }
+        }
+
+        if (ret_stats_by_path)
+                *ret_stats_by_path = TAKE_PTR(stats_by_path);
+
+        return 0;
+}
+
+/* Parse each config file in the directories specified as strv. */
+int config_parse_many(
+                const char* const* conf_files,
+                const char* const* conf_file_dirs,
+                const char *dropin_dirname,
+                const char *root,
+                const char *sections,
+                ConfigItemLookup lookup,
+                const void *table,
+                ConfigParseFlags flags,
+                void *userdata,
+                Hashmap **ret_stats_by_path,
+                char ***ret_dropin_files) {
+
+        _cleanup_strv_free_ char **files = NULL;
+        int r;
+
+        assert(conf_file_dirs);
+        assert(dropin_dirname);
+        assert(table);
+
+        r = conf_files_list_dropins(&files, dropin_dirname, root, conf_file_dirs);
+        if (r < 0)
+                return log_full_errno(FLAGS_SET(flags, CONFIG_PARSE_WARN) ? LOG_WARNING : LOG_DEBUG, r,
+                                      "Failed to list drop-ins in %s: %m", dropin_dirname);
+
+        r = config_parse_many_files(root, conf_files, files, sections, lookup, table, flags, userdata, ret_stats_by_path);
+        if (r < 0)
+                return r; /* config_parse_many_files() logs internally. */
+
+        if (ret_dropin_files)
+                *ret_dropin_files = TAKE_PTR(files);
+
+        return 0;
+}
+
+int config_parse_standard_file_with_dropins_full(
+                const char *root,
+                const char *main_file,    /* A path like "systemd/frobnicator.conf" */
+                const char *sections,
+                ConfigItemLookup lookup,
+                const void *table,
+                ConfigParseFlags flags,
+                void *userdata,
+                Hashmap **ret_stats_by_path,
+                char ***ret_dropin_files) {
+
+        const char* const *conf_paths = (const char* const*) CONF_PATHS_STRV("");
+        _cleanup_strv_free_ char **configs = NULL;
+        int r, level = FLAGS_SET(flags, CONFIG_PARSE_WARN) ? LOG_WARNING : LOG_DEBUG;
+
+        /* Build the list of main config files */
+        r = strv_extend_strv_biconcat(&configs, root, conf_paths, main_file);
+        if (r < 0)
+                return log_oom_full(level);
+
+        _cleanup_free_ char *dropin_dirname = strjoin(main_file, ".d");
+        if (!dropin_dirname)
+                return log_oom_full(level);
+
+        return config_parse_many(
+                        (const char* const*) configs,
+                        conf_paths,
+                        dropin_dirname,
+                        root,
+                        sections,
+                        lookup,
+                        table,
+                        flags,
+                        userdata,
+                        ret_stats_by_path,
+                        ret_dropin_files);
+}
+
+static int dropins_get_stats_by_path(
+                const char* conf_file,
+                const char* const* conf_file_dirs,
+                Hashmap **stats_by_path) {
+
+        _cleanup_strv_free_ char **files = NULL;
+        _cleanup_free_ char *dropin_dirname = NULL;
+        int r;
+
+        assert(conf_file);
+        assert(conf_file_dirs);
+        assert(stats_by_path);
+
+        r = path_extract_filename(conf_file, &dropin_dirname);
+        if (r < 0)
+                return r;
+        if (r == O_DIRECTORY)
+                return -EINVAL;
+
+        if (!strextend(&dropin_dirname, ".d"))
+                return -ENOMEM;
+
+        r = conf_files_list_dropins(&files, dropin_dirname, /* root= */ NULL, conf_file_dirs);
+        if (r < 0)
+                return r;
+
+        STRV_FOREACH(fn, files) {
+                struct stat st;
+
+                if (stat(*fn, &st) < 0) {
+                        if (errno == ENOENT)
+                                continue;
+
+                        return -errno;
+                }
+
+                r = hashmap_put_stats_by_path(stats_by_path, *fn, &st);
                 if (r < 0)
                         return r;
         }
@@ -444,128 +712,204 @@ static int config_parse_many_files(
         return 0;
 }
 
-/* Parse each config file in the directories specified as nulstr. */
-int config_parse_many_nulstr(
-                const char *conf_file,
-                const char *conf_file_dirs,
-                const char *sections,
-                ConfigItemLookup lookup,
-                const void *table,
-                ConfigParseFlags flags,
-                void *userdata) {
+int config_get_stats_by_path(
+                const char *suffix,
+                const char *root,
+                unsigned flags,
+                const char* const* dirs,
+                bool check_dropins,
+                Hashmap **ret) {
 
+        _cleanup_hashmap_free_ Hashmap *stats_by_path = NULL;
         _cleanup_strv_free_ char **files = NULL;
         int r;
 
-        r = conf_files_list_nulstr(&files, ".conf", NULL, 0, conf_file_dirs);
+        assert(suffix);
+        assert(dirs);
+        assert(ret);
+
+        /* Unlike config_parse(), this does not support stream. */
+
+        r = conf_files_list_strv(&files, suffix, root, flags, dirs);
         if (r < 0)
                 return r;
 
-        return config_parse_many_files(conf_file, files, sections, lookup, table, flags, userdata);
+        STRV_FOREACH(f, files) {
+                struct stat st;
+
+                /* First read the main config file. */
+                if (stat(*f, &st) < 0) {
+                        if (errno == ENOENT)
+                                continue;
+
+                        return -errno;
+                }
+
+                /* Skipping an empty file. */
+                if (null_or_empty(&st))
+                        continue;
+
+                r = hashmap_put_stats_by_path(&stats_by_path, *f, &st);
+                if (r < 0)
+                        return r;
+
+                if (!check_dropins)
+                        continue;
+
+                /* Then read all the drop-ins if requested. */
+                r = dropins_get_stats_by_path(*f, dirs, &stats_by_path);
+                if (r < 0)
+                        return r;
+        }
+
+        *ret = TAKE_PTR(stats_by_path);
+        return 0;
 }
 
-/* Parse each config file in the directories specified as strv. */
-int config_parse_many(
-                const char *conf_file,
-                const char* const* conf_file_dirs,
-                const char *dropin_dirname,
-                const char *sections,
-                ConfigItemLookup lookup,
-                const void *table,
-                ConfigParseFlags flags,
+bool stats_by_path_equal(Hashmap *a, Hashmap *b) {
+        struct stat *st_a, *st_b;
+        const char *path;
+
+        if (hashmap_size(a) != hashmap_size(b))
+                return false;
+
+        HASHMAP_FOREACH_KEY(st_a, path, a) {
+                st_b = hashmap_get(b, path);
+                if (!st_b)
+                        return false;
+
+                if (!stat_inode_unmodified(st_a, st_b))
+                        return false;
+        }
+
+        return true;
+}
+
+int config_section_parse(
+                const ConfigSectionParser *parsers,
+                size_t n_parsers,
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
                 void *userdata) {
 
-        _cleanup_strv_free_ char **dropin_dirs = NULL;
-        _cleanup_strv_free_ char **files = NULL;
-        const char *suffix;
+        assert(parsers);
+        assert(n_parsers > 0);
+        assert(ltype >= 0);
+        assert((size_t) ltype < n_parsers);
+        assert(userdata);
+
+        const ConfigSectionParser *e = parsers + ltype;
+        assert(e->parser);
+
+        /* This is used when a object is dynamically allocated per [SECTION] in a config parser, e.g.
+         * [Address] for systemd.network. Takes the allocated object as 'userdata', then it is passed to
+         * config parsers in the table. The 'data' field points to an element of the passed object, where
+         * its offset is given by the table. */
+
+        return e->parser(unit, filename, line, section, section_line, lvalue, e->ltype, rvalue,
+                         (uint8_t*) userdata + e->offset, userdata);
+}
+
+void config_section_hash_func(const ConfigSection *c, struct siphash *state) {
+        siphash24_compress_string(c->filename, state);
+        siphash24_compress_typesafe(c->line, state);
+}
+
+int config_section_compare_func(const ConfigSection *x, const ConfigSection *y) {
         int r;
 
-        suffix = strjoina("/", dropin_dirname);
-        r = strv_extend_strv_concat(&dropin_dirs, (char**) conf_file_dirs, suffix);
-        if (r < 0)
+        r = strcmp(x->filename, y->filename);
+        if (r != 0)
                 return r;
 
-        r = conf_files_list_strv(&files, ".conf", NULL, 0, (const char* const*) dropin_dirs);
-        if (r < 0)
-                return r;
+        return CMP(x->line, y->line);
+}
 
-        return config_parse_many_files(conf_file, files, sections, lookup, table, flags, userdata);
+DEFINE_HASH_OPS(config_section_hash_ops, ConfigSection, config_section_hash_func, config_section_compare_func);
+
+int config_section_new(const char *filename, unsigned line, ConfigSection **ret) {
+        ConfigSection *cs;
+
+        assert(filename);
+        assert(line > 0);
+        assert(ret);
+
+        cs = malloc0(offsetof(ConfigSection, filename) + strlen(filename) + 1);
+        if (!cs)
+                return -ENOMEM;
+
+        strcpy(cs->filename, filename);
+        cs->line = line;
+
+        *ret = TAKE_PTR(cs);
+        return 0;
+}
+
+static int _hashmap_by_section_find_unused_line(
+                HashmapBase *entries_by_section,
+                const char *filename,
+                unsigned *ret) {
+
+        ConfigSection *cs;
+        unsigned n = 0;
+        void *entry;
+
+        HASHMAP_BASE_FOREACH_KEY(entry, cs, entries_by_section) {
+                if (filename && !streq(cs->filename, filename))
+                        continue;
+                n = MAX(n, cs->line);
+        }
+
+        /* overflow? */
+        if (n >= UINT_MAX)
+                return -EFBIG;
+
+        *ret = n + 1;
+        return 0;
+}
+
+int hashmap_by_section_find_unused_line(
+        Hashmap *entries_by_section,
+        const char *filename,
+        unsigned *ret) {
+
+        return _hashmap_by_section_find_unused_line(HASHMAP_BASE(entries_by_section), filename, ret);
+}
+
+int ordered_hashmap_by_section_find_unused_line(
+        OrderedHashmap *entries_by_section,
+        const char *filename,
+        unsigned *ret) {
+
+        return _hashmap_by_section_find_unused_line(HASHMAP_BASE(entries_by_section), filename, ret);
 }
 
 #define DEFINE_PARSER(type, vartype, conv_func)                         \
-        int config_parse_##type(                                        \
-                        const char *unit,                               \
-                        const char *filename,                           \
-                        unsigned line,                                  \
-                        const char *section,                            \
-                        unsigned section_line,                          \
-                        const char *lvalue,                             \
-                        int ltype,                                      \
-                        const char *rvalue,                             \
-                        void *data,                                     \
-                        void *userdata) {                               \
-                                                                        \
-                vartype *i = data;                                      \
-                int r;                                                  \
-                                                                        \
-                assert(filename);                                       \
-                assert(lvalue);                                         \
-                assert(rvalue);                                         \
-                assert(data);                                           \
-                                                                        \
-                r = conv_func(rvalue, i);                               \
-                if (r < 0)                                              \
-                        log_syntax(unit, LOG_ERR, filename, line, r,    \
-                                   "Failed to parse %s value, ignoring: %s", \
-                                   #type, rvalue);                      \
-                                                                        \
-                return 0;                                               \
-        }
+        DEFINE_CONFIG_PARSE_PTR(config_parse_##type, conv_func, vartype)
 
 DEFINE_PARSER(int, int, safe_atoi);
 DEFINE_PARSER(long, long, safe_atoli);
 DEFINE_PARSER(uint8, uint8_t, safe_atou8);
 DEFINE_PARSER(uint16, uint16_t, safe_atou16);
 DEFINE_PARSER(uint32, uint32_t, safe_atou32);
+DEFINE_PARSER(int32, int32_t, safe_atoi32);
 DEFINE_PARSER(uint64, uint64_t, safe_atou64);
 DEFINE_PARSER(unsigned, unsigned, safe_atou);
 DEFINE_PARSER(double, double, safe_atod);
 DEFINE_PARSER(nsec, nsec_t, parse_nsec);
 DEFINE_PARSER(sec, usec_t, parse_sec);
+DEFINE_PARSER(sec_def_infinity, usec_t, parse_sec_def_infinity);
 DEFINE_PARSER(mode, mode_t, parse_mode);
+DEFINE_PARSER(pid, pid_t, parse_pid);
 
-int config_parse_iec_size(const char* unit,
-                            const char *filename,
-                            unsigned line,
-                            const char *section,
-                            unsigned section_line,
-                            const char *lvalue,
-                            int ltype,
-                            const char *rvalue,
-                            void *data,
-                            void *userdata) {
-
-        size_t *sz = data;
-        uint64_t v;
-        int r;
-
-        assert(filename);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = parse_size(rvalue, 1024, &v);
-        if (r < 0 || (uint64_t) (size_t) v != v) {
-                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse size value, ignoring: %s", rvalue);
-                return 0;
-        }
-
-        *sz = (size_t) v;
-        return 0;
-}
-
-int config_parse_si_size(
-                const char* unit,
+int config_parse_iec_size(
+                const char *unit,
                 const char *filename,
                 unsigned line,
                 const char *section,
@@ -576,27 +920,52 @@ int config_parse_si_size(
                 void *data,
                 void *userdata) {
 
-        size_t *sz = data;
+        size_t *sz = ASSERT_PTR(data);
         uint64_t v;
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
-        r = parse_size(rvalue, 1000, &v);
-        if (r < 0 || (uint64_t) (size_t) v != v) {
-                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse size value, ignoring: %s", rvalue);
-                return 0;
-        }
+        r = parse_size(rvalue, 1024, &v);
+        if (r >= 0 && (uint64_t) (size_t) v != v)
+                r = -ERANGE;
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
 
         *sz = (size_t) v;
-        return 0;
+        return 1;
+}
+
+int config_parse_si_uint64(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint64_t *sz = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        r = parse_size(rvalue, 1000, sz);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1;
 }
 
 int config_parse_iec_uint64(
-                const char* unit,
+                const char *unit,
                 const char *filename,
                 unsigned line,
                 const char *section,
@@ -607,55 +976,22 @@ int config_parse_iec_uint64(
                 void *data,
                 void *userdata) {
 
-        uint64_t *bytes = data;
+        uint64_t *bytes = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         r = parse_size(rvalue, 1024, bytes);
         if (r < 0)
-                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse size value, ignoring: %s", rvalue);
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
 
-        return 0;
+        return 1;
 }
 
-int config_parse_bool(const char* unit,
-                      const char *filename,
-                      unsigned line,
-                      const char *section,
-                      unsigned section_line,
-                      const char *lvalue,
-                      int ltype,
-                      const char *rvalue,
-                      void *data,
-                      void *userdata) {
-
-        int k;
-        bool *b = data;
-        bool fatal = ltype;
-
-        assert(filename);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        k = parse_boolean(rvalue);
-        if (k < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, k,
-                           "Failed to parse boolean value%s: %s",
-                           fatal ? "" : ", ignoring", rvalue);
-                return fatal ? -ENOEXEC : 0;
-        }
-
-        *b = !!k;
-        return 0;
-}
-
-int config_parse_tristate(
-                const char* unit,
+int config_parse_iec_uint64_infinity(
+                const char *unit,
                 const char *filename,
                 unsigned line,
                 const char *section,
@@ -666,25 +1002,159 @@ int config_parse_tristate(
                 void *data,
                 void *userdata) {
 
-        int k, *t = data;
+        uint64_t *bytes = ASSERT_PTR(data);
+
+        assert(rvalue);
+
+        if (streq(rvalue, "infinity")) {
+                *bytes = UINT64_MAX;
+                return 1;
+        }
+
+        return config_parse_iec_uint64(unit, filename, line, section, section_line, lvalue, ltype, rvalue, data, userdata);
+}
+
+int config_parse_bool(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        bool *b = ASSERT_PTR(data);
+        bool fatal = ltype;
+        int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
-        /* A tristate is pretty much a boolean, except that it can
-         * also take the special value -1, indicating "uninitialized",
-         * much like NULL is for a pointer type. */
-
-        k = parse_boolean(rvalue);
-        if (k < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, k, "Failed to parse boolean value, ignoring: %s", rvalue);
-                return 0;
+        r = parse_boolean(rvalue);
+        if (r < 0) {
+                log_syntax_parse_error_full(unit, filename, line, r, fatal, lvalue, rvalue);
+                return fatal ? -ENOEXEC : 0;
         }
 
-        *t = !!k;
-        return 0;
+        *b = r;
+        return 1; /* set */
+}
+
+int config_parse_uint32_flag(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint32_t *flags = ASSERT_PTR(data);
+        int r;
+
+        assert(ltype != 0);
+
+        r = isempty(rvalue) ? 0 : parse_boolean(rvalue);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        SET_FLAG(*flags, ltype, r);
+        return 1;
+}
+
+int config_parse_uint32_invert_flag(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint32_t *flags = ASSERT_PTR(data);
+        int r;
+
+        assert(ltype != 0);
+
+        r = isempty(rvalue) ? 0 : parse_boolean(rvalue);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        SET_FLAG(*flags, ltype, !r);
+        return 1;
+}
+
+int config_parse_id128(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        sd_id128_t *result = data;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        r = id128_from_string_nonzero(rvalue, result);
+        if (r == -ENXIO) {
+                log_syntax(unit, LOG_WARNING, filename, line, r, "128-bit ID/UUID is all 0, ignoring: %s", rvalue);
+                return 0;
+        }
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1;
+}
+
+int config_parse_tristate(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        int r, *t = ASSERT_PTR(data);
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        /* A tristate is pretty much a boolean, except that it can also take an empty string,
+         * indicating "uninitialized", much like NULL is for a pointer type. */
+
+        if (isempty(rvalue)) {
+                *t = -1;
+                return 1;
+        }
+
+        r = parse_tristate(rvalue, t);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1;
 }
 
 int config_parse_string(
@@ -699,30 +1169,117 @@ int config_parse_string(
                 void *data,
                 void *userdata) {
 
-        char **s = data, *n;
+        char **s = ASSERT_PTR(data);
+        int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
-        if (!utf8_is_valid(rvalue)) {
-                log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, rvalue);
+        if (isempty(rvalue)) {
+                *s = mfree(*s);
+                return 1;
+        }
+
+        if (FLAGS_SET(ltype, CONFIG_PARSE_STRING_SAFE) && !string_is_safe(rvalue)) {
+                _cleanup_free_ char *escaped = NULL;
+
+                escaped = cescape(rvalue);
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Specified string contains unsafe characters, ignoring: %s", strna(escaped));
                 return 0;
         }
 
-        if (isempty(rvalue))
-                n = NULL;
-        else {
-                n = strdup(rvalue);
-                if (!n)
-                        return log_oom();
+        if (FLAGS_SET(ltype, CONFIG_PARSE_STRING_ASCII) && !ascii_is_valid(rvalue)) {
+                _cleanup_free_ char *escaped = NULL;
+
+                escaped = cescape(rvalue);
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Specified string contains invalid ASCII characters, ignoring: %s", strna(escaped));
+                return 0;
         }
 
-        free(*s);
-        *s = n;
+        r = free_and_strdup_warn(s, rvalue);
+        if (r < 0)
+                return r;
 
-        return 0;
+        return 1;
+}
+
+int config_parse_dns_name(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        char **hostname = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *hostname = mfree(*hostname);
+                return 1;
+        }
+
+        r = dns_name_is_valid(rvalue);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to check validity of DNS domain name '%s', ignoring assignment: %m", rvalue);
+                return 0;
+        }
+        if (r == 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Specified invalid DNS domain name, ignoring assignment: %s", rvalue);
+                return 0;
+        }
+
+        r = free_and_strdup_warn(hostname, rvalue);
+        if (r < 0)
+                return r;
+
+        return 1;
+}
+
+int config_parse_hostname(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        char **hostname = ASSERT_PTR(data);
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *hostname = mfree(*hostname);
+                return 1;
+        }
+
+        if (!hostname_is_valid(rvalue, 0)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Specified invalid hostname, ignoring assignment: %s", rvalue);
+                return 0;
+        }
+
+        return config_parse_dns_name(unit, filename, line, section, section_line,
+                                     lvalue, ltype, rvalue, data, userdata);
 }
 
 int config_parse_path(
@@ -737,42 +1294,30 @@ int config_parse_path(
                 void *data,
                 void *userdata) {
 
-        char **s = data, *n;
+        _cleanup_free_ char *n = NULL;
         bool fatal = ltype;
+        char **s = ASSERT_PTR(data);
+        int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         if (isempty(rvalue)) {
-                n = NULL;
-                goto finalize;
-        }
-
-        if (!utf8_is_valid(rvalue)) {
-                log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, rvalue);
-                return fatal ? -ENOEXEC : 0;
-        }
-
-        if (!path_is_absolute(rvalue)) {
-                log_syntax(unit, LOG_ERR, filename, line, 0,
-                           "Not an absolute path%s: %s",
-                           fatal ? "" : ", ignoring", rvalue);
-                return fatal ? -ENOEXEC : 0;
+                *s = mfree(*s);
+                return 1;
         }
 
         n = strdup(rvalue);
         if (!n)
                 return log_oom();
 
-        path_kill_slashes(n);
+        r = path_simplify_and_warn(n, PATH_CHECK_ABSOLUTE | (fatal ? PATH_CHECK_FATAL : 0), unit, filename, line, lvalue);
+        if (r < 0)
+                return fatal ? -ENOEXEC : 0;
 
-finalize:
-        free(*s);
-        *s = n;
-
-        return 0;
+        free_and_replace(*s, n);
+        return 1;
 }
 
 int config_parse_strv(
@@ -782,49 +1327,43 @@ int config_parse_strv(
                 const char *section,
                 unsigned section_line,
                 const char *lvalue,
-                int ltype,
+                int ltype, /* When true, duplicated entries will be filtered. */
                 const char *rvalue,
                 void *data,
                 void *userdata) {
 
-        char ***sv = data;
+        char ***sv = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         if (isempty(rvalue)) {
                 *sv = strv_free(*sv);
-                return 0;
+                return 1;
         }
 
-        for (;;) {
-                char *word = NULL;
+        _cleanup_strv_free_ char **strv = NULL;
+        for (const char *p = rvalue;;) {
+                char *word;
 
-                r = extract_first_word(&rvalue, &word, NULL, EXTRACT_QUOTES|EXTRACT_RETAIN_ESCAPE);
+                r = extract_first_word(&p, &word, NULL, EXTRACT_UNQUOTE|EXTRACT_RETAIN_ESCAPE);
+                if (r < 0)
+                        return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
                 if (r == 0)
                         break;
-                if (r == -ENOMEM)
-                        return log_oom();
-                if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Invalid syntax, ignoring: %s", rvalue);
-                        break;
-                }
 
-                if (!utf8_is_valid(word)) {
-                        log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, word);
-                        free(word);
-                        continue;
-                }
-
-                r = strv_consume(sv, word);
+                r = strv_consume(&strv, word);
                 if (r < 0)
                         return log_oom();
         }
 
-        return 0;
+        r = strv_extend_strv_consume(sv, TAKE_PTR(strv), /* filter_duplicates= */ ltype);
+        if (r < 0)
+                return log_oom();
+
+        return 1;
 }
 
 int config_parse_warn_compat(
@@ -838,22 +1377,26 @@ int config_parse_warn_compat(
                 const char *rvalue,
                 void *data,
                 void *userdata) {
+
         Disabled reason = ltype;
 
-        switch(reason) {
+        switch (reason) {
+
         case DISABLED_CONFIGURATION:
                 log_syntax(unit, LOG_DEBUG, filename, line, 0,
                            "Support for option %s= has been disabled at compile time and it is ignored", lvalue);
                 break;
+
         case DISABLED_LEGACY:
                 log_syntax(unit, LOG_INFO, filename, line, 0,
                            "Support for option %s= has been removed and it is ignored", lvalue);
                 break;
+
         case DISABLED_EXPERIMENTAL:
                 log_syntax(unit, LOG_INFO, filename, line, 0,
                            "Support for option %s= has not yet been enabled and it is ignored", lvalue);
                 break;
-        };
+        }
 
         return 0;
 }
@@ -878,14 +1421,12 @@ int config_parse_log_facility(
         assert(data);
 
         x = log_facility_unshifted_from_string(rvalue);
-        if (x < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to parse log facility, ignoring: %s", rvalue);
-                return 0;
-        }
+        if (x < 0)
+                return log_syntax_parse_error(unit, filename, line, x, lvalue, rvalue);
 
         *o = (x << 3) | LOG_PRI(*o);
 
-        return 0;
+        return 1;
 }
 
 int config_parse_log_level(
@@ -908,17 +1449,15 @@ int config_parse_log_level(
         assert(data);
 
         x = log_level_from_string(rvalue);
-        if (x < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to parse log level, ignoring: %s", rvalue);
-                return 0;
-        }
+        if (x < 0)
+                return log_syntax_parse_error(unit, filename, line, x, lvalue, rvalue);
 
         if (*o < 0) /* if it wasn't initialized so far, assume zero facility */
                 *o = x;
         else
                 *o = (*o & LOG_FACMASK) | x;
 
-        return 0;
+        return 1;
 }
 
 int config_parse_signal(
@@ -940,14 +1479,12 @@ int config_parse_signal(
         assert(rvalue);
         assert(sig);
 
-        r = signal_from_string_try_harder(rvalue);
-        if (r <= 0) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to parse signal name, ignoring: %s", rvalue);
-                return 0;
-        }
+        r = signal_from_string(rvalue);
+        if (r <= 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
 
         *sig = r;
-        return 0;
+        return 1;
 }
 
 int config_parse_personality(
@@ -969,18 +1506,17 @@ int config_parse_personality(
         assert(rvalue);
         assert(personality);
 
-        if (isempty(rvalue))
-                p = PERSONALITY_INVALID;
-        else {
-                p = personality_from_string(rvalue);
-                if (p == PERSONALITY_INVALID) {
-                        log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to parse personality, ignoring: %s", rvalue);
-                        return 0;
-                }
+        if (isempty(rvalue)) {
+                *personality = PERSONALITY_INVALID;
+                return 1;
         }
 
+        p = personality_from_string(rvalue);
+        if (p == PERSONALITY_INVALID)
+                return log_syntax_parse_error(unit, filename, line, 0, lvalue, rvalue);
+
         *personality = p;
-        return 0;
+        return 1;
 }
 
 int config_parse_ifname(
@@ -995,29 +1531,81 @@ int config_parse_ifname(
                 void *data,
                 void *userdata) {
 
-        char **s = data;
+        char **s = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         if (isempty(rvalue)) {
                 *s = mfree(*s);
-                return 0;
+                return 1;
         }
 
         if (!ifname_valid(rvalue)) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Interface name is not valid or too long, ignoring assignment: %s", rvalue);
+                log_syntax(unit, LOG_WARNING, filename, line, 0, "Interface name is not valid or too long, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
-        r = free_and_strdup(s, rvalue);
+        r = free_and_strdup_warn(s, rvalue);
+        if (r < 0)
+                return r;
+
+        return 1;
+}
+
+int config_parse_ifnames(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        _cleanup_strv_free_ char **names = NULL;
+        char ***s = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *s = strv_free(*s);
+                return 1;
+        }
+
+        for (const char *p = rvalue;;) {
+                _cleanup_free_ char *word = NULL;
+
+                r = extract_first_word(&p, &word, NULL, 0);
+                if (r < 0)
+                        return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+                if (r == 0)
+                        break;
+
+                if (!ifname_valid_full(word, ltype)) {
+                        log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                   "Interface name is not valid or too long, ignoring assignment: %s",
+                                   word);
+                        continue;
+                }
+
+                r = strv_consume(&names, TAKE_PTR(word));
+                if (r < 0)
+                        return log_oom();
+        }
+
+        r = strv_extend_strv(s, names, true);
         if (r < 0)
                 return log_oom();
 
-        return 0;
+        return 1;
 }
 
 int config_parse_ip_port(
@@ -1032,32 +1620,28 @@ int config_parse_ip_port(
                 void *data,
                 void *userdata) {
 
-        uint16_t *s = data;
+        uint16_t *s = ASSERT_PTR(data);
         uint16_t port;
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         if (isempty(rvalue)) {
                 *s = 0;
-                return 0;
+                return 1;
         }
 
         r = parse_ip_port(rvalue, &port);
-        if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse port '%s'.", rvalue);
-                return 0;
-        }
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
 
         *s = port;
-
-        return 0;
+        return 1;
 }
 
-int config_parse_join_controllers(
+int config_parse_mtu(
                 const char *unit,
                 const char *filename,
                 unsigned line,
@@ -1069,106 +1653,570 @@ int config_parse_join_controllers(
                 void *data,
                 void *userdata) {
 
-        char ****ret = data;
-        const char *whole_rvalue = rvalue;
-        unsigned n = 0;
-        _cleanup_(strv_free_freep) char ***controllers = NULL;
+        uint32_t *mtu = ASSERT_PTR(data);
+        int r;
+
+        assert(rvalue);
+
+        r = parse_mtu(ltype, rvalue, mtu);
+        if (r == -ERANGE) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Maximum transfer unit (MTU) value out of range. Permitted range is %" PRIu32 "…%" PRIu32 ", ignoring: %s",
+                           (uint32_t) (ltype == AF_INET6 ? IPV6_MIN_MTU : IPV4_MIN_MTU), (uint32_t) UINT32_MAX,
+                           rvalue);
+                return 0;
+        }
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1;
+}
+
+int config_parse_rlimit(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        struct rlimit **rl = data, d = {};
+        int r;
+
+        assert(rvalue);
+        assert(rl);
+
+        r = rlimit_parse(ltype, rvalue, &d);
+        if (r == -EILSEQ) {
+                log_syntax(unit, LOG_WARNING, filename, line, r, "Soft resource limit chosen higher than hard limit, ignoring: %s", rvalue);
+                return 0;
+        }
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        if (rl[ltype])
+                *rl[ltype] = d;
+        else {
+                rl[ltype] = newdup(struct rlimit, &d, 1);
+                if (!rl[ltype])
+                        return log_oom();
+        }
+
+        return 1;
+}
+
+int config_parse_permille(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        unsigned *permille = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        r = parse_permille(rvalue);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        *permille = (unsigned) r;
+        return 1;
+}
+
+int config_parse_vlanprotocol(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        int *vlan_protocol = data;
+
+        assert(filename);
+        assert(lvalue);
+
+        if (isempty(rvalue)) {
+                *vlan_protocol = -1;
+                return 1;
+        }
+
+        if (STR_IN_SET(rvalue, "802.1ad", "802.1AD"))
+                *vlan_protocol = ETH_P_8021AD;
+        else if (STR_IN_SET(rvalue, "802.1q", "802.1Q"))
+                *vlan_protocol = ETH_P_8021Q;
+        else
+                return log_syntax_parse_error(unit, filename, line, 0, lvalue, rvalue);
+
+        return 1;
+}
+
+int config_parse_hw_addr(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        struct hw_addr_data *hwaddr = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *hwaddr = HW_ADDR_NULL;
+                return 1;
+        }
+
+        r = parse_hw_addr_full(rvalue, ltype, hwaddr);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1;
+}
+
+int config_parse_hw_addrs(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Set **hwaddrs = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                /* Empty assignment resets the list */
+                *hwaddrs = set_free(*hwaddrs);
+                return 1;
+        }
+
+        for (const char *p = rvalue;;) {
+                _cleanup_free_ char *word = NULL;
+                _cleanup_free_ struct hw_addr_data *n = NULL;
+
+                r = extract_first_word(&p, &word, NULL, 0);
+                if (r < 0)
+                        return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+                if (r == 0)
+                        return 1;
+
+                n = new(struct hw_addr_data, 1);
+                if (!n)
+                        return log_oom();
+
+                r = parse_hw_addr_full(word, ltype, n);
+                if (r < 0) {
+                        log_syntax(unit, LOG_WARNING, filename, line, r,
+                                   "Not a valid hardware address, ignoring: %s", word);
+                        continue;
+                }
+
+                r = set_ensure_consume(hwaddrs, &hw_addr_hash_ops_free, TAKE_PTR(n));
+                if (r < 0)
+                        return log_oom();
+        }
+}
+
+int config_parse_ether_addr(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        _cleanup_free_ struct ether_addr *n = NULL;
+        struct ether_addr **hwaddr = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *hwaddr = mfree(*hwaddr);
+                return 1;
+        }
+
+        n = new0(struct ether_addr, 1);
+        if (!n)
+                return log_oom();
+
+        r = parse_ether_addr(rvalue, n);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        free_and_replace(*hwaddr, n);
+        return 1;
+}
+
+int config_parse_ether_addrs(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Set **hwaddrs = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                /* Empty assignment resets the list */
+                *hwaddrs = set_free(*hwaddrs);
+                return 1;
+        }
+
+        for (const char *p = rvalue;;) {
+                _cleanup_free_ char *word = NULL;
+                _cleanup_free_ struct ether_addr *n = NULL;
+
+                r = extract_first_word(&p, &word, NULL, 0);
+                if (r < 0)
+                        return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+                if (r == 0)
+                        return 1;
+
+                n = new(struct ether_addr, 1);
+                if (!n)
+                        return log_oom();
+
+                r = parse_ether_addr(word, n);
+                if (r < 0) {
+                        log_syntax(unit, LOG_WARNING, filename, line, r,
+                                   "Not a valid MAC address, ignoring: %s", word);
+                        continue;
+                }
+
+                r = set_ensure_consume(hwaddrs, &ether_addr_hash_ops_free, TAKE_PTR(n));
+                if (r < 0)
+                        return log_oom();
+        }
+}
+
+int config_parse_in_addr_non_null(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        /* data must be a pointer to struct in_addr or in6_addr, and the type is determined by ltype. */
+        struct in_addr *ipv4 = ASSERT_PTR(data);
+        struct in6_addr *ipv6 = ASSERT_PTR(data);
+        union in_addr_union a;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(IN_SET(ltype, AF_INET, AF_INET6));
+
+        if (isempty(rvalue)) {
+                if (ltype == AF_INET)
+                        *ipv4 = (struct in_addr) {};
+                else
+                        *ipv6 = (struct in6_addr) {};
+                return 1;
+        }
+
+        r = in_addr_from_string(ltype, rvalue, &a);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        if (!in_addr_is_set(ltype, &a)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "%s= cannot be the ANY address, ignoring: %s", lvalue, rvalue);
+                return 0;
+        }
+
+        if (ltype == AF_INET)
+                *ipv4 = a.in;
+        else
+                *ipv6 = a.in6;
+        return 1;
+}
+
+int config_parse_in_addr_data(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        struct in_addr_data *p = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+
+        if (isempty(rvalue)) {
+                *p = (struct in_addr_data) {};
+                return 1;
+        }
+
+        r = in_addr_from_string_auto(rvalue, &p->family, &p->address);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1;
+}
+
+int config_parse_in_addr_prefix(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype, /* takes boolean, whether we warn about missing prefixlen */
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        struct in_addr_prefix *p = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+
+        if (isempty(rvalue)) {
+                *p = (struct in_addr_prefix) {};
+                return 1;
+        }
+
+        r = in_addr_prefix_from_string_auto_full(rvalue, ltype ? PREFIXLEN_REFUSE : PREFIXLEN_FULL, &p->family, &p->address, &p->prefixlen);
+        if (r == -ENOANO) {
+                r = in_addr_prefix_from_string_auto(rvalue, &p->family, &p->address, &p->prefixlen);
+                if (r >= 0)
+                        log_syntax(unit, LOG_WARNING, filename, line, r,
+                                   "%s=%s is specified without prefix length. Assuming the prefix length is %u. "
+                                   "Please specify the prefix length explicitly.", lvalue, rvalue, p->prefixlen);
+        }
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1;
+}
+
+int config_parse_unsigned_bounded(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                const char *rvalue,
+                unsigned min,
+                unsigned max,
+                bool ignoring,
+                unsigned *ret) {
+
+        int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
         assert(ret);
 
-        for (;;) {
-                _cleanup_free_ char *word = NULL;
-                char **l;
-                int r;
-
-                r = extract_first_word(&rvalue, &word, NULL, EXTRACT_QUOTES);
-                if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Invalid value for %s: %s", lvalue, whole_rvalue);
-                        return r;
-                }
-                if (r == 0)
-                        break;
-
-                l = strv_split(word, ",");
-                if (!l)
-                        return log_oom();
-                strv_uniq(l);
-
-                if (strv_length(l) <= 1) {
-                        strv_free(l);
-                        continue;
-                }
-
-                if (!controllers) {
-                        controllers = new(char**, 2);
-                        if (!controllers) {
-                                strv_free(l);
-                                return log_oom();
-                        }
-
-                        controllers[0] = l;
-                        controllers[1] = NULL;
-
-                        n = 1;
-                } else {
-                        char ***a;
-                        char ***t;
-
-                        t = new0(char**, n+2);
-                        if (!t) {
-                                strv_free(l);
-                                return log_oom();
-                        }
-
-                        n = 0;
-
-                        for (a = controllers; *a; a++)
-                                if (strv_overlap(*a, l)) {
-                                        if (strv_extend_strv(&l, *a, false) < 0) {
-                                                strv_free(l);
-                                                strv_free_free(t);
-                                                return log_oom();
-                                        }
-
-                                } else {
-                                        char **c;
-
-                                        c = strv_copy(*a);
-                                        if (!c) {
-                                                strv_free(l);
-                                                strv_free_free(t);
-                                                return log_oom();
-                                        }
-
-                                        t[n++] = c;
-                                }
-
-                        t[n++] = strv_uniq(l);
-
-                        strv_free_free(controllers);
-                        controllers = t;
-                }
+        r = safe_atou_bounded(rvalue, min, max, ret);
+        if (r == -ERANGE) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Invalid '%s=%s', allowed range is %u..%u%s.",
+                           lvalue, rvalue, min, max, ignoring ? ", ignoring" : "");
+                return ignoring ? 0 : r;
         }
-        if (!isempty(rvalue))
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Trailing garbage, ignoring.");
+        if (r < 0)
+                return log_syntax_parse_error_full(unit, filename, line, r, /* critical= */ !ignoring, lvalue, rvalue);
 
-        /* As a special case, return a single empty strv, to override the default */
-        if (!controllers) {
-                controllers = new(char**, 2);
-                if (!controllers)
-                        return log_oom();
-                controllers[0] = strv_new(NULL, NULL);
-                if (!controllers[0])
-                        return log_oom();
-                controllers[1] = NULL;
+        return 1;  /* Return 1 if something was set */
+}
+
+int config_parse_calendar(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        CalendarSpec **cr = data;
+        _cleanup_(calendar_spec_freep) CalendarSpec *c = NULL;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                *cr = calendar_spec_free(*cr);
+                return 1;
         }
 
-        strv_free_free(*ret);
-        *ret = controllers;
-        controllers = NULL;
+        r = calendar_spec_from_string(rvalue, &c);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
 
-        return 0;
+        free_and_replace_full(*cr, c, calendar_spec_free);
+        return 1;
+}
+
+DEFINE_CONFIG_PARSE(config_parse_percent, parse_percent);
+DEFINE_CONFIG_PARSE(config_parse_permyriad, parse_permyriad);
+DEFINE_CONFIG_PARSE_PTR(config_parse_sec_fix_0, parse_sec_fix_0, usec_t);
+
+int config_parse_timezone(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        char **tz = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *tz = mfree(*tz);
+                return 1;
+        }
+
+        r = verify_timezone(rvalue, LOG_WARNING);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        r = free_and_strdup_warn(tz, rvalue);
+        if (r < 0)
+                return r;
+
+        return 1;
+}
+
+int config_parse_ip_protocol(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint8_t *proto = ASSERT_PTR(data);
+        int r;
+
+        r = isempty(rvalue) ? 0 : parse_ip_protocol_full(rvalue, /* relaxed= */ ltype);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        if (r > UINT8_MAX) {
+                /* linux/fib_rules.h and linux/fou.h define the netlink field as one byte, so we need to
+                 * reject protocols numbers that don't fit in one byte. */
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Invalid '%s=%s', allowed range is 0..255, ignoring.",
+                           lvalue, rvalue);
+                return 0;
+        }
+
+        *proto = r;
+        return 1; /* done. */
+}
+
+int config_parse_loadavg(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        loadavg_t *i = ASSERT_PTR(data);
+        int r;
+
+        assert(rvalue);
+
+        r = parse_permyriad(rvalue);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        r = store_loadavg_fixed_point(r / 100, r % 100, i);
+        if (r < 0)
+                return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+
+        return 1; /* done. */
 }

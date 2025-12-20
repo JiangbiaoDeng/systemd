@@ -1,40 +1,42 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-
-#include "macro.h"
+#include "core-forward.h"
 
 /* Manager status */
 
 typedef enum ShowStatus {
-        _SHOW_STATUS_UNSET = -2,
-        SHOW_STATUS_AUTO = -1,
-        SHOW_STATUS_NO = 0,
-        SHOW_STATUS_YES = 1,
-        SHOW_STATUS_TEMPORARY = 2,
+        SHOW_STATUS_NO,         /* printing of status is disabled */
+        SHOW_STATUS_ERROR,      /* only print errors */
+        SHOW_STATUS_AUTO,       /* disabled but may flip to _TEMPORARY */
+        SHOW_STATUS_TEMPORARY,  /* enabled temporarily, may flip back to _AUTO */
+        SHOW_STATUS_YES,        /* printing of status is enabled */
+        _SHOW_STATUS_MAX,
+        _SHOW_STATUS_INVALID = -EINVAL,
 } ShowStatus;
 
-int parse_show_status(const char *v, ShowStatus *ret);
+typedef enum ShowStatusFlags {
+        SHOW_STATUS_ELLIPSIZE = 1 << 0,
+        SHOW_STATUS_EPHEMERAL = 1 << 1,
+} ShowStatusFlags;
 
-int status_vprintf(const char *status, bool ellipse, bool ephemeral, const char *format, va_list ap) _printf_(4,0);
-int status_printf(const char *status, bool ellipse, bool ephemeral, const char *format, ...) _printf_(4,5);
+typedef enum StatusUnitFormat {
+        STATUS_UNIT_FORMAT_NAME,
+        STATUS_UNIT_FORMAT_DESCRIPTION,
+        STATUS_UNIT_FORMAT_COMBINED,
+        _STATUS_UNIT_FORMAT_MAX,
+        _STATUS_UNIT_FORMAT_INVALID = -EINVAL,
+} StatusUnitFormat;
+
+static inline bool show_status_on(ShowStatus s) {
+        return IN_SET(s, SHOW_STATUS_TEMPORARY, SHOW_STATUS_YES);
+}
+ShowStatus show_status_from_string(const char *s) _const_;
+const char* show_status_to_string(ShowStatus s) _pure_;
+int parse_show_status(const char *s, ShowStatus *ret);
+
+StatusUnitFormat status_unit_format_from_string(const char *s) _const_;
+const char* status_unit_format_to_string(StatusUnitFormat s) _pure_;
+
+int status_vprintf(const char *status, ShowStatusFlags flags, const char *format, va_list ap) _printf_(3,0);
+int status_printf(const char *status, ShowStatusFlags flags, const char *format, ...) _printf_(3,4);

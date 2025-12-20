@@ -1,28 +1,54 @@
-# SPDX-License-Identifier: LGPL-2.1+
-#
-# Copyright 2017 Zbigniew Jędrzejewski-Szmek
-#
-# systemd is free software; you can redistribute it and/or modify it
-# under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation; either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# systemd is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
-install_data('kernel-install',
-             install_mode : 'rwxr-xr-x',
-             install_dir : bindir)
+want_kernel_install = conf.get('ENABLE_KERNEL_INSTALL') == 1
 
-install_data('50-depmod.install',
-             '90-loaderentry.install',
-             install_mode : 'rwxr-xr-x',
-             install_dir : kernelinstalldir)
+executables += [
+        executable_template + {
+                'name' : 'kernel-install',
+                'public' : true,
+                'conditions' : ['ENABLE_KERNEL_INSTALL'],
+                'sources' : files('kernel-install.c'),
+        },
+]
 
-meson.add_install_script('sh', '-c',
-                         mkdir_p.format(join_paths(sysconfdir, 'kernel/install.d')))
+ukify_install = custom_target(
+        input : '60-ukify.install.in',
+        output : '60-ukify.install',
+        command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
+        install : want_kernel_install and want_ukify,
+        install_mode : 'rwxr-xr-x',
+        install_dir : kernelinstalldir)
+
+loaderentry_install = custom_target(
+        input : '90-loaderentry.install.in',
+        output : '90-loaderentry.install',
+        command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
+        install : want_kernel_install,
+        install_mode : 'rwxr-xr-x',
+        install_dir : kernelinstalldir)
+
+uki_copy_install = files('90-uki-copy.install')
+
+kernel_install_files = uki_copy_install + files(
+        '50-depmod.install',
+)
+
+if want_kernel_install
+        install_data(kernel_install_files,
+                     install_mode : 'rwxr-xr-x',
+                     install_dir : kernelinstalldir)
+
+        install_data('install.conf',
+                     install_dir : kerneldir)
+
+        if want_ukify
+                install_data('uki.conf',
+                             install_dir : kerneldir)
+        endif
+
+        if install_sysconfdir
+                install_emptydir(sysconfdir / 'kernel/install.d')
+        endif
+endif
+
+test_kernel_install_sh = files('test-kernel-install.sh')

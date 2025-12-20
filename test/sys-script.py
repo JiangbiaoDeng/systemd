@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: LGPL-2.1+
+# SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # sys-script.py
 #
-# (C) 2017 Canonical Ltd.
+# © 2017 Canonical Ltd.
 # Author: Dan Streetman <dan.streetman@canonical.com>
-#
-# systemd is free software; you can redistribute it and/or modify it
-# under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation; either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# systemd is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
-#
 
 import os, sys
 import shutil
@@ -11691,6 +11677,7 @@ f('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:
 f('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb/uevent', 0o644, b'''MAJOR=8
 MINOR=16
 DEVTYPE=disk
+DEVNAME=sdb
 ''')
 d('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb/queue', 0o755)
 l('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb/queue/bsg', '../../../bsg/7:0:0:0')
@@ -11723,6 +11710,7 @@ f('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:
 f('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb/sdb1/uevent', 0o644, b'''MAJOR=8
 MINOR=17
 DEVTYPE=partition
+DEVNAME=sdb1
 ''')
 d('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb/sdb1/power', 0o755)
 f('sys/devices/pci0000:00/0000:00:1d.7/usb5/5-1/5-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb/sdb1/power/wakeup', 0o644, b'\n')
@@ -13164,6 +13152,7 @@ f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda10
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda10/uevent', 0o644, b'''MAJOR=8
 MINOR=10
 DEVTYPE=partition
+DEVNAME=sda10
 ''')
 d('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda10/power', 0o755)
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda10/power/wakeup', 0o644, b'\n')
@@ -13177,6 +13166,7 @@ f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda9/
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda9/uevent', 0o644, b'''MAJOR=8
 MINOR=9
 DEVTYPE=partition
+DEVNAME=sda9
 ''')
 d('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda9/holders', 0o755)
 l('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda9/holders/md0', '../../../../../../../../../virtual/block/md0')
@@ -13192,6 +13182,7 @@ f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda7/
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda7/uevent', 0o644, b'''MAJOR=8
 MINOR=7
 DEVTYPE=partition
+DEVNAME=sda7
 ''')
 d('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda7/power', 0o755)
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda7/power/wakeup', 0o644, b'\n')
@@ -13219,6 +13210,7 @@ f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda8/
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda8/uevent', 0o644, b'''MAJOR=8
 MINOR=8
 DEVTYPE=partition
+DEVNAME=sda8
 ''')
 d('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda8/power', 0o755)
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda8/power/wakeup', 0o644, b'\n')
@@ -13246,6 +13238,7 @@ f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda6/
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda6/uevent', 0o644, b'''MAJOR=8
 MINOR=6
 DEVTYPE=partition
+DEVNAME=sda6
 ''')
 d('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda6/power', 0o755)
 f('sys/devices/pci0000:00/0000:00:1f.2/host0/target0:0:0/0:0:0:0/block/sda/sda6/power/wakeup', 0o644, b'\n')

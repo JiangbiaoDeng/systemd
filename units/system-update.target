@@ -1,4 +1,4 @@
-#  SPDX-License-Identifier: LGPL-2.1+
+#  SPDX-License-Identifier: LGPL-2.1-or-later
 #
 #  This file is part of systemd.
 #
@@ -12,6 +12,6 @@ Description=Offline System Update
 Documentation=man:systemd.offline-updates(7)
 Documentation=man:systemd.special(7) man:systemd-system-update-generator(8)
 Requires=sysinit.target
-After=sysinit.target
+After=sysinit.target system-update-pre.target
 AllowIsolate=yes
 Wants=system-update-cleanup.service

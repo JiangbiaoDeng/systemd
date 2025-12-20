@@ -1,42 +1,13 @@
-<?xml version='1.0'?> <!--*- Mode: nxml; nxml-child-indent: 2; indent-tabs-mode: nil -*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-"http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2018 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
+<?xml version='1.0'?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
 <refentry id="sd_bus_get_n_queued_read">
 
   <refentryinfo>
     <title>sd_bus_get_fd</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>Lennart</firstname>
-        <surname>Poettering</surname>
-        <email>lennart@poettering.net</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -76,7 +47,7 @@
       <function>sd_bus_get_n_queued_read()</function> may be used to query the number of bus messages in the read queue
       of a bus connection object. The read queue contains all messages read from the transport medium (e.g. network
       socket) but not yet processed locally. The function expects two arguments: the bus object to query, and a pointer
-      to a 64bit counter variable to write the current queue size to. Use <function>sd_bus_process()</function> in
+      to a 64-bit counter variable to write the current queue size to. Use <function>sd_bus_process()</function> in
       order to process queued messages, i.e. to reduce the size of the read queue (as well as, in fact, the write
       queue, see below).
     </para>
@@ -97,33 +68,39 @@
 
     <para>On success, these functions return 0 or a positive integer. On failure, they return a negative errno-style
     error code.</para>
+
+    <refsect2>
+      <title>Errors</title>
+
+      <para>Returned errors may indicate the following problems:</para>
+
+      <variablelist>
+        <varlistentry>
+          <term><constant>-ECHILD</constant></term>
+
+          <listitem><para>The bus connection was created in a different process, library or module instance.</para></listitem>
+        </varlistentry>
+
+      </variablelist>
+    </refsect2>
   </refsect1>
 
   <refsect1>
-    <title>Errors</title>
-
-    <para>Returned errors may indicate the following problems:</para>
-
-    <variablelist>
-      <varlistentry>
-        <term><constant>-ECHILD</constant></term>
-
-        <listitem><para>The bus connection was created in a different process.</para></listitem>
-      </varlistentry>
-
-    </variablelist>
+    <title>History</title>
+    <para><function>sd_bus_get_n_queued_read()</function> and
+    <function>sd_bus_get_n_queued_write()</function> were added in version 238.</para>
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_process</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_send</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_flush</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_process</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_send</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_flush</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

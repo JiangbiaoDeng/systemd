@@ -1,42 +1,14 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
-
-<refentry id="sd_get_seats" conditional='HAVE_PAM'>
+<refentry id="sd_get_seats" conditional='HAVE_PAM'
+          xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>sd_get_seats</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>Lennart</firstname>
-        <surname>Poettering</surname>
-        <email>lennart@poettering.net</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -84,7 +56,7 @@
 
     <para><function>sd_get_seats()</function> may be used to determine
     all currently available local seats. Returns the number of seat
-    identifiers and if the input pointer is non-NULL, a
+    identifiers and if the input pointer is non-<constant>NULL</constant>, a
     <constant>NULL</constant>-terminated array of seat identifiers
     is stored at the address.
     The returned array and all strings it references need to be freed
@@ -111,51 +83,41 @@
   <refsect1>
     <title>Return Value</title>
 
-    <para>On success, <function>sd_get_seats()</function>,
-    <function>sd_get_sessions()</function>,
-    <function>sd_get_uids()</function> and
-    <function>sd_get_machine_names()</function> return the number of
-    entries in the arrays. On failure, these calls return a negative
-    errno-style error code.</para>
+    <para>On success, <function>sd_get_seats()</function>, <function>sd_get_sessions()</function>,
+    <function>sd_get_uids()</function> and <function>sd_get_machine_names()</function> return the number of
+    entries in the arrays. On failure, these calls return a negative errno-style error code.</para>
+
+    <refsect2>
+      <title>Errors</title>
+
+      <para>Returned errors may indicate the following problems:</para>
+
+      <variablelist>
+
+        <varlistentry>
+          <term><constant>-ENOMEM</constant></term>
+
+          <listitem><para>Memory allocation failed.</para></listitem>
+        </varlistentry>
+      </variablelist>
+    </refsect2>
   </refsect1>
 
+  <xi:include href="libsystemd-pkgconfig.xml" />
 
   <refsect1>
-    <title>Errors</title>
-
-    <para>Returned errors may indicate the following problems:</para>
-
-    <variablelist>
-
-      <varlistentry>
-        <term><constant>-ENOMEM</constant></term>
-
-        <listitem><para>Memory allocation failed.</para></listitem>
-      </varlistentry>
-    </variablelist>
-  </refsect1>
-
-  <refsect1>
-    <title>Notes</title>
-
-    <para>The <function>sd_get_seats()</function>,
-    <function>sd_get_sessions()</function>,
-    <function>sd_get_uids()</function> and
-    <function>sd_get_machine_names()</function> interfaces are
-    available as a shared library, which can be compiled and linked to
-    with the
-    <constant>libsystemd</constant> <citerefentry project='die-net'><refentrytitle>pkg-config</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-    file.</para>
+    <title>History</title>
+    <para><function>sd_get_machine_names()</function> was added in version 203.</para>
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-login</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_session_get_seat</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-login</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_session_get_seat</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

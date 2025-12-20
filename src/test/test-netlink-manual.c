@@ -1,34 +1,13 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Susant Sahani
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <arpa/inet.h>
-#include <libkmod.h>
-#include <linux/ip.h>
-#include <net/if.h>
 #include <linux/if_tunnel.h>
+#include <unistd.h>
 
 #include "sd-netlink.h"
 
-#include "macro.h"
 #include "module-util.h"
-#include "util.h"
+#include "tests.h"
 
 static int load_module(const char *mod_name) {
         _cleanup_(kmod_unrefp) struct kmod_ctx *ctx = NULL;
@@ -36,20 +15,24 @@ static int load_module(const char *mod_name) {
         struct kmod_list *l;
         int r;
 
-        ctx = kmod_new(NULL, NULL);
+        r = dlopen_libkmod();
+        if (r < 0)
+                return log_error_errno(r, "Failed to load libkmod: %m");
+
+        ctx = sym_kmod_new(NULL, NULL);
         if (!ctx)
                 return log_oom();
 
-        r = kmod_module_new_from_lookup(ctx, mod_name, &list);
+        r = sym_kmod_module_new_from_lookup(ctx, mod_name, &list);
         if (r < 0)
                 return r;
 
-        kmod_list_foreach(l, list) {
+        sym_kmod_list_foreach(l, list) {
                 _cleanup_(kmod_module_unrefp) struct kmod_module *mod = NULL;
 
-                mod = kmod_module_get_module(l);
+                mod = sym_kmod_module_get_module(l);
 
-                r = kmod_module_probe_insert_module(mod, 0, NULL, NULL, NULL, NULL);
+                r = sym_kmod_module_probe_insert_module(mod, 0, NULL, NULL, NULL, NULL);
                 if (r > 0)
                         r = -EINVAL;
         }
@@ -65,10 +48,14 @@ static int test_tunnel_configure(sd_netlink *rtnl) {
         /* skip test if module cannot be loaded */
         r = load_module("ipip");
         if (r < 0)
-                return EXIT_TEST_SKIP;
+                return log_tests_skipped_errno(r, "failed to load module 'ipip'");
+
+        r = load_module("sit");
+        if (r < 0)
+                return log_tests_skipped_errno(r, "failed to load module 'sit'");
 
         if (getuid() != 0)
-                return EXIT_TEST_SKIP;
+                return log_tests_skipped("not root");
 
         /* IPIP tunnel */
         assert_se(sd_rtnl_message_new_link(rtnl, &m, RTM_NEWLINK, 0) >= 0);
@@ -90,13 +77,9 @@ static int test_tunnel_configure(sd_netlink *rtnl) {
         assert_se(sd_netlink_message_close_container(m) >= 0);
         assert_se(sd_netlink_message_close_container(m) >= 0);
 
-        assert_se(sd_netlink_call(rtnl, m, -1, 0) == 1);
+        ASSERT_OK_POSITIVE(sd_netlink_call(rtnl, m, -1, NULL));
 
-        assert_se((m = sd_netlink_message_unref(m)) == NULL);
-
-        r = load_module("sit");
-        if (r < 0)
-                return EXIT_TEST_SKIP;
+        ASSERT_NULL(m = sd_netlink_message_unref(m));
 
         /* sit */
         assert_se(sd_rtnl_message_new_link(rtnl, &n, RTM_NEWLINK, 0) >= 0);
@@ -120,9 +103,9 @@ static int test_tunnel_configure(sd_netlink *rtnl) {
         assert_se(sd_netlink_message_close_container(n) >= 0);
         assert_se(sd_netlink_message_close_container(n) >= 0);
 
-        assert_se(sd_netlink_call(rtnl, n, -1, 0) == 1);
+        ASSERT_OK_POSITIVE(sd_netlink_call(rtnl, n, -1, NULL));
 
-        assert_se((n = sd_netlink_message_unref(n)) == NULL);
+        ASSERT_NULL(n = sd_netlink_message_unref(n));
 
         return EXIT_SUCCESS;
 }
@@ -131,12 +114,14 @@ int main(int argc, char *argv[]) {
         sd_netlink *rtnl;
         int r;
 
+        test_setup_logging(LOG_INFO);
+
         assert_se(sd_netlink_open(&rtnl) >= 0);
         assert_se(rtnl);
 
         r = test_tunnel_configure(rtnl);
 
-        assert_se((rtnl = sd_netlink_unref(rtnl)) == NULL);
+        ASSERT_NULL(rtnl = sd_netlink_unref(rtnl));
 
         return r;
 }

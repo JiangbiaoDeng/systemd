@@ -1,43 +1,28 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "core-forward.h"
 
-  Copyright 2012 Dan Walsh
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "sd-bus.h"
-
-#include "bus-util.h"
-#include "manager.h"
-
-int mac_selinux_generic_access_check(sd_bus_message *message, const char *path, const char *permission, sd_bus_error *error);
-
-#if HAVE_SELINUX
+int mac_selinux_access_check_bus_internal(
+                sd_bus_message *message,
+                const Unit *unit,
+                const char *permission,
+                const char *function,
+                sd_bus_error *reterr_error);
+int mac_selinux_access_check_varlink_internal(
+                sd_varlink *link,
+                const Unit *unit,
+                const char *permission,
+                const char *function);
 
 #define mac_selinux_access_check(message, permission, error) \
-        mac_selinux_generic_access_check((message), NULL, (permission), (error))
+        mac_selinux_access_check_bus_internal((message), NULL, (permission), __func__, (error))
 
 #define mac_selinux_unit_access_check(unit, message, permission, error) \
-        mac_selinux_generic_access_check((message), unit_label_path(unit), (permission), (error))
+        mac_selinux_access_check_bus_internal((message), (unit), (permission), __func__, (error))
 
-#else
+#define mac_selinux_access_check_varlink(link, permission) \
+        mac_selinux_access_check_varlink_internal((link), NULL, (permission), __func__)
 
-#define mac_selinux_access_check(message, permission, error) 0
-#define mac_selinux_unit_access_check(unit, message, permission, error) 0
-
-#endif
+#define mac_selinux_unit_access_check_varlink(unit, link, permission) \
+        mac_selinux_access_check_varlink_internal((link), (unit), (permission), __func__)

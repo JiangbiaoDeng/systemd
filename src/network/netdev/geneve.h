@@ -1,35 +1,23 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <linux/if_link.h>
 
-  Copyright 2017 Susant Sahani
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Geneve Geneve;
-
+#include "shared-forward.h"
 #include "in-addr-util.h"
 #include "netdev.h"
-#include "networkd-link.h"
-#include "networkd-network.h"
 
 #define GENEVE_VID_MAX (1u << 24) - 1
 
-struct Geneve {
+typedef enum GeneveDF {
+        NETDEV_GENEVE_DF_NO = GENEVE_DF_UNSET,
+        NETDEV_GENEVE_DF_YES = GENEVE_DF_SET,
+        NETDEV_GENEVE_DF_INHERIT = GENEVE_DF_INHERIT,
+        _NETDEV_GENEVE_DF_MAX,
+        _NETDEV_GENEVE_DF_INVALID = -EINVAL,
+} GeneveDF;
+
+typedef struct Geneve {
         NetDev meta;
 
         uint32_t id;
@@ -45,42 +33,22 @@ struct Geneve {
         bool udpcsum;
         bool udp6zerocsumtx;
         bool udp6zerocsumrx;
+        bool inherit;
 
+        GeneveDF geneve_df;
         union in_addr_union remote;
-};
+
+        bool inherit_inner_protocol;
+} Geneve;
 
 DEFINE_NETDEV_CAST(GENEVE, Geneve);
 extern const NetDevVTable geneve_vtable;
 
-int config_parse_geneve_vni(const char *unit,
-                            const char *filename,
-                            unsigned line,
-                            const char *section,
-                            unsigned section_line,
-                            const char *lvalue,
-                            int ltype,
-                            const char *rvalue,
-                            void *data,
-                            void *userdata);
+const char* geneve_df_to_string(GeneveDF d) _const_;
+GeneveDF geneve_df_from_string(const char *s) _pure_;
 
-int config_parse_geneve_address(const char *unit,
-                               const char *filename,
-                               unsigned line,
-                               const char *section,
-                               unsigned section_line,
-                               const char *lvalue,
-                               int ltype,
-                               const char *rvalue,
-                               void *data,
-                               void *userdata);
-
-int config_parse_geneve_flow_label(const char *unit,
-                                   const char *filename,
-                                   unsigned line,
-                                   const char *section,
-                                   unsigned section_line,
-                                   const char *lvalue,
-                                   int ltype,
-                                   const char *rvalue,
-                                   void *data,
-                                   void *userdata);
+CONFIG_PARSER_PROTOTYPE(config_parse_geneve_vni);
+CONFIG_PARSER_PROTOTYPE(config_parse_geneve_address);
+CONFIG_PARSER_PROTOTYPE(config_parse_geneve_flow_label);
+CONFIG_PARSER_PROTOTYPE(config_parse_geneve_df);
+CONFIG_PARSER_PROTOTYPE(config_parse_geneve_ttl);

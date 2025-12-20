@@ -1,22 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2010-2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -25,27 +7,30 @@
 #include "path-util.h"
 #include "string-util.h"
 
-int dirent_ensure_type(DIR *d, struct dirent *de) {
-        struct stat st;
+int dirent_ensure_type(int dir_fd, struct dirent *de) {
+        struct statx sx;
 
-        assert(d);
+        assert(dir_fd >= 0);
         assert(de);
 
         if (de->d_type != DT_UNKNOWN)
                 return 0;
 
-        if (fstatat(dirfd(d), de->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0)
+        if (dot_or_dot_dot(de->d_name)) {
+                de->d_type = DT_DIR;
+                return 0;
+        }
+
+        /* Let's ask only for the type, nothing else. */
+        if (statx(dir_fd, de->d_name, AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT, STATX_TYPE, &sx) < 0)
                 return -errno;
 
-        de->d_type =
-                S_ISREG(st.st_mode)  ? DT_REG  :
-                S_ISDIR(st.st_mode)  ? DT_DIR  :
-                S_ISLNK(st.st_mode)  ? DT_LNK  :
-                S_ISFIFO(st.st_mode) ? DT_FIFO :
-                S_ISSOCK(st.st_mode) ? DT_SOCK :
-                S_ISCHR(st.st_mode)  ? DT_CHR  :
-                S_ISBLK(st.st_mode)  ? DT_BLK  :
-                                       DT_UNKNOWN;
+        assert(FLAGS_SET(sx.stx_mask, STATX_TYPE));
+        de->d_type = IFTODT(sx.stx_mode);
+
+        /* If the inode is passed too, update the field, i.e. report most recent data */
+        if (FLAGS_SET(sx.stx_mask, STATX_INO))
+                de->d_ino = sx.stx_ino;
 
         return 0;
 }
@@ -77,13 +62,41 @@ bool dirent_is_file_with_suffix(const struct dirent *de, const char *suffix) {
         return endswith(de->d_name, suffix);
 }
 
-struct dirent* readdir_no_dot(DIR *dirp) {
-        struct dirent* d;
+struct dirent* readdir_ensure_type(DIR *d) {
+        int r;
+
+        assert(d);
+
+        /* Like readdir(), but fills in .d_type if it is DT_UNKNOWN */
 
         for (;;) {
-                d = readdir(dirp);
-                if (d && dot_or_dot_dot(d->d_name))
-                        continue;
-                return d;
+                struct dirent *de;
+
+                errno = 0;
+                de = readdir(d);
+                if (!de)
+                        return NULL;
+
+                r = dirent_ensure_type(dirfd(d), de);
+                if (r >= 0)
+                        return de;
+                if (r != -ENOENT) {
+                        errno = -r; /* We want to be compatible with readdir(), hence propagate error via errno here */
+                        return NULL;
+                }
+
+                /* Vanished by now? Then skip immediately to next */
+        }
+}
+
+struct dirent* readdir_no_dot(DIR *d) {
+        assert(d);
+
+        for (;;) {
+                struct dirent *de;
+
+                de = readdir_ensure_type(d);
+                if (!de || !dot_or_dot_dot(de->d_name))
+                        return de;
         }
 }

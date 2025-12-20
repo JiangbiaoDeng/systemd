@@ -1,4 +1,4 @@
-#  SPDX-License-Identifier: LGPL-2.1+
+#  SPDX-License-Identifier: LGPL-2.1-or-later
 #
 #  This file is part of systemd.
 #
@@ -11,11 +11,15 @@
 Description=File System Check on Root Device
 Documentation=man:systemd-fsck-root.service(8)
 DefaultDependencies=no
+Conflicts=shutdown.target
 Before=local-fs.target shutdown.target
 ConditionPathIsReadWrite=!/
+OnFailure=emergency.target
+OnFailureJobMode=replace-irreversibly
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=@rootlibexecdir@/systemd-fsck
-TimeoutSec=0
+ExecStart={{LIBEXECDIR}}/systemd-fsck
+TimeoutSec=infinity
+ImportCredential=fsck.*

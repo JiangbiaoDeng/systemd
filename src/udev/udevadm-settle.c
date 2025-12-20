@@ -1,48 +1,45 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Copyright (C) 2006-2009 Kay Sievers <kay@vrfy.org>
- * Copyright (C) 2009 Canonical Ltd.
- * Copyright (C) 2009 Scott James Remnant <scott@netsplit.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright © 2009 Canonical Ltd.
+ * Copyright © 2009 Scott James Remnant <scott@netsplit.com>
  */
 
-#include <errno.h>
 #include <getopt.h>
-#include <poll.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
-#include "parse-util.h"
-#include "udev.h"
-#include "udevadm-util.h"
-#include "util.h"
+#include "sd-bus.h"
+#include "sd-event.h"
+#include "sd-login.h"
+#include "sd-messages.h"
 
-static void help(void) {
+#include "alloc-util.h"
+#include "bus-util.h"
+#include "path-util.h"
+#include "string-util.h"
+#include "strv.h"
+#include "time-util.h"
+#include "udev-util.h"
+#include "udevadm.h"
+#include "udevadm-util.h"
+#include "unit-def.h"
+#include "virt.h"
+
+static usec_t arg_timeout_usec = 120 * USEC_PER_SEC;
+static const char *arg_exists = NULL;
+
+static int help(void) {
         printf("%s settle [OPTIONS]\n\n"
                "Wait for pending udev events.\n\n"
                "  -h --help                 Show this help\n"
                "  -V --version              Show package version\n"
-               "  -t --timeout=SECONDS      Maximum time to wait for events\n"
-               "  -E --exit-if-exists=FILE  Stop waiting if file exists\n"
-               , program_invocation_short_name);
+               "  -t --timeout=SEC          Maximum time to wait for events\n"
+               "  -E --exit-if-exists=FILE  Stop waiting if file exists\n",
+               program_invocation_short_name);
+
+        return 0;
 }
 
-static int adm_settle(struct udev *udev, int argc, char *argv[]) {
+static int parse_argv(int argc, char *argv[]) {
         static const struct option options[] = {
                 { "timeout",        required_argument, NULL, 't' },
                 { "exit-if-exists", required_argument, NULL, 'E' },
@@ -53,117 +50,191 @@ static int adm_settle(struct udev *udev, int argc, char *argv[]) {
                 { "quiet",          no_argument,       NULL, 'q' }, /* removed */
                 {}
         };
-        usec_t deadline;
-        const char *exists = NULL;
-        unsigned int timeout = 120;
-        struct pollfd pfd[1] = { {.fd = -1}, };
-        int c;
-        struct udev_queue *queue;
-        int rc = EXIT_FAILURE;
+
+        int c, r;
 
         while ((c = getopt_long(argc, argv, "t:E:Vhs:e:q", options, NULL)) >= 0) {
                 switch (c) {
-
-                case 't': {
-                        int r;
-
-                        r = safe_atou(optarg, &timeout);
-                        if (r < 0) {
-                                log_error_errno(r, "Invalid timeout value '%s': %m", optarg);
-                                return EXIT_FAILURE;
-                        }
+                case 't':
+                        r = parse_sec(optarg, &arg_timeout_usec);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse timeout value '%s': %m", optarg);
                         break;
-                }
-
                 case 'E':
-                        exists = optarg;
+                        if (!path_is_valid(optarg))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid path: %s", optarg);
+
+                        arg_exists = optarg;
                         break;
-
                 case 'V':
-                        print_version();
-                        return EXIT_SUCCESS;
-
+                        return print_version();
                 case 'h':
-                        help();
-                        return EXIT_SUCCESS;
-
+                        return help();
                 case 's':
                 case 'e':
                 case 'q':
-                        log_info("Option -%c no longer supported.", c);
-                        return EXIT_FAILURE;
-
+                        return log_info_errno(SYNTHETIC_ERRNO(EINVAL),
+                                              "Option -%c no longer supported.",
+                                              c);
                 case '?':
-                        return EXIT_FAILURE;
-
+                        return -EINVAL;
                 default:
-                        assert_not_reached("Unknown argument");
+                        assert_not_reached();
                 }
         }
 
-        if (optind < argc) {
-                fprintf(stderr, "Extraneous argument: '%s'\n", argv[optind]);
-                return EXIT_FAILURE;
-        }
-
-        deadline = now(CLOCK_MONOTONIC) + timeout * USEC_PER_SEC;
-
-        /* guarantee that the udev daemon isn't pre-processing */
-        if (getuid() == 0) {
-                struct udev_ctrl *uctrl;
-
-                uctrl = udev_ctrl_new(udev);
-                if (uctrl != NULL) {
-                        if (udev_ctrl_send_ping(uctrl, MAX(5U, timeout)) < 0) {
-                                log_debug("no connection to daemon");
-                                udev_ctrl_unref(uctrl);
-                                return EXIT_SUCCESS;
-                        }
-                        udev_ctrl_unref(uctrl);
-                }
-        }
-
-        queue = udev_queue_new(udev);
-        if (!queue) {
-                log_error("unable to get udev queue");
-                return EXIT_FAILURE;
-        }
-
-        pfd[0].events = POLLIN;
-        pfd[0].fd = udev_queue_get_fd(queue);
-        if (pfd[0].fd < 0) {
-                log_debug("queue is empty, nothing to watch");
-                rc = EXIT_SUCCESS;
-                goto out;
-        }
-
-        for (;;) {
-                if (exists && access(exists, F_OK) >= 0) {
-                        rc = EXIT_SUCCESS;
-                        break;
-                }
-
-                /* exit if queue is empty */
-                if (udev_queue_get_queue_is_empty(queue)) {
-                        rc = EXIT_SUCCESS;
-                        break;
-                }
-
-                if (now(CLOCK_MONOTONIC) >= deadline)
-                        break;
-
-                /* wake up when queue is empty */
-                if (poll(pfd, 1, MSEC_PER_SEC) > 0 && pfd[0].revents & POLLIN)
-                        udev_queue_flush(queue);
-        }
-
-out:
-        udev_queue_unref(queue);
-        return rc;
+        return 1;
 }
 
-const struct udevadm_cmd udevadm_settle = {
-        .name = "settle",
-        .cmd = adm_settle,
-        .help = "Wait for pending udev events",
-};
+static int emit_deprecation_warning(void) {
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        _cleanup_strv_free_ char **a = NULL;
+        _cleanup_free_ char *unit = NULL;
+        int r;
+
+        r = sd_pid_get_unit(0, &unit);
+        if (r < 0) {
+                log_debug_errno(r, "Failed to determine unit we run in, ignoring: %m");
+                return 0;
+        }
+
+        if (!streq(unit, "systemd-udev-settle.service"))
+                return 0;
+
+        r = bus_connect_system_systemd(&bus);
+        if (r < 0)
+                log_debug_errno(r, "Failed to open connection to systemd, skipping dependency queries: %m");
+        else {
+                _cleanup_strv_free_ char **b = NULL;
+                _cleanup_free_ char *unit_path = NULL;
+
+                unit_path = unit_dbus_path_from_name("systemd-udev-settle.service");
+                if (!unit_path)
+                        return -ENOMEM;
+
+                (void) sd_bus_get_property_strv(
+                                bus,
+                                "org.freedesktop.systemd1",
+                                unit_path,
+                                "org.freedesktop.systemd1.Unit",
+                                "WantedBy",
+                                NULL,
+                                &a);
+
+                (void) sd_bus_get_property_strv(
+                                bus,
+                                "org.freedesktop.systemd1",
+                                unit_path,
+                                "org.freedesktop.systemd1.Unit",
+                                "RequiredBy",
+                                NULL,
+                                &b);
+
+                r = strv_extend_strv_consume(&a, TAKE_PTR(b), /* filter_duplicates= */ true);
+                if (r < 0)
+                        return r;
+        }
+
+        if (strv_isempty(a))
+                /* Print a simple message if we cannot determine the dependencies */
+                log_notice("systemd-udev-settle.service is deprecated.");
+        else {
+                /* Print a longer, structured message if we can acquire the dependencies (this should be the
+                 * common case). This is hooked up with a catalog entry and everything. */
+                _cleanup_free_ char *t = NULL;
+
+                t = strv_join(a, ", ");
+                if (!t)
+                        return -ENOMEM;
+
+                log_struct(LOG_NOTICE,
+                           LOG_MESSAGE("systemd-udev-settle.service is deprecated. Please fix %s not to pull it in.", t),
+                           LOG_ITEM("OFFENDING_UNITS=%s", t),
+                           LOG_MESSAGE_ID(SD_MESSAGE_SYSTEMD_UDEV_SETTLE_DEPRECATED_STR));
+        }
+
+        return 0;
+}
+
+static bool check(void) {
+        int r;
+
+        if (arg_exists) {
+                if (access(arg_exists, F_OK) >= 0)
+                        return true;
+
+                if (errno != ENOENT)
+                        log_warning_errno(errno, "Failed to check the existence of \"%s\", ignoring: %m", arg_exists);
+        }
+
+        /* exit if queue is empty */
+        r = udev_queue_is_empty();
+        if (r < 0)
+                log_warning_errno(r, "Failed to check if udev queue is empty, ignoring: %m");
+
+        return r > 0;
+}
+
+static int on_inotify(sd_event_source *s, const struct inotify_event *event, void *userdata) {
+        assert(s);
+
+        if (check())
+                return sd_event_exit(sd_event_source_get_event(s), 0);
+
+        return 0;
+}
+
+int settle_main(int argc, char *argv[], void *userdata) {
+        _cleanup_(sd_event_unrefp) sd_event *event = NULL;
+        int r;
+
+        r = parse_argv(argc, argv);
+        if (r <= 0)
+                return r;
+
+        if (running_in_chroot() > 0) {
+                log_info("Running in chroot, ignoring request.");
+                return 0;
+        }
+
+        (void) emit_deprecation_warning();
+
+        if (getuid() == 0) {
+                r = udev_ping(MAX(5 * USEC_PER_SEC, arg_timeout_usec), /* ignore_connection_failure= */ true);
+                if (r <= 0)
+                        return r;
+        } else {
+                /* For non-privileged users, at least check if udevd is running. */
+                if (access("/run/udev/control", F_OK) < 0)
+                        return log_error_errno(errno,
+                                               errno == ENOENT ? "systemd-udevd is not running." :
+                                                                 "Failed to check if /run/udev/control exists: %m");
+        }
+
+        r = sd_event_default(&event);
+        if (r < 0)
+                return log_error_errno(r, "Failed to get default sd-event object: %m");
+
+        r = sd_event_add_inotify(event, NULL, "/run/udev" , IN_DELETE, on_inotify, NULL);
+        if (r < 0)
+                return log_error_errno(r, "Failed to add inotify watch for /run/udev: %m");
+
+        if (arg_timeout_usec != USEC_INFINITY) {
+                r = sd_event_add_time_relative(event, NULL, CLOCK_BOOTTIME, arg_timeout_usec, 0,
+                                               NULL, INT_TO_PTR(-ETIMEDOUT));
+                if (r < 0)
+                        return log_error_errno(r, "Failed to add timer event source: %m");
+        }
+
+        /* Check before entering the event loop, as the udev queue may be already empty. */
+        if (check())
+                return 0;
+
+        r = sd_event_loop(event);
+        if (r == -ETIMEDOUT)
+                return log_error_errno(r, "Timed out while waiting for udev queue to empty.");
+        if (r < 0)
+                return log_error_errno(r, "Event loop failed: %m");
+
+        return 0;
+}

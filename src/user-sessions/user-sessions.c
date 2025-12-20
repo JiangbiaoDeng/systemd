@@ -1,63 +1,37 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2010 Lennart Poettering
+#include <sys/stat.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <errno.h>
-#include <unistd.h>
-
-#include "fileio.h"
-#include "fileio-label.h"
 #include "fs-util.h"
+#include "label-util.h"
 #include "log.h"
-#include "selinux-util.h"
+#include "main-func.h"
+#include "reboot-util.h"
 #include "string-util.h"
-#include "util.h"
 
-int main(int argc, char*argv[]) {
-        int r, k;
+static int run(int argc, char *argv[]) {
+        int r;
 
-        if (argc != 2) {
-                log_error("This program requires one argument.");
-                return EXIT_FAILURE;
-        }
+        if (argc != 2)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "This program requires one argument.");
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         umask(0022);
 
-        mac_selinux_init();
+        r = mac_init();
+        if (r < 0)
+                return r;
 
-        if (streq(argv[1], "start")) {
-                r = unlink_or_warn("/run/nologin");
-                k = unlink_or_warn("/etc/nologin");
-                if (k < 0 && r >= 0)
-                        r = k;
+        /* We only touch /run/nologin. See create_shutdown_run_nologin_or_warn() for details. */
 
-        } else if (streq(argv[1], "stop"))
-                r = create_shutdown_run_nologin_or_warn();
-        else {
-                log_error("Unknown verb '%s'.", argv[1]);
-                r = -EINVAL;
-        }
+        if (streq(argv[1], "start"))
+                return unlink_or_warn("/run/nologin");
+        if (streq(argv[1], "stop"))
+                return create_shutdown_run_nologin_or_warn();
 
-        mac_selinux_finish();
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Unknown verb '%s'.", argv[1]);
 }
+
+DEFINE_MAIN_FUNCTION(run);

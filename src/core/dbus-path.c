@@ -1,25 +1,7 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "alloc-util.h"
-#include "bus-util.h"
+#include "bus-get-properties.h"
 #include "dbus-path.h"
 #include "dbus-util.h"
 #include "list.h"
@@ -37,15 +19,13 @@ static int property_get_paths(
                 const char *property,
                 sd_bus_message *reply,
                 void *userdata,
-                sd_bus_error *error) {
+                sd_bus_error *reterr_error) {
 
-        Path *p = userdata;
-        PathSpec *k;
+        Path *p = ASSERT_PTR(userdata);
         int r;
 
         assert(bus);
         assert(reply);
-        assert(p);
 
         r = sd_bus_message_open_container(reply, 'a', "(ss)");
         if (r < 0)
@@ -60,33 +40,15 @@ static int property_get_paths(
         return sd_bus_message_close_container(reply);
 }
 
-static int property_get_unit(
-                sd_bus *bus,
-                const char *path,
-                const char *interface,
-                const char *property,
-                sd_bus_message *reply,
-                void *userdata,
-                sd_bus_error *error) {
-
-        Unit *p = userdata, *trigger;
-
-        assert(bus);
-        assert(reply);
-        assert(p);
-
-        trigger = UNIT_TRIGGER(p);
-
-        return sd_bus_message_append(reply, "s", trigger ? trigger->id : "");
-}
-
 const sd_bus_vtable bus_path_vtable[] = {
         SD_BUS_VTABLE_START(0),
-        SD_BUS_PROPERTY("Unit", "s", property_get_unit, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("Unit", "s", bus_property_get_triggered_unit, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Paths", "a(ss)", property_get_paths, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("MakeDirectory", "b", bus_property_get_bool, offsetof(Path, make_directory), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DirectoryMode", "u", bus_property_get_mode, offsetof(Path, directory_mode), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Result", "s", property_get_result, offsetof(Path, result), SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+        SD_BUS_PROPERTY("TriggerLimitIntervalUSec", "t", bus_property_get_usec, offsetof(Path, trigger_limit.interval), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("TriggerLimitBurst", "u", bus_property_get_unsigned, offsetof(Path, trigger_limit.burst), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_VTABLE_END
 };
 
@@ -95,7 +57,7 @@ static int bus_path_set_transient_property(
                 const char *name,
                 sd_bus_message *message,
                 UnitWriteFlags flags,
-                sd_bus_error *error) {
+                sd_bus_error *reterr_error) {
 
         Unit *u = UNIT(p);
         int r;
@@ -107,10 +69,10 @@ static int bus_path_set_transient_property(
         flags |= UNIT_PRIVATE;
 
         if (streq(name, "MakeDirectory"))
-                return bus_set_transient_bool(u, name, &p->make_directory, message, flags, error);
+                return bus_set_transient_bool(u, name, &p->make_directory, message, flags, reterr_error);
 
         if (streq(name, "DirectoryMode"))
-                return bus_set_transient_mode_t(u, name, &p->directory_mode, message, flags, error);
+                return bus_set_transient_mode_t(u, name, &p->directory_mode, message, flags, reterr_error);
 
         if (streq(name, "Paths")) {
                 const char *type_name, *path;
@@ -125,31 +87,31 @@ static int bus_path_set_transient_property(
 
                         t = path_type_from_string(type_name);
                         if (t < 0)
-                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Unknown path type: %s", type_name);
+                                return sd_bus_error_setf(reterr_error, SD_BUS_ERROR_INVALID_ARGS, "Unknown path type: %s", type_name);
 
                         if (isempty(path))
-                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Path in %s is empty", type_name);
+                                return sd_bus_error_setf(reterr_error, SD_BUS_ERROR_INVALID_ARGS, "Path in %s is empty", type_name);
 
                         if (!path_is_absolute(path))
-                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Path in %s is not absolute: %s", type_name, path);
+                                return sd_bus_error_setf(reterr_error, SD_BUS_ERROR_INVALID_ARGS, "Path in %s is not absolute: %s", type_name, path);
 
                         if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
-                                _cleanup_free_ char *k;
-                                PathSpec *s;
+                                _cleanup_free_ char *k = NULL;
 
-                                k = strdup(path);
-                                if (!k)
-                                        return -ENOMEM;
+                                r = path_simplify_alloc(path, &k);
+                                if (r < 0)
+                                        return r;
 
-                                s = new0(PathSpec, 1);
+                                PathSpec *s = new(PathSpec, 1);
                                 if (!s)
                                         return -ENOMEM;
 
-                                s->unit = u;
-                                s->path = path_kill_slashes(k);
-                                k = NULL;
-                                s->type = t;
-                                s->inotify_fd = -1;
+                                *s = (PathSpec) {
+                                        .unit = u,
+                                        .path = TAKE_PTR(k),
+                                        .type = t,
+                                        .inotify_fd = -EBADF,
+                                };
 
                                 LIST_PREPEND(spec, p->specs, s);
 
@@ -173,6 +135,12 @@ static int bus_path_set_transient_property(
                 return 1;
         }
 
+        if (streq(name, "TriggerLimitBurst"))
+                return bus_set_transient_unsigned(u, name, &p->trigger_limit.burst, message, flags, reterr_error);
+
+        if (streq(name, "TriggerLimitIntervalUSec"))
+                return bus_set_transient_usec(u, name, &p->trigger_limit.interval, message, flags, reterr_error);
+
         return 0;
 }
 
@@ -180,8 +148,8 @@ int bus_path_set_property(
                 Unit *u,
                 const char *name,
                 sd_bus_message *message,
-                UnitWriteFlags mode,
-                sd_bus_error *error) {
+                UnitWriteFlags flags,
+                sd_bus_error *reterr_error) {
 
         Path *p = PATH(u);
 
@@ -190,7 +158,7 @@ int bus_path_set_property(
         assert(message);
 
         if (u->transient && u->load_state == UNIT_STUB)
-                return bus_path_set_transient_property(p, name, message, mode, error);
+                return bus_path_set_transient_property(p, name, message, flags, reterr_error);
 
         return 0;
 }

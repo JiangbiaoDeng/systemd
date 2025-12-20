@@ -1,29 +1,12 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2015 Tom Gundersen
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#include "memory-util.h"
 #include "siphash24.h"
-#include "util.h"
+#include "tests.h"
 
 #define ITERATIONS 10000000ULL
 
-static void do_test(const uint8_t *in, size_t len, const uint8_t *key) {
+static void test_alignment_one(const uint8_t *in, size_t len, const uint8_t *key) {
         struct siphash state = {};
         uint64_t out;
         unsigned i, j;
@@ -63,7 +46,25 @@ static void do_test(const uint8_t *in, size_t len, const uint8_t *key) {
         }
 }
 
-static void test_short_hashes(void) {
+TEST(alignment) {
+        const uint8_t in[15]  = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e };
+        const uint8_t key[16] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+        uint8_t in_buf[20];
+
+        /* Test with same input but different alignments. */
+        memcpy(in_buf, in, sizeof(in));
+        test_alignment_one(in_buf, sizeof(in), key);
+        memcpy(in_buf + 1, in, sizeof(in));
+        test_alignment_one(in_buf + 1, sizeof(in), key);
+        memcpy(in_buf + 2, in, sizeof(in));
+        test_alignment_one(in_buf + 2, sizeof(in), key);
+        memcpy(in_buf + 4, in, sizeof(in));
+        test_alignment_one(in_buf + 4, sizeof(in), key);
+}
+
+TEST(short_hashes) {
         const uint8_t one[] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16 };
         const uint8_t  key[16] = { 0x22, 0x24, 0x41, 0x22, 0x55, 0x77, 0x88, 0x07,
@@ -104,22 +105,4 @@ static void test_short_hashes(void) {
 }
 
 /* see https://131002.net/siphash/siphash.pdf, Appendix A */
-int main(int argc, char *argv[]) {
-        const uint8_t in[15]  = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-                                  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e };
-        const uint8_t key[16] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-                                  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
-        uint8_t in_buf[20];
-
-        /* Test with same input but different alignments. */
-        memcpy(in_buf, in, sizeof(in));
-        do_test(in_buf, sizeof(in), key);
-        memcpy(in_buf + 1, in, sizeof(in));
-        do_test(in_buf + 1, sizeof(in), key);
-        memcpy(in_buf + 2, in, sizeof(in));
-        do_test(in_buf + 2, sizeof(in), key);
-        memcpy(in_buf + 4, in, sizeof(in));
-        do_test(in_buf + 4, sizeof(in), key);
-
-        test_short_hashes();
-}
+DEFINE_TEST_MAIN(LOG_INFO);

@@ -1,31 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Socket Socket;
-typedef struct SocketPeer SocketPeer;
-
-#include "mount.h"
-#include "service.h"
+#include "cgroup.h"
+#include "core-forward.h"
+#include "execute.h"
+#include "list.h"
+#include "pidref.h"
+#include "socket-label.h"
 #include "socket-util.h"
+#include "unit.h"
 
 typedef enum SocketExecCommand {
         SOCKET_EXEC_START_PRE,
@@ -34,7 +17,7 @@ typedef enum SocketExecCommand {
         SOCKET_EXEC_STOP_PRE,
         SOCKET_EXEC_STOP_POST,
         _SOCKET_EXEC_COMMAND_MAX,
-        _SOCKET_EXEC_COMMAND_INVALID = -1
+        _SOCKET_EXEC_COMMAND_INVALID = -EINVAL,
 } SocketExecCommand;
 
 typedef enum SocketType {
@@ -44,7 +27,7 @@ typedef enum SocketType {
         SOCKET_MQUEUE,
         SOCKET_USB_FUNCTION,
         _SOCKET_TYPE_MAX,
-        _SOCKET_TYPE_INVALID = -1
+        _SOCKET_TYPE_INVALID = -EINVAL,
 } SocketType;
 
 typedef enum SocketResult {
@@ -58,7 +41,7 @@ typedef enum SocketResult {
         SOCKET_FAILURE_TRIGGER_LIMIT_HIT,
         SOCKET_FAILURE_SERVICE_START_LIMIT_HIT,
         _SOCKET_RESULT_MAX,
-        _SOCKET_RESULT_INVALID = -1
+        _SOCKET_RESULT_INVALID = -EINVAL,
 } SocketResult;
 
 typedef struct SocketPort {
@@ -67,7 +50,7 @@ typedef struct SocketPort {
         SocketType type;
         int fd;
         int *auxiliary_fds;
-        int n_auxiliary_fds;
+        size_t n_auxiliary_fds;
 
         SocketAddress address;
         char *path;
@@ -76,7 +59,23 @@ typedef struct SocketPort {
         LIST_FIELDS(struct SocketPort, port);
 } SocketPort;
 
-struct Socket {
+typedef enum SocketTimestamping {
+        SOCKET_TIMESTAMPING_OFF,
+        SOCKET_TIMESTAMPING_US,  /* SO_TIMESTAMP */
+        SOCKET_TIMESTAMPING_NS,  /* SO_TIMESTAMPNS */
+        _SOCKET_TIMESTAMPING_MAX,
+        _SOCKET_TIMESTAMPING_INVALID = -EINVAL,
+} SocketTimestamping;
+
+typedef enum SocketDeferTrigger {
+        SOCKET_DEFER_NO,
+        SOCKET_DEFER_YES,
+        SOCKET_DEFER_PATIENT,
+        _SOCKET_DEFER_MAX,
+        _SOCKET_DEFER_INVALID = -EINVAL,
+} SocketDeferTrigger;
+
+typedef struct Socket {
         Unit meta;
 
         LIST_HEAD(SocketPort, ports);
@@ -85,6 +84,7 @@ struct Socket {
 
         unsigned n_accepted;
         unsigned n_connections;
+        unsigned n_refused;
         unsigned max_connections;
         unsigned max_connections_per_source;
 
@@ -95,13 +95,13 @@ struct Socket {
         usec_t keep_alive_interval;
         usec_t defer_accept;
 
-        ExecCommand* exec_command[_SOCKET_EXEC_COMMAND_MAX];
+        ExecCommand *exec_command[_SOCKET_EXEC_COMMAND_MAX];
         ExecContext exec_context;
         KillContext kill_context;
         CGroupContext cgroup_context;
 
         ExecRuntime *exec_runtime;
-        DynamicCreds dynamic_creds;
+        CGroupRuntime *cgroup_runtime;
 
         /* For Accept=no sockets refers to the one service we'll
          * activate. For Accept=yes sockets is either NULL, or filled
@@ -112,20 +112,24 @@ struct Socket {
 
         sd_event_source *timer_event_source;
 
-        ExecCommand* control_command;
+        ExecCommand *control_command;
         SocketExecCommand control_command_id;
-        pid_t control_pid;
+        PidRef control_pid;
+
+        bool pass_fds_to_exec;
 
         mode_t directory_mode;
         mode_t socket_mode;
 
         SocketResult result;
+        SocketResult clean_result;
 
         char **symlinks;
 
         bool accept;
         bool remove_on_stop;
         bool writable;
+        bool flush_pending;
 
         int socket_protocol;
 
@@ -136,7 +140,11 @@ struct Socket {
         bool transparent;
         bool broadcast;
         bool pass_cred;
+        bool pass_pidfd;
         bool pass_sec;
+        bool pass_pktinfo;
+        bool pass_rights;
+        SocketTimestamping timestamping;
 
         /* Only for INET6 sockets: issue IPV6_V6ONLY sockopt */
         SocketAddressBindIPv6Only bind_ipv6_only;
@@ -165,25 +173,34 @@ struct Socket {
         char *fdname;
 
         RateLimit trigger_limit;
-};
+        RateLimit poll_limit;
+
+        usec_t defer_trigger_max_usec;
+        SocketDeferTrigger defer_trigger;
+} Socket;
 
 SocketPeer *socket_peer_ref(SocketPeer *p);
 SocketPeer *socket_peer_unref(SocketPeer *p);
-int socket_acquire_peer(Socket *s, int fd, SocketPeer **p);
+int socket_acquire_peer(Socket *s, int fd, SocketPeer **ret);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(SocketPeer*, socket_peer_unref);
 
 /* Called from the service code when collecting fds */
-int socket_collect_fds(Socket *s, int **fds);
+int socket_collect_fds(Socket *s, int **ret);
 
 /* Called from the service code when a per-connection service ended */
 void socket_connection_unref(Socket *s);
 
+SocketPort* socket_port_free(SocketPort *p);
+DEFINE_TRIVIAL_CLEANUP_FUNC(SocketPort*, socket_port_free);
+
 void socket_free_ports(Socket *s);
 
-int socket_instantiate_service(Socket *s);
+int socket_port_to_address(const SocketPort *p, char **ret);
 
-char *socket_fdname(Socket *s);
+int socket_load_service_unit(Socket *s, int cfd, Unit **ret);
+
+const char* socket_fdname(Socket *s);
 
 extern const UnitVTable socket_vtable;
 
@@ -194,4 +211,13 @@ const char* socket_result_to_string(SocketResult i) _const_;
 SocketResult socket_result_from_string(const char *s) _pure_;
 
 const char* socket_port_type_to_string(SocketPort *p) _pure_;
-SocketType socket_port_type_from_string(const char *p) _pure_;
+SocketType socket_port_type_from_string(const char *s) _pure_;
+
+const char* socket_timestamping_to_string(SocketTimestamping p) _const_;
+SocketTimestamping socket_timestamping_from_string(const char *s) _pure_;
+SocketTimestamping socket_timestamping_from_string_harder(const char *s) _pure_;
+
+const char* socket_defer_trigger_to_string(SocketDeferTrigger i) _const_;
+SocketDeferTrigger socket_defer_trigger_from_string(const char *s) _pure_;
+
+DEFINE_CAST(SOCKET, Socket);

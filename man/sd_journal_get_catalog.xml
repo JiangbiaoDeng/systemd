@@ -1,42 +1,13 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
-
-<refentry id="sd_journal_get_catalog">
+<refentry id="sd_journal_get_catalog" xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>sd_journal_get_catalog</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>Lennart</firstname>
-        <surname>Poettering</surname>
-        <email>lennart@poettering.net</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -66,7 +37,6 @@
         <paramdef>char **<parameter>ret</parameter></paramdef>
       </funcprototype>
 
-
     </funcsynopsis>
   </refsynopsisdiv>
 
@@ -92,7 +62,7 @@
 
     <para>For more information about the journal message catalog
     please refer to the <ulink
-    url="https://www.freedesktop.org/wiki/Software/systemd/catalog">Journal
+    url="https://systemd.io/CATALOG">Journal
     Message Catalogs</ulink> documentation page.</para>
   </refsect1>
 
@@ -114,30 +84,34 @@
   <refsect1>
     <title>Notes</title>
 
-    <para>Function <function>sd_journal_get_catalog()</function> is thread-agnostic and only a
-    single thread may operate on a given <structname>sd_journal</structname> object. Function
-    <function>sd_journal_get_catalog_for_message_id()</function> is thread-safe.</para>
+    <para>Function <function>sd_journal_get_catalog()</function> is thread-agnostic and only a single thread
+    may operate on a given object at any given time. Multiple independent objects may be used from different
+    threads in parallel.</para>
 
-    <para>The <function>sd_journal_get_catalog()</function> and
-    <function>sd_journal_get_catalog_for_message_id()</function>
-    interfaces are available as a shared library, which can be
-    compiled and linked to with the
-    <constant>libsystemd</constant> <citerefentry project='die-net'><refentrytitle>pkg-config</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-    file.</para>
+    <para>Function <function>sd_journal_get_catalog_for_message_id()</function> is thread-safe and may be
+    called from multiple threads in parallel.</para>
+
+    <xi:include href="libsystemd-pkgconfig.xml" xpointer="pkgconfig-text"/>
+  </refsect1>
+
+  <refsect1>
+    <title>History</title>
+    <para><function>sd_journal_get_catalog()</function> and
+    <function>sd_journal_get_catalog_for_message_id()</function> were added in version 196.</para>
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.journal-fields</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-journal</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_journal_open</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_journal_next</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_journal_get_data</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry project='man-pages'><refentrytitle>malloc</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd.journal-fields</refentrytitle><manvolnum>7</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-journal</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_journal_open</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_journal_next</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_journal_get_data</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry project='man-pages'><refentrytitle>malloc</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

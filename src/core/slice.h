@@ -1,33 +1,28 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "cgroup.h"
+#include "core-forward.h"
+#include "unit.h"
 
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Slice Slice;
-
-struct Slice {
+typedef struct Slice {
         Unit meta;
 
         SliceState state, deserialized_state;
 
+        unsigned concurrency_soft_max;
+        unsigned concurrency_hard_max;
+
         CGroupContext cgroup_context;
-};
+
+        CGroupRuntime *cgroup_runtime;
+} Slice;
 
 extern const UnitVTable slice_vtable;
+
+DEFINE_CAST(SLICE, Slice);
+
+unsigned slice_get_currently_active(Slice *slice, Unit *ignore, bool with_pending);
+
+bool slice_concurrency_hard_max_reached(Slice *slice, Unit *ignore);
+bool slice_concurrency_soft_max_reached(Slice *slice, Unit *ignore);

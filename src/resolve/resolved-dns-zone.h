@@ -1,39 +1,13 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "hashmap.h"
+#include "list.h"
+#include "resolved-forward.h"
 
 typedef struct DnsZone {
         Hashmap *by_key;
         Hashmap *by_name;
 } DnsZone;
-
-typedef struct DnsZoneItem DnsZoneItem;
-typedef enum DnsZoneItemState DnsZoneItemState;
-
-#include "resolved-dns-answer.h"
-#include "resolved-dns-question.h"
-#include "resolved-dns-rr.h"
-#include "resolved-dns-transaction.h"
 
 /* RFC 4795 Section 2.8. suggests a TTL of 30s by default */
 #define LLMNR_DEFAULT_TTL (30)
@@ -41,14 +15,14 @@ typedef enum DnsZoneItemState DnsZoneItemState;
 /* RFC 6762 Section 10. suggests a TTL of 120s by default */
 #define MDNS_DEFAULT_TTL (120)
 
-enum DnsZoneItemState {
+typedef enum DnsZoneItemState {
         DNS_ZONE_ITEM_PROBING,
         DNS_ZONE_ITEM_ESTABLISHED,
         DNS_ZONE_ITEM_VERIFYING,
         DNS_ZONE_ITEM_WITHDRAWN,
-};
+} DnsZoneItemState;
 
-struct DnsZoneItem {
+typedef struct DnsZoneItem {
         DnsScope *scope;
         DnsResourceRecord *rr;
 
@@ -62,7 +36,7 @@ struct DnsZoneItem {
         LIST_FIELDS(DnsZoneItem, by_name);
 
         DnsTransaction *probe_transaction;
-};
+} DnsZoneItem;
 
 void dns_zone_flush(DnsZone *z);
 

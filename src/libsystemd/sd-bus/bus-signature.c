@@ -1,26 +1,6 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <util.h>
-
-#include "sd-bus.h"
+#include "sd-bus-protocol.h"
 
 #include "bus-signature.h"
 #include "bus-type.h"
@@ -74,6 +54,12 @@ static int signature_element_length_internal(
                         p += t;
                 }
 
+                if (p - s < 2)
+                        /* D-Bus spec: Empty structures are not allowed; there
+                         * must be at least one type code between the parentheses.
+                         */
+                        return -EINVAL;
+
                 *l = p - s + 1;
                 return 0;
         }
@@ -108,7 +94,6 @@ static int signature_element_length_internal(
 
         return -EINVAL;
 }
-
 
 int signature_element_length(const char *s, size_t *l) {
         return signature_element_length_internal(s, true, 0, 0, l);
@@ -157,5 +142,5 @@ bool signature_is_valid(const char *s, bool allow_dict_entry) {
                 p += t;
         }
 
-        return p - s <= 255;
+        return p - s <= SD_BUS_MAXIMUM_SIGNATURE_LENGTH;
 }

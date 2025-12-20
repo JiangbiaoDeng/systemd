@@ -1,30 +1,22 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#include "dns-packet.h"
 #include "dns-type.h"
+#include "resolved-dns-dnssec.h"
 #include "test-tables.h"
+#include "tests.h"
 
 int main(int argc, char **argv) {
         uint16_t i;
 
-        test_table_sparse(dns_type, DNS_TYPE);
+        test_setup_logging(LOG_DEBUG);
+
+        test_table(DnsProtocol, dns_protocol, DNS_PROTOCOL);
+        test_table(DnssecResult, dnssec_result, DNSSEC_RESULT);
+        test_table(DnssecVerdict, dnssec_verdict, DNSSEC_VERDICT);
+
+        test_table_sparse(int, dns_rcode, DNS_RCODE);
+        test_table_sparse(int, dns_type, DNS_TYPE);
 
         log_info("/* DNS_TYPE */");
         for (i = 0; i < _DNS_TYPE_MAX; i++) {

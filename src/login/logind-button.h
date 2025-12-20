@@ -1,30 +1,23 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "logind-forward.h"
 
-  Copyright 2012 Lennart Poettering
+typedef enum ButtonModifierMask {
+        BUTTON_MODIFIER_NONE        = 0,
+        BUTTON_MODIFIER_LEFT_SHIFT  = 1 << 0,
+        BUTTON_MODIFIER_RIGHT_SHIFT = 1 << 1,
+        BUTTON_MODIFIER_LEFT_CTRL   = 1 << 2,
+        BUTTON_MODIFIER_RIGHT_CTRL  = 1 << 3,
+        BUTTON_MODIFIER_LEFT_ALT    = 1 << 4,
+        BUTTON_MODIFIER_RIGHT_ALT   = 1 << 5,
+} ButtonModifierMask;
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+#define BUTTON_MODIFIER_HAS_SHIFT(modifier) (((modifier) & (BUTTON_MODIFIER_LEFT_SHIFT|BUTTON_MODIFIER_RIGHT_SHIFT)) != 0)
+#define BUTTON_MODIFIER_HAS_CTRL(modifier) (((modifier) & (BUTTON_MODIFIER_LEFT_CTRL|BUTTON_MODIFIER_RIGHT_CTRL)) != 0)
+#define BUTTON_MODIFIER_HAS_ALT(modifier) (((modifier) & (BUTTON_MODIFIER_LEFT_ALT|BUTTON_MODIFIER_RIGHT_ALT)) != 0)
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Button Button;
-
-#include "logind.h"
-
-struct Button {
+typedef struct Button {
         Manager *manager;
 
         sd_event_source *io_event_source;
@@ -34,12 +27,14 @@ struct Button {
         char *seat;
         int fd;
 
+        ButtonModifierMask button_modifier_mask;
+
         bool lid_closed;
         bool docked;
-};
+} Button;
 
 Button* button_new(Manager *m, const char *name);
-void button_free(Button*b);
+Button *button_free(Button *b);
 int button_open(Button *b);
 int button_set_seat(Button *b, const char *sn);
 int button_check_switches(Button *b);

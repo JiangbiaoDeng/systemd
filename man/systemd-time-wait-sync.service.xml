@@ -1,42 +1,14 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2018 Peter A. Bigot
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
-
-<refentry id="systemd-time-wait-sync.service" conditional='ENABLE_TIMESYNCD'>
+<refentry id="systemd-time-wait-sync.service" conditional='ENABLE_TIMESYNCD'
+          xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>systemd-time-wait-sync.service</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>Developer</contrib>
-        <firstname>Peter</firstname>
-        <surname>Bigot</surname>
-        <email>pab@pabigot.com</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -47,7 +19,7 @@
   <refnamediv>
     <refname>systemd-time-wait-sync.service</refname>
     <refname>systemd-time-wait-sync</refname>
-    <refpurpose>Wait Until Kernel Time Synchronized</refpurpose>
+    <refpurpose>Wait until kernel time is synchronized</refpurpose>
   </refnamediv>
 
   <refsynopsisdiv>
@@ -58,34 +30,44 @@
   <refsect1>
     <title>Description</title>
 
-    <para><filename>systemd-time-wait-sync</filename> is a system service that delays the start of units that depend on
-    <filename>time-sync.target</filename> until <filename>systemd-timesyncd.service</filename> or something else has
-    set the system time and marked it as synchronized.  Reaching this state generally requires synchronization with an
-    external source, such as an NTP server.</para>
+    <para><filename>systemd-time-wait-sync</filename> is a system service that delays the start of units that
+    are ordered after <filename>time-sync.target</filename> (see
+    <citerefentry><refentrytitle>systemd.special</refentrytitle><manvolnum>7</manvolnum></citerefentry> for
+    details) until the system time has been synchronized with an accurate remote reference time source by
+    <filename>systemd-timesyncd.service</filename>.</para>
 
-    <para>When this unit is not enabled the <filename>time-sync.target</filename> synchronization point may be reached
-    as soon as the system time is advanced by <filename>systemd-timesyncd.service</filename> to the time stored at the
-    last shutdown.  That time may not meet the expectations of dependent services that require an accurate
-    clock.</para>
-
+    <para><filename>systemd-timesyncd.service</filename> notifies <filename>systemd-time-wait-sync</filename>
+    about successful synchronization.  <filename>systemd-time-wait-sync</filename> also tries to detect when
+    the kernel marks the system clock as synchronized, but this detection is not reliable and is intended
+    only as a fallback for compatibility with alternative NTP services that can be used to synchronize time
+    (e.g., ntpd, chronyd).</para>
   </refsect1>
 
   <refsect1>
-    <title>Notes</title>
+    <title>Files</title>
 
-    <para>This service works correctly with a time synchronization service like
-    <filename>systemd-timesyncd.service</filename> that uses the same protocol as NTP to set the time from a
-    synchronized source.  When used with time synchronization services that follow a different protocol the event of
-    setting synchronized time may not be detected in which case this service will not complete.</para>
+    <variablelist>
+      <varlistentry>
+        <term><filename>/run/systemd/timesync/synchronized</filename></term>
+
+        <listitem>
+          <para>The presence of this file indicates to this service that the system clock has been synchronized.</para>
+
+        <xi:include href="version-info.xml" xpointer="v239"/>
+        </listitem>
+
+      </varlistentry>
+    </variablelist>
+
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.special</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd-timesyncd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd.special</refentrytitle><manvolnum>7</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-timesyncd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

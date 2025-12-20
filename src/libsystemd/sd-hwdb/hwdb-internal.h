@@ -1,29 +1,28 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <sys/stat.h>
 
-  Copyright 2012 Kay Sievers <kay@vrfy.org>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#include "sd-forward.h"
+#include "iterator.h"
 #include "sparse-endian.h"
-#include "util.h"
 
 #define HWDB_SIG { 'K', 'S', 'L', 'P', 'H', 'H', 'R', 'H' }
+
+struct sd_hwdb {
+        unsigned n_ref;
+
+        FILE *f;
+        struct stat st;
+        union {
+                struct trie_header_f *head;
+                const char *map;
+        };
+
+        OrderedHashmap *properties;
+        Iterator properties_iterator;
+        bool properties_modified;
+};
 
 /* on-disk trie objects */
 struct trie_header_f {
@@ -81,3 +80,9 @@ struct trie_value_entry2_f {
         le16_t file_priority;
         le16_t padding;
 } _packed_;
+
+#define HWDB_BIN_PATHS                          \
+        "/etc/systemd/hwdb/hwdb.bin\0"          \
+        "/etc/udev/hwdb.bin\0"                  \
+        "/usr/lib/systemd/hwdb/hwdb.bin\0"      \
+        UDEVLIBEXECDIR "/hwdb.bin\0"

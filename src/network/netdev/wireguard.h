@@ -1,35 +1,14 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <linux/wireguard.h>
 
-  Copyright 2016 Jörg Thalheim <joerg@thalheim.io>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Wireguard Wireguard;
-
-#include "netdev.h"
-#include "sd-resolve.h"
-#include "wireguard-netlink.h"
-#include "socket-util.h"
 #include "in-addr-util.h"
-
-#ifndef IFNAMSIZ
-#define IFNAMSIZ 16
-#endif
+#include "list.h"
+#include "netdev.h"
+#include "networkd-forward.h"
+#include "socket-util.h"
 
 typedef struct WireguardIPmask {
         uint16_t family;
@@ -40,59 +19,63 @@ typedef struct WireguardIPmask {
 } WireguardIPmask;
 
 typedef struct WireguardPeer {
+        Wireguard *wireguard;
+        ConfigSection *section;
+
         uint8_t public_key[WG_KEY_LEN];
         uint8_t preshared_key[WG_KEY_LEN];
+        char *public_key_file;
+        char *preshared_key_file;
         uint32_t flags;
+        uint16_t persistent_keepalive_interval;
 
         union sockaddr_union endpoint;
+        char *endpoint_host;
+        char *endpoint_port;
 
-        uint16_t persistent_keepalive_interval;
+        unsigned n_retries;
+        sd_event_source *resolve_retry_event_source;
+        sd_resolve_query *resolve_query;
+
+        uint32_t route_table;
+        uint32_t route_priority;
+        bool route_table_set;
+        bool route_priority_set;
 
         LIST_HEAD(WireguardIPmask, ipmasks);
         LIST_FIELDS(struct WireguardPeer, peers);
 } WireguardPeer;
 
-typedef struct WireguardEndpoint {
-        char *host;
-        char *port;
-
-        NetDev *netdev;
-        WireguardPeer *peer;
-
-        LIST_FIELDS(struct WireguardEndpoint, endpoints);
-} WireguardEndpoint;
-
-struct Wireguard {
+typedef struct Wireguard {
         NetDev meta;
         unsigned last_peer_section;
 
-        char interface[IFNAMSIZ];
         uint32_t flags;
-
-        uint8_t public_key[WG_KEY_LEN];
         uint8_t private_key[WG_KEY_LEN];
+        char *private_key_file;
+        uint16_t port;
         uint32_t fwmark;
 
-        uint16_t port;
-
+        Hashmap *peers_by_section;
         LIST_HEAD(WireguardPeer, peers);
-        size_t allocation_size;
-        sd_event_source *resolve_retry_event_source;
 
-        LIST_HEAD(WireguardEndpoint, unresolved_endpoints);
-        LIST_HEAD(WireguardEndpoint, failed_endpoints);
-        unsigned n_retries;
-        sd_resolve_query *resolve_query;
-};
+        Set *routes;
+        uint32_t route_table;
+        uint32_t route_priority;
+} Wireguard;
 
 DEFINE_NETDEV_CAST(WIREGUARD, Wireguard);
 extern const NetDevVTable wireguard_vtable;
 
-int config_parse_wireguard_allowed_ips(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_wireguard_endpoint(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_wireguard_listen_port(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-
-int config_parse_wireguard_public_key(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_wireguard_private_key(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_wireguard_preshared_key(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_wireguard_keepalive(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_allowed_ips);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_endpoint);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_listen_port);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_peer_key);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_peer_key_file);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_private_key);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_private_key_file);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_keepalive);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_route_table);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_peer_route_table);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_route_priority);
+CONFIG_PARSER_PROTOTYPE(config_parse_wireguard_peer_route_priority);

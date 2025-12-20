@@ -1,89 +1,150 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "in-addr-util.h"
+#include "networkd-forward.h"
+#include "networkd-route-metric.h"
+#include "networkd-route-nexthop.h"
+#include "networkd-util.h"
 
-  Copyright 2013 Tom Gundersen <teg@jklm.no>
+typedef int (*route_netlink_handler_t)(
+                sd_netlink *rtnl,
+                sd_netlink_message *m,
+                Request *req,
+                Link *link,
+                Route *route);
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Route Route;
-typedef struct NetworkConfigSection NetworkConfigSection;
-
-#include "networkd-network.h"
-
-struct Route {
+typedef struct Route {
+        Manager *manager;
         Network *network;
-        NetworkConfigSection *section;
+        Wireguard *wireguard;
+        ConfigSection *section;
+        NetworkConfigSource source;
+        NetworkConfigState state;
+        union in_addr_union provider; /* DHCP server or router address */
 
-        Link *link;
+        unsigned n_ref;
 
+        /* rtmsg header */
         int family;
-        int quickack;
-
         unsigned char dst_prefixlen;
-        unsigned char src_prefixlen;
-        unsigned char scope;
+        unsigned char src_prefixlen; /* IPv6 only */
+        unsigned char tos; /* IPv4 only */
         unsigned char protocol;  /* RTPROT_* */
-        unsigned char type; /* RTN_* */
-        unsigned char tos;
-        uint32_t priority; /* note that ip(8) calls this 'metric' */
-        uint32_t table;
-        uint32_t mtu;
-        uint32_t initcwnd;
-        uint32_t initrwnd;
-        unsigned char pref;
-        unsigned flags;
+        unsigned char scope; /* IPv4 only */
+        unsigned char type; /* RTN_*, e.g. RTN_LOCAL, RTN_UNREACHABLE */
+        unsigned flags; /* e.g. RTNH_F_ONLINK */
 
-        union in_addr_union gw;
-        union in_addr_union dst;
-        union in_addr_union src;
-        union in_addr_union prefsrc;
+        /* attributes */
+        union in_addr_union dst; /* RTA_DST */
+        union in_addr_union src; /* RTA_SRC (IPv6 only) */
+        uint32_t priority; /* RTA_PRIORITY, note that ip(8) calls this 'metric' */
+        union in_addr_union prefsrc; /* RTA_PREFSRC */
+        uint32_t table; /* RTA_TABLE, also used in rtmsg header */
+        uint8_t pref; /* RTA_PREF (IPv6 only) */
 
-        usec_t lifetime;
+        /* nexthops */
+        RouteNextHop nexthop; /* RTA_OIF, and RTA_GATEWAY or RTA_VIA (IPv4 only) */
+        OrderedSet *nexthops; /* RTA_MULTIPATH */
+        uint32_t nexthop_id; /* RTA_NH_ID */
+
+        /* metrics (RTA_METRICS) */
+        RouteMetric metric;
+
+        /* This is an absolute point in time, and NOT a timespan/duration.
+         * Must be specified with clock_boottime_or_monotonic(). */
+        usec_t lifetime_usec; /* RTA_EXPIRES (IPv6 only) */
+        /* Used when kernel does not support RTA_EXPIRES attribute. */
         sd_event_source *expire;
+        bool expiration_managed_by_kernel:1; /* RTA_CACHEINFO has nonzero rta_expires */
 
-        LIST_FIELDS(Route, routes);
-};
+        /* Only used by conf persers and route_section_verify(). */
+        bool prefsrc_set:1;
+        bool scope_set:1;
+        bool table_set:1;
+        bool priority_set:1;
+        bool protocol_set:1;
+        bool pref_set:1;
+        bool gateway_from_dhcp_or_ra:1;
+        int gateway_onlink;
+} Route;
 
-int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret);
+void log_route_debug(const Route *route, const char *str, Manager *manager);
+
+extern const struct hash_ops route_hash_ops;
+extern const struct hash_ops route_hash_ops_unref;
+
+Route* route_ref(Route *route);
+Route* route_unref(Route *route);
+DEFINE_SECTION_CLEANUP_FUNCTIONS(Route, route_unref);
+
+void route_detach(Route *route);
+
 int route_new(Route **ret);
-void route_free(Route *route);
-int route_configure(Route *route, Link *link, sd_netlink_message_handler_t callback);
-int route_remove(Route *route, Link *link, sd_netlink_message_handler_t callback);
+int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret);
+int route_dup(const Route *src, const RouteNextHop *nh, Route **ret);
 
-int route_get(Link *link, int family, const union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, uint32_t table, Route **ret);
-int route_add(Link *link, int family, const union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, uint32_t table, Route **ret);
-int route_add_foreign(Link *link, int family, const union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, uint32_t table, Route **ret);
-void route_update(Route *route, const union in_addr_union *src, unsigned char src_prefixlen, const union in_addr_union *gw, const union in_addr_union *prefsrc, unsigned char scope, unsigned char protocol, unsigned char type);
+int route_configure_handler_internal(sd_netlink_message *m, Request *req, Route *route);
+int route_remove(Route *route, Manager *manager);
+int route_remove_and_cancel(Route *route, Manager *manager);
 
-int route_expire_handler(sd_event_source *s, uint64_t usec, void *userdata);
+int route_get(Manager *manager, const Route *route, Route **ret);
+bool route_is_bound_to_link(const Route *route, Link *link);
+int route_get_request(Manager *manager, const Route *route, Request **ret);
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(Route*, route_free);
-#define _cleanup_route_free_ _cleanup_(route_freep)
+bool route_can_update(Manager *manager, const Route *existing, const Route *requesting);
 
-int config_parse_gateway(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_preferred_src(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_destination(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_route_priority(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_route_scope(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_route_table(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_gateway_onlink(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_ipv6_route_preference(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_route_protocol(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_route_type(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_tcp_window(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_quickack(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int link_drop_routes(Link *link, bool only_static);
+static inline int link_drop_static_routes(Link *link) {
+        return link_drop_routes(link, true);
+}
+static inline int link_drop_unmanaged_routes(Link *link) {
+        return link_drop_routes(link, false);
+}
+void link_forget_routes(Link *link);
+
+int link_request_route(
+                Link *link,
+                const Route *route,
+                unsigned *message_counter,
+                route_netlink_handler_t netlink_handler);
+int link_request_static_routes(Link *link, bool only_ipv4);
+
+int manager_rtnl_process_route(sd_netlink *rtnl, sd_netlink_message *message, Manager *m);
+
+int network_add_ipv4ll_route(Network *network);
+int network_add_default_route_on_device(Network *network);
+void network_drop_invalid_routes(Network *network);
+int route_section_verify(Route *route);
+
+DEFINE_NETWORK_CONFIG_STATE_FUNCTIONS(Route, route);
+void manager_mark_routes(Manager *manager, Link *link, NetworkConfigSource source);
+
+typedef enum RouteConfParserType {
+        ROUTE_DESTINATION,
+        ROUTE_PREFERRED_SOURCE,
+        ROUTE_PRIORITY,
+        ROUTE_SCOPE,
+        ROUTE_TABLE,
+        ROUTE_PREFERENCE,
+        ROUTE_PROTOCOL,
+        ROUTE_TYPE,
+        ROUTE_GATEWAY_NETWORK,
+        ROUTE_GATEWAY,
+        ROUTE_GATEWAY_ONLINK,
+        ROUTE_MULTIPATH,
+        ROUTE_NEXTHOP,
+        ROUTE_METRIC_MTU,
+        ROUTE_METRIC_ADVMSS,
+        ROUTE_METRIC_HOPLIMIT,
+        ROUTE_METRIC_INITCWND,
+        ROUTE_METRIC_RTO_MIN,
+        ROUTE_METRIC_INITRWND,
+        ROUTE_METRIC_QUICKACK,
+        ROUTE_METRIC_CC_ALGO,
+        ROUTE_METRIC_FASTOPEN_NO_COOKIE,
+        _ROUTE_CONF_PARSER_MAX,
+        _ROUTE_CONF_PARSER_INVALID = -EINVAL,
+} RouteConfParserType;
+
+CONFIG_PARSER_PROTOTYPE(config_parse_route_section);

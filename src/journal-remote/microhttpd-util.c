@@ -1,27 +1,6 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2012 Lennart Poettering
-  Copyright 2012 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stddef.h>
 #include <stdio.h>
-#include <string.h>
 
 #if HAVE_GNUTLS
 #include <gnutls/gnutls.h>
@@ -30,11 +9,11 @@
 
 #include "alloc-util.h"
 #include "log.h"
-#include "macro.h"
 #include "microhttpd-util.h"
 #include "string-util.h"
 #include "strv.h"
-#include "util.h"
+
+#if HAVE_MICROHTTPD
 
 void microhttpd_logger(void *arg, const char *fmt, va_list ap) {
         char *f;
@@ -46,52 +25,42 @@ void microhttpd_logger(void *arg, const char *fmt, va_list ap) {
         REENABLE_WARNING;
 }
 
-
-static int mhd_respond_internal(struct MHD_Connection *connection,
-                                enum MHD_RequestTerminationCode code,
-                                const char *buffer,
-                                size_t size,
-                                enum MHD_ResponseMemoryMode mode) {
-        struct MHD_Response *response;
-        int r;
+int mhd_respond_internal(
+                struct MHD_Connection *connection,
+                enum MHD_RequestTerminationCode code,
+                const char *encoding,
+                const char *buffer,
+                size_t size,
+                enum MHD_ResponseMemoryMode mode) {
 
         assert(connection);
 
-        response = MHD_create_response_from_buffer(size, (char*) buffer, mode);
+        _cleanup_(MHD_destroy_responsep) struct MHD_Response *response
+                = MHD_create_response_from_buffer(size, (char*) buffer, mode);
         if (!response)
                 return MHD_NO;
 
         log_debug("Queueing response %u: %s", code, buffer);
-        MHD_add_response_header(response, "Content-Type", "text/plain");
-        r = MHD_queue_response(connection, code, response);
-        MHD_destroy_response(response);
+        if (encoding)
+                if (MHD_add_response_header(response, "Accept-Encoding", encoding) == MHD_NO)
+                        return MHD_NO;
 
-        return r;
-}
-
-int mhd_respond(struct MHD_Connection *connection,
-                enum MHD_RequestTerminationCode code,
-                const char *message) {
-
-        const char *fmt;
-
-        fmt = strjoina(message, "\n");
-
-        return mhd_respond_internal(connection, code,
-                                    fmt, strlen(message) + 1,
-                                    MHD_RESPMEM_PERSISTENT);
+        if (MHD_add_response_header(response, "Content-Type", "text/plain") == MHD_NO)
+                return MHD_NO;
+        return MHD_queue_response(connection, code, response);
 }
 
 int mhd_respond_oom(struct MHD_Connection *connection) {
-        return mhd_respond(connection, MHD_HTTP_SERVICE_UNAVAILABLE,  "Out of memory.");
+        return mhd_respond(connection, MHD_HTTP_SERVICE_UNAVAILABLE, "Out of memory.");
 }
 
-int mhd_respondf(struct MHD_Connection *connection,
-                 int error,
-                 enum MHD_RequestTerminationCode code,
-                 const char *format, ...) {
+int mhd_respondf_internal(
+                struct MHD_Connection *connection,
+                int error,
+                enum MHD_RequestTerminationCode code,
+                const char *encoding,
+                const char *format, ...) {
 
-        const char *fmt;
         char *m;
         int r;
         va_list ap;
@@ -102,18 +71,14 @@ int mhd_respondf(struct MHD_Connection *connection,
         if (error < 0)
                 error = -error;
         errno = -error;
-        fmt = strjoina(format, "\n");
         va_start(ap, format);
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-nonliteral"
-        r = vasprintf(&m, fmt, ap);
-#pragma GCC diagnostic pop
+        r = vasprintf(&m, format, ap);
         va_end(ap);
 
         if (r < 0)
                 return respond_oom(connection);
 
-        return mhd_respond_internal(connection, code, m, r, MHD_RESPMEM_MUST_FREE);
+        return mhd_respond_internal(connection, code, encoding, m, r, MHD_RESPMEM_MUST_FREE);
 }
 
 #if HAVE_GNUTLS
@@ -159,37 +124,33 @@ static void log_reset_gnutls_level(void) {
 }
 
 static int log_enable_gnutls_category(const char *cat) {
-        unsigned i;
-
         if (streq(cat, "all")) {
-                for (i = 0; i < ELEMENTSOF(gnutls_log_map); i++)
-                        gnutls_log_map[i].enabled = true;
+                FOREACH_ELEMENT(entry, gnutls_log_map)
+                        entry->enabled = true;
                 log_reset_gnutls_level();
                 return 0;
         } else
-                for (i = 0; i < ELEMENTSOF(gnutls_log_map); i++)
-                        if (strv_contains((char**)gnutls_log_map[i].names, cat)) {
-                                gnutls_log_map[i].enabled = true;
+                FOREACH_ELEMENT(entry, gnutls_log_map)
+                        if (strv_contains((char**)entry->names, cat)) {
+                                entry->enabled = true;
                                 log_reset_gnutls_level();
                                 return 0;
                         }
-        log_error("No such log category: %s", cat);
-        return -EINVAL;
+        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "No such log category: %s", cat);
 }
 
 int setup_gnutls_logger(char **categories) {
-        char **cat;
         int r;
 
         gnutls_global_set_log_function(log_func_gnutls);
 
-        if (categories) {
+        if (categories)
                 STRV_FOREACH(cat, categories) {
                         r = log_enable_gnutls_category(*cat);
                         if (r < 0)
                                 return r;
                 }
-        } else
+        else
                 log_reset_gnutls_level();
 
         return 0;
@@ -226,10 +187,9 @@ static int get_client_cert(gnutls_session_t session, gnutls_x509_crt_t *client_c
         assert(client_cert);
 
         pcert = gnutls_certificate_get_peers(session, &listsize);
-        if (!pcert || !listsize) {
-                log_error("Failed to retrieve certificate chain");
-                return -EINVAL;
-        }
+        if (!pcert || !listsize)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Failed to retrieve certificate chain");
 
         r = gnutls_x509_crt_init(&cert);
         if (r < 0) {
@@ -271,7 +231,7 @@ static int get_auth_dn(gnutls_x509_crt_t client_cert, char **buf) {
         return 0;
 }
 
-static inline void gnutls_x509_crt_deinitp(gnutls_x509_crt_t *p) {
+static void gnutls_x509_crt_deinitp(gnutls_x509_crt_t *p) {
         gnutls_x509_crt_deinit(*p);
 }
 
@@ -314,10 +274,8 @@ int check_permissions(struct MHD_Connection *connection, int *code, char **hostn
 
         log_debug("Connection from %s", buf);
 
-        if (hostname) {
-                *hostname = buf;
-                buf = NULL;
-        }
+        if (hostname)
+                *hostname = TAKE_PTR(buf);
 
         r = verify_cert_authorized(session);
         if (r < 0) {
@@ -329,8 +287,8 @@ int check_permissions(struct MHD_Connection *connection, int *code, char **hostn
 }
 
 #else
-int check_permissions(struct MHD_Connection *connection, int *code, char **hostname) {
-        return -EPERM;
+_noreturn_ int check_permissions(struct MHD_Connection *connection, int *code, char **hostname) {
+        assert_not_reached();
 }
 
 int setup_gnutls_logger(char **categories) {
@@ -338,4 +296,6 @@ int setup_gnutls_logger(char **categories) {
                 log_notice("Ignoring specified gnutls logging categories — gnutls not available.");
         return 0;
 }
+#endif
+
 #endif

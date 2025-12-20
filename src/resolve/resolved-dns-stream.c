@@ -1,59 +1,91 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2014 Lennart Poettering
+#include <unistd.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <netinet/tcp.h>
+#include "sd-event.h"
 
 #include "alloc-util.h"
+#include "dns-packet.h"
+#include "errno-util.h"
 #include "fd-util.h"
-#include "io-util.h"
-#include "missing.h"
+#include "iovec-util.h"
+#include "log.h"
+#include "missing-network.h"
+#include "ordered-set.h"
+#include "resolved-dns-server.h"
 #include "resolved-dns-stream.h"
+#include "resolved-manager.h"
+#include "set.h"
+#include "time-util.h"
 
-#define DNS_STREAM_TIMEOUT_USEC (10 * USEC_PER_SEC)
 #define DNS_STREAMS_MAX 128
+
+#define DNS_QUERIES_PER_STREAM 32
 
 static void dns_stream_stop(DnsStream *s) {
         assert(s);
 
-        s->io_event_source = sd_event_source_unref(s->io_event_source);
-        s->timeout_event_source = sd_event_source_unref(s->timeout_event_source);
+        s->io_event_source = sd_event_source_disable_unref(s->io_event_source);
+        s->timeout_event_source = sd_event_source_disable_unref(s->timeout_event_source);
         s->fd = safe_close(s->fd);
+
+        /* Disconnect us from the server object if we are now not usable anymore */
+        dns_stream_detach(s);
 }
 
 static int dns_stream_update_io(DnsStream *s) {
-        int f = 0;
+        uint32_t f = 0;
 
         assert(s);
 
         if (s->write_packet && s->n_written < sizeof(s->write_size) + s->write_packet->size)
                 f |= EPOLLOUT;
-        if (!s->read_packet || s->n_read < sizeof(s->read_size) + s->read_packet->size)
+        else if (!ordered_set_isempty(s->write_queue)) {
+                dns_packet_unref(s->write_packet);
+                s->write_packet = ordered_set_steal_first(s->write_queue);
+                s->write_size = htobe16(s->write_packet->size);
+                s->n_written = 0;
+                f |= EPOLLOUT;
+        }
+
+        /* Let's read a packet if we haven't queued any yet. Except if we already hit a limit of parallel
+         * queries for this connection. */
+        if ((!s->read_packet || s->n_read < sizeof(s->read_size) + s->read_packet->size) &&
+                set_size(s->queries) < DNS_QUERIES_PER_STREAM)
                 f |= EPOLLIN;
+
+        s->requested_events = f;
+
+#if ENABLE_DNS_OVER_TLS
+        /* For handshake and clean closing purposes, TLS can override requested events */
+        if (s->dnstls_events != 0)
+                f = s->dnstls_events;
+#endif
 
         return sd_event_source_set_io_events(s->io_event_source, f);
 }
 
 static int dns_stream_complete(DnsStream *s, int error) {
-        assert(s);
+        _cleanup_(dns_stream_unrefp) _unused_ DnsStream *ref = dns_stream_ref(s); /* Protect stream while we process it */
 
-        dns_stream_stop(s);
+        assert(s);
+        assert(error >= 0);
+
+        /* Error is > 0 when the connection failed for some reason in the network stack. It's == 0 if we sent
+         * and received exactly one packet each (in the LLMNR client case). */
+
+#if ENABLE_DNS_OVER_TLS
+        if (s->encrypted) {
+                int r;
+
+                r = dnstls_stream_shutdown(s, error);
+                if (r != -EAGAIN)
+                        dns_stream_stop(s);
+        } else
+#endif
+                dns_stream_stop(s);
+
+        dns_stream_detach(s);
 
         if (s->complete)
                 s->complete(s, error);
@@ -64,11 +96,9 @@ static int dns_stream_complete(DnsStream *s, int error) {
 }
 
 static int dns_stream_identify(DnsStream *s) {
-        union {
-                struct cmsghdr header; /* For alignment */
-                uint8_t buffer[CMSG_SPACE(MAXSIZE(struct in_pktinfo, struct in6_pktinfo))
-                               + EXTRA_CMSG_SPACE /* kernel appears to require extra space */];
-        } control;
+        CMSG_BUFFER_TYPE(CMSG_SPACE(MAXSIZE(struct in_pktinfo, struct in6_pktinfo))
+                         + CMSG_SPACE(int) + /* for the TTL */
+                         + EXTRA_CMSG_SPACE /* kernel appears to require extra space */) control;
         struct msghdr mh = {};
         struct cmsghdr *cmsg;
         socklen_t sl;
@@ -124,7 +154,7 @@ static int dns_stream_identify(DnsStream *s) {
                         switch (cmsg->cmsg_type) {
 
                         case IPV6_PKTINFO: {
-                                struct in6_pktinfo *i = (struct in6_pktinfo*) CMSG_DATA(cmsg);
+                                struct in6_pktinfo *i = CMSG_TYPED_DATA(cmsg, struct in6_pktinfo);
 
                                 if (s->ifindex <= 0)
                                         s->ifindex = i->ipi6_ifindex;
@@ -132,7 +162,7 @@ static int dns_stream_identify(DnsStream *s) {
                         }
 
                         case IPV6_HOPLIMIT:
-                                s->ttl = *(int *) CMSG_DATA(cmsg);
+                                s->ttl = *CMSG_TYPED_DATA(cmsg, int);
                                 break;
                         }
 
@@ -142,7 +172,7 @@ static int dns_stream_identify(DnsStream *s) {
                         switch (cmsg->cmsg_type) {
 
                         case IP_PKTINFO: {
-                                struct in_pktinfo *i = (struct in_pktinfo*) CMSG_DATA(cmsg);
+                                struct in_pktinfo *i = CMSG_TYPED_DATA(cmsg, struct in_pktinfo);
 
                                 if (s->ifindex <= 0)
                                         s->ifindex = i->ipi_ifindex;
@@ -150,7 +180,7 @@ static int dns_stream_identify(DnsStream *s) {
                         }
 
                         case IP_TTL:
-                                s->ttl = *(int *) CMSG_DATA(cmsg);
+                                s->ttl = *CMSG_TYPED_DATA(cmsg, int);
                                 break;
                         }
                 }
@@ -166,21 +196,13 @@ static int dns_stream_identify(DnsStream *s) {
         /* If we don't know the interface index still, we look for the
          * first local interface with a matching address. Yuck! */
         if (s->ifindex <= 0)
-                s->ifindex = manager_find_ifindex(s->manager, s->local.sa.sa_family, s->local.sa.sa_family == AF_INET ? (union in_addr_union*) &s->local.in.sin_addr : (union in_addr_union*)  &s->local.in6.sin6_addr);
+                s->ifindex = manager_find_ifindex(s->manager, s->local.sa.sa_family, sockaddr_in_addr(&s->local.sa));
 
         if (s->protocol == DNS_PROTOCOL_LLMNR && s->ifindex > 0) {
-                uint32_t ifindex = htobe32(s->ifindex);
-
                 /* Make sure all packets for this connection are sent on the same interface */
-                if (s->local.sa.sa_family == AF_INET) {
-                        r = setsockopt(s->fd, IPPROTO_IP, IP_UNICAST_IF, &ifindex, sizeof(ifindex));
-                        if (r < 0)
-                                log_debug_errno(errno, "Failed to invoke IP_UNICAST_IF: %m");
-                } else if (s->local.sa.sa_family == AF_INET6) {
-                        r = setsockopt(s->fd, IPPROTO_IPV6, IPV6_UNICAST_IF, &ifindex, sizeof(ifindex));
-                        if (r < 0)
-                                log_debug_errno(errno, "Failed to invoke IPV6_UNICAST_IF: %m");
-                }
+                r = socket_set_unicast_if(s->fd, s->local.sa.sa_family, s->ifindex);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to invoke IP_UNICAST_IF/IPV6_UNICAST_IF: %m");
         }
 
         s->identified = true;
@@ -188,44 +210,153 @@ static int dns_stream_identify(DnsStream *s) {
         return 0;
 }
 
-static int on_stream_timeout(sd_event_source *es, usec_t usec, void *userdata) {
-        DnsStream *s = userdata;
+ssize_t dns_stream_writev(DnsStream *s, const struct iovec *iov, size_t iovcnt, int flags) {
+        ssize_t m;
+        int r;
 
         assert(s);
+        assert(iov);
+
+#if ENABLE_DNS_OVER_TLS
+        if (s->encrypted && !(flags & DNS_STREAM_WRITE_TLS_DATA))
+                return dnstls_stream_writev(s, iov, iovcnt);
+#endif
+
+        if (s->tfo_salen > 0) {
+                struct msghdr hdr = {
+                        .msg_iov = (struct iovec*) iov,
+                        .msg_iovlen = iovcnt,
+                        .msg_name = &s->tfo_address.sa,
+                        .msg_namelen = s->tfo_salen
+                };
+
+                m = sendmsg(s->fd, &hdr, MSG_FASTOPEN);
+                if (m < 0) {
+                        if (ERRNO_IS_NOT_SUPPORTED(errno)) {
+                                /* MSG_FASTOPEN not supported? Then try to connect() traditionally */
+                                r = RET_NERRNO(connect(s->fd, &s->tfo_address.sa, s->tfo_salen));
+                                s->tfo_salen = 0; /* connection is made */
+                                if (r < 0 && r != -EINPROGRESS)
+                                        return r;
+
+                                return -EAGAIN; /* In case of EINPROGRESS, EAGAIN or success: return EAGAIN, so that caller calls us again */
+                        }
+                        if (errno == EINPROGRESS)
+                                return -EAGAIN;
+
+                        return -errno;
+                } else
+                        s->tfo_salen = 0; /* connection is made */
+        } else {
+                m = writev(s->fd, iov, iovcnt);
+                if (m < 0)
+                        return -errno;
+        }
+
+        return m;
+}
+
+static ssize_t dns_stream_read(DnsStream *s, void *buf, size_t count) {
+        ssize_t ss;
+
+#if ENABLE_DNS_OVER_TLS
+        if (s->encrypted)
+                ss = dnstls_stream_read(s, buf, count);
+        else
+#endif
+        {
+                ss = read(s->fd, buf, count);
+                if (ss < 0)
+                        return -errno;
+        }
+
+        return ss;
+}
+
+static int on_stream_timeout(sd_event_source *es, usec_t usec, void *userdata) {
+        DnsStream *s = ASSERT_PTR(userdata);
 
         return dns_stream_complete(s, ETIMEDOUT);
 }
 
+static DnsPacket *dns_stream_take_read_packet(DnsStream *s) {
+        assert(s);
+
+        /* Note, dns_stream_update() should be called after this is called. When this is called, the
+         * stream may be already full and the EPOLLIN flag is dropped from the stream IO event source.
+         * Even this makes a room to read in the stream, this does not call dns_stream_update(), hence
+         * EPOLLIN flag is not set automatically. So, to read further packets from the stream,
+         * dns_stream_update() must be called explicitly. Currently, this is only called from
+         * on_stream_io(), and there dns_stream_update() is called. */
+
+        if (!s->read_packet)
+                return NULL;
+
+        if (s->n_read < sizeof(s->read_size))
+                return NULL;
+
+        if (s->n_read < sizeof(s->read_size) + be16toh(s->read_size))
+                return NULL;
+
+        s->n_read = 0;
+        return TAKE_PTR(s->read_packet);
+}
+
 static int on_stream_io(sd_event_source *es, int fd, uint32_t revents, void *userdata) {
-        DnsStream *s = userdata;
+        _cleanup_(dns_stream_unrefp) DnsStream *s = dns_stream_ref(userdata); /* Protect stream while we process it */
+        bool progressed = false;
         int r;
 
         assert(s);
 
-        r = dns_stream_identify(s);
-        if (r < 0)
-                return dns_stream_complete(s, -r);
+#if ENABLE_DNS_OVER_TLS
+        if (s->encrypted) {
+                r = dnstls_stream_on_io(s, revents);
+                if (r == DNSTLS_STREAM_CLOSED)
+                        return 0;
+                if (r == -EAGAIN)
+                        return dns_stream_update_io(s);
+                if (r < 0)
+                        return dns_stream_complete(s, -r);
+
+                r = dns_stream_update_io(s);
+                if (r < 0)
+                        return r;
+        }
+#endif
+
+        /* only identify after connecting */
+        if (s->tfo_salen == 0) {
+                r = dns_stream_identify(s);
+                if (r < 0)
+                        return dns_stream_complete(s, -r);
+        }
+
+        if (revents & EPOLLERR) {
+                socklen_t errlen = sizeof(r);
+                if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &r, &errlen) == 0)
+                        return dns_stream_complete(s, r);
+        }
 
         if ((revents & EPOLLOUT) &&
             s->write_packet &&
             s->n_written < sizeof(s->write_size) + s->write_packet->size) {
 
-                struct iovec iov[2];
-                ssize_t ss;
+                struct iovec iov[] = {
+                        IOVEC_MAKE(&s->write_size, sizeof(s->write_size)),
+                        IOVEC_MAKE(DNS_PACKET_DATA(s->write_packet), s->write_packet->size),
+                };
 
-                iov[0].iov_base = &s->write_size;
-                iov[0].iov_len = sizeof(s->write_size);
-                iov[1].iov_base = DNS_PACKET_DATA(s->write_packet);
-                iov[1].iov_len = s->write_packet->size;
+                iovec_increment(iov, ELEMENTSOF(iov), s->n_written);
 
-                IOVEC_INCREMENT(iov, 2, s->n_written);
-
-                ss = writev(fd, iov, 2);
+                ssize_t ss = dns_stream_writev(s, iov, ELEMENTSOF(iov), 0);
                 if (ss < 0) {
-                        if (!IN_SET(errno, EINTR, EAGAIN))
-                                return dns_stream_complete(s, errno);
-                } else
+                        if (!ERRNO_IS_TRANSIENT(ss))
+                                return dns_stream_complete(s, -ss);
+                } else {
+                        progressed = true;
                         s->n_written += ss;
+                }
 
                 /* Are we done? If so, disable the event source for EPOLLOUT */
                 if (s->n_written >= sizeof(s->write_size) + s->write_packet->size) {
@@ -235,21 +366,25 @@ static int on_stream_io(sd_event_source *es, int fd, uint32_t revents, void *use
                 }
         }
 
-        if ((revents & (EPOLLIN|EPOLLHUP|EPOLLRDHUP)) &&
-            (!s->read_packet ||
-             s->n_read < sizeof(s->read_size) + s->read_packet->size)) {
+        while (s->identified && /* Only read data once we identified the peer, because we cannot fill in the DNS packet meta info otherwise */
+               (revents & (EPOLLIN|EPOLLHUP|EPOLLRDHUP)) &&
+               (!s->read_packet ||
+                s->n_read < sizeof(s->read_size) + s->read_packet->size)) {
 
                 if (s->n_read < sizeof(s->read_size)) {
                         ssize_t ss;
 
-                        ss = read(fd, (uint8_t*) &s->read_size + s->n_read, sizeof(s->read_size) - s->n_read);
+                        ss = dns_stream_read(s, (uint8_t*) &s->read_size + s->n_read, sizeof(s->read_size) - s->n_read);
                         if (ss < 0) {
-                                if (!IN_SET(errno, EINTR, EAGAIN))
-                                        return dns_stream_complete(s, errno);
+                                if (!ERRNO_IS_TRANSIENT(ss))
+                                        return dns_stream_complete(s, -ss);
+                                break;
                         } else if (ss == 0)
                                 return dns_stream_complete(s, ECONNRESET);
-                        else
+                        else {
+                                progressed = true;
                                 s->n_read += ss;
+                        }
                 }
 
                 if (s->n_read >= sizeof(s->read_size)) {
@@ -270,6 +405,7 @@ static int on_stream_io(sd_event_source *es, int fd, uint32_t revents, void *use
                                         s->read_packet->family = s->peer.sa.sa_family;
                                         s->read_packet->ttl = s->ttl;
                                         s->read_packet->ifindex = s->ifindex;
+                                        s->read_packet->timestamp = now(CLOCK_BOOTTIME);
 
                                         if (s->read_packet->family == AF_INET) {
                                                 s->read_packet->sender.in = s->peer.in.sin_addr;
@@ -290,92 +426,128 @@ static int on_stream_io(sd_event_source *es, int fd, uint32_t revents, void *use
                                         }
                                 }
 
-                                ss = read(fd,
-                                          (uint8_t*) DNS_PACKET_DATA(s->read_packet) + s->n_read - sizeof(s->read_size),
+                                ss = dns_stream_read(s,
+                                          DNS_PACKET_DATA(s->read_packet) + s->n_read - sizeof(s->read_size),
                                           sizeof(s->read_size) + be16toh(s->read_size) - s->n_read);
                                 if (ss < 0) {
-                                        if (!IN_SET(errno, EINTR, EAGAIN))
-                                                return dns_stream_complete(s, errno);
+                                        if (!ERRNO_IS_TRANSIENT(ss))
+                                                return dns_stream_complete(s, -ss);
+                                        break;
                                 } else if (ss == 0)
                                         return dns_stream_complete(s, ECONNRESET);
                                 else
                                         s->n_read += ss;
                         }
 
-                        /* Are we done? If so, disable the event source for EPOLLIN */
-                        if (s->n_read >= sizeof(s->read_size) + be16toh(s->read_size)) {
+                        /* Are we done? If so, call the packet handler and re-enable EPOLLIN for the
+                         * event source if necessary. */
+                        _cleanup_(dns_packet_unrefp) DnsPacket *p = dns_stream_take_read_packet(s);
+                        if (p) {
+                                assert(s->on_packet);
+                                r = s->on_packet(s, p);
+                                if (r < 0)
+                                        return r;
+
                                 r = dns_stream_update_io(s);
                                 if (r < 0)
                                         return dns_stream_complete(s, -r);
 
-                                /* If there's a packet handler
-                                 * installed, call that. Note that
-                                 * this is optional... */
-                                if (s->on_packet)
-                                        return s->on_packet(s);
+                                s->packet_received = true;
+
+                                /* If we just disabled the read event, stop reading */
+                                if (!FLAGS_SET(s->requested_events, EPOLLIN))
+                                        break;
                         }
                 }
         }
 
-        if ((s->write_packet && s->n_written >= sizeof(s->write_size) + s->write_packet->size) &&
-            (s->read_packet && s->n_read >= sizeof(s->read_size) + s->read_packet->size))
+        /* Complete the stream if finished reading and writing one packet, and there's nothing
+         * else left to write. */
+        if (s->type == DNS_STREAM_LLMNR_SEND && s->packet_received &&
+            !FLAGS_SET(s->requested_events, EPOLLOUT))
                 return dns_stream_complete(s, 0);
+
+        /* If we did something, let's restart the timeout event source */
+        if (progressed && s->timeout_event_source) {
+                r = sd_event_source_set_time_relative(s->timeout_event_source, DNS_STREAM_ESTABLISHED_TIMEOUT_USEC);
+                if (r < 0)
+                        log_warning_errno(r, "Couldn't restart TCP connection timeout, ignoring: %m");
+        }
 
         return 0;
 }
 
-DnsStream *dns_stream_unref(DnsStream *s) {
-        if (!s)
-                return NULL;
+static DnsStream *dns_stream_free(DnsStream *s) {
+        DnsPacket *p;
 
-        assert(s->n_ref > 0);
-        s->n_ref--;
-
-        if (s->n_ref > 0)
-                return NULL;
+        assert(s);
 
         dns_stream_stop(s);
 
         if (s->manager) {
                 LIST_REMOVE(streams, s->manager->dns_streams, s);
-                s->manager->n_dns_streams--;
+                s->manager->n_dns_streams[s->type]--;
         }
+
+#if ENABLE_DNS_OVER_TLS
+        if (s->encrypted)
+                dnstls_stream_free(s);
+#endif
+
+        ORDERED_SET_FOREACH(p, s->write_queue)
+                dns_packet_unref(ordered_set_remove(s->write_queue, p));
 
         dns_packet_unref(s->write_packet);
         dns_packet_unref(s->read_packet);
+        dns_server_unref(s->server);
+
+        ordered_set_free(s->write_queue);
 
         return mfree(s);
 }
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(DnsStream*, dns_stream_unref);
+DEFINE_TRIVIAL_REF_UNREF_FUNC(DnsStream, dns_stream, dns_stream_free);
 
-DnsStream *dns_stream_ref(DnsStream *s) {
-        if (!s)
-                return NULL;
+int dns_stream_new(
+                Manager *m,
+                DnsStream **ret,
+                DnsStreamType type,
+                DnsProtocol protocol,
+                int fd,
+                const union sockaddr_union *tfo_address,
+                int (on_packet)(DnsStream*, DnsPacket*),
+                int (complete)(DnsStream*, int), /* optional */
+                usec_t connect_timeout_usec) {
 
-        assert(s->n_ref > 0);
-        s->n_ref++;
-
-        return s;
-}
-
-int dns_stream_new(Manager *m, DnsStream **ret, DnsProtocol protocol, int fd) {
         _cleanup_(dns_stream_unrefp) DnsStream *s = NULL;
         int r;
 
         assert(m);
+        assert(ret);
+        assert(type >= 0);
+        assert(type < _DNS_STREAM_TYPE_MAX);
+        assert(protocol >= 0);
+        assert(protocol < _DNS_PROTOCOL_MAX);
         assert(fd >= 0);
+        assert(on_packet);
 
-        if (m->n_dns_streams > DNS_STREAMS_MAX)
+        if (m->n_dns_streams[type] > DNS_STREAMS_MAX)
                 return -EBUSY;
 
-        s = new0(DnsStream, 1);
+        s = new(DnsStream, 1);
         if (!s)
                 return -ENOMEM;
 
-        s->n_ref = 1;
-        s->fd = -1;
-        s->protocol = protocol;
+        *s = (DnsStream) {
+                .n_ref = 1,
+                .fd = -EBADF,
+                .protocol = protocol,
+                .type = type,
+        };
+
+        r = ordered_set_ensure_allocated(&s->write_queue, &dns_packet_hash_ops);
+        if (r < 0)
+                return r;
 
         r = sd_event_add_io(m->event, &s->io_event_source, fd, EPOLLIN, on_stream_io, s);
         if (r < 0)
@@ -383,11 +555,11 @@ int dns_stream_new(Manager *m, DnsStream **ret, DnsProtocol protocol, int fd) {
 
         (void) sd_event_source_set_description(s->io_event_source, "dns-stream-io");
 
-        r = sd_event_add_time(
+        r = sd_event_add_time_relative(
                         m->event,
                         &s->timeout_event_source,
-                        clock_boottime_or_monotonic(),
-                        now(clock_boottime_or_monotonic()) + DNS_STREAM_TIMEOUT_USEC, 0,
+                        CLOCK_BOOTTIME,
+                        connect_timeout_usec, 0,
                         on_stream_timeout, s);
         if (r < 0)
                 return r;
@@ -395,25 +567,87 @@ int dns_stream_new(Manager *m, DnsStream **ret, DnsProtocol protocol, int fd) {
         (void) sd_event_source_set_description(s->timeout_event_source, "dns-stream-timeout");
 
         LIST_PREPEND(streams, m->dns_streams, s);
+        m->n_dns_streams[type]++;
         s->manager = m;
-        s->fd = fd;
-        m->n_dns_streams++;
 
-        *ret = s;
-        s = NULL;
+        s->fd = fd;
+        s->on_packet = on_packet;
+        s->complete = complete;
+
+        if (tfo_address) {
+                s->tfo_address = *tfo_address;
+                s->tfo_salen = sockaddr_len(tfo_address);
+        }
+
+        *ret = TAKE_PTR(s);
 
         return 0;
 }
 
 int dns_stream_write_packet(DnsStream *s, DnsPacket *p) {
+        int r;
+
         assert(s);
+        assert(p);
 
-        if (s->write_packet)
-                return -EBUSY;
+        r = ordered_set_put(s->write_queue, p);
+        if (r < 0)
+                return r;
 
-        s->write_packet = dns_packet_ref(p);
-        s->write_size = htobe16(p->size);
-        s->n_written = 0;
+        dns_packet_ref(p);
 
         return dns_stream_update_io(s);
+}
+
+void dns_stream_detach(DnsStream *s) {
+        assert(s);
+
+        if (!s->server)
+                return;
+
+        if (s->server->stream != s)
+                return;
+
+        dns_server_unref_stream(s->server);
+}
+
+DEFINE_PRIVATE_HASH_OPS_WITH_KEY_DESTRUCTOR(
+                dns_stream_hash_ops,
+                void,
+                trivial_hash_func,
+                trivial_compare_func,
+                dns_stream_unref);
+
+int dns_stream_disconnect_all(Manager *m) {
+        _cleanup_set_free_ Set *closed = NULL;
+        int r;
+
+        assert(m);
+
+        /* Terminates all TCP connections (called after system suspend for example, to speed up recovery) */
+
+        log_info("Closing all remaining TCP connections.");
+
+        bool restart;
+        do {
+                restart = false;
+
+                LIST_FOREACH(streams, s, m->dns_streams) {
+                        r = set_ensure_put(&closed, &dns_stream_hash_ops, s);
+                        if (r < 0)
+                                return log_oom();
+                        if (r > 0) {
+                                /* Haven't seen this one before. Close it. */
+                                dns_stream_ref(s);
+                                (void) dns_stream_complete(s, ECONNRESET);
+
+                                /* This might have a ripple effect, let's hence no look at the list further,
+                                 * but scan from the beginning again */
+                                restart = true;
+                                break;
+                        }
+                }
+        } while (restart);
+
+        return 0;
 }

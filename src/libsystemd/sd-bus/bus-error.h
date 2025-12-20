@@ -1,37 +1,19 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "sd-bus-protocol.h"
 
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-
-#include "sd-bus.h"
-
-#include "macro.h"
+#include "errno-util.h"
+#include "sd-forward.h"
 
 bool bus_error_is_dirty(sd_bus_error *e);
 
-const char *bus_error_message(const sd_bus_error *e, int error);
+const char* _bus_error_message(const sd_bus_error *e, int error, char buf[static ERRNO_BUF_LEN]);
 
-int bus_error_setfv(sd_bus_error *e, const char *name, const char *format, va_list ap) _printf_(3,0);
-int bus_error_set_errnofv(sd_bus_error *e, int error, const char *format, va_list ap) _printf_(3,0);
+/* Note: the lifetime of the compound literal is the immediately surrounding block,
+ * see C11 §6.5.2.5, and
+ * https://stackoverflow.com/questions/34880638/compound-literal-lifetime-and-if-blocks */
+#define bus_error_message(e, error) _bus_error_message(e, error, (char[ERRNO_BUF_LEN]){})
 
 #define BUS_ERROR_OOM SD_BUS_ERROR_MAKE_CONST(SD_BUS_ERROR_NO_MEMORY, "Out of memory")
 #define BUS_ERROR_FAILED SD_BUS_ERROR_MAKE_CONST(SD_BUS_ERROR_FAILED, "Operation failed")
@@ -47,16 +29,24 @@ int bus_error_set_errnofv(sd_bus_error *e, int error, const char *format, va_lis
  * the bus error table, and BUS_ERROR_MAP_ELF_USE has to be used at
  * least once per compilation unit (i.e. per library), to ensure that
  * the error map is really added to the final binary.
+ *
+ * In addition, set the retain attribute so that the section cannot be
+ * discarded by ld --gc-sections -z start-stop-gc. Older compilers would
+ * warn for the unknown attribute, so just disable -Wattributes.
  */
 
 #define BUS_ERROR_MAP_ELF_REGISTER                                      \
-        __attribute__ ((__section__("BUS_ERROR_MAP")))                  \
-        __attribute__ ((__used__))                                      \
-        __attribute__ ((aligned(8)))
+        _Pragma("GCC diagnostic ignored \"-Wattributes\"")              \
+        _section_("SYSTEMD_BUS_ERROR_MAP")                              \
+        _used_                                                          \
+        _retain_                                                        \
+        _alignptr_                                                      \
+        _variable_no_sanitize_address_
 
 #define BUS_ERROR_MAP_ELF_USE(errors)                                   \
         extern const sd_bus_error_map errors[];                         \
-        __attribute__ ((used)) static const sd_bus_error_map * const CONCATENATE(errors ## _copy_, __COUNTER__) = errors;
+        _used_                                                          \
+        static const sd_bus_error_map * const CONCATENATE(errors ## _copy_, __COUNTER__) = errors;
 
 /* We use something exotic as end marker, to ensure people build the
  * maps using the macsd-ros. */

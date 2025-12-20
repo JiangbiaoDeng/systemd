@@ -1,23 +1,10 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: LGPL-2.1+
+# SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # systemd-sysv-generator integration test
 #
-# (C) 2015 Canonical Ltd.
+# © 2015 Canonical Ltd.
 # Author: Martin Pitt <martin.pitt@ubuntu.com>
-#
-# systemd is free software; you can redistribute it and/or modify it
-# under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation; either version 2.1 of the License, or
-# (at your option) any later version.
-
-# systemd is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
 
 import collections
 import os
@@ -61,11 +48,13 @@ class SysvGeneratorTest(unittest.TestCase):
         '''Run sysv-generator.
 
         Fail if stderr contains any "Fail", unless expect_error is True.
-        Return (stderr, filename -> ConfigParser) pair with ouput to stderr and
+        Return (stderr, filename -> ConfigParser) pair with output to stderr and
         parsed generated units.
         '''
         env = os.environ.copy()
-        env['SYSTEMD_LOG_LEVEL'] = 'debug'
+        # We might debug log about errors that aren't actually fatal so let's bump the log level to info to
+        # prevent those logs from interfering with the test.
+        env['SYSTEMD_LOG_LEVEL'] = 'info'
         env['SYSTEMD_LOG_TARGET'] = 'console'
         env['SYSTEMD_SYSVINIT_PATH'] = self.init_d_dir
         env['SYSTEMD_SYSVRCND_PATH'] = self.rcnd_dir
@@ -93,7 +82,7 @@ class SysvGeneratorTest(unittest.TestCase):
                 cp = RawConfigParser(dict_type=MultiDict)
             cp.optionxform = lambda o: o  # don't lower-case option names
             with open(service) as f:
-                cp.readfp(f)
+                cp.read_file(f)
             results[os.path.basename(service)] = cp
 
         return (err, results)

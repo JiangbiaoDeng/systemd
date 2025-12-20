@@ -1,54 +1,38 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "basic-forward.h"
 
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-
-#include "macro.h"
-
+/* The enum order is used to order unit jobs in the job queue
+ * when other criteria (cpu weight, nice level) are identical.
+ * In this case service units have the highest priority. */
 typedef enum UnitType {
-        UNIT_SERVICE = 0,
+        UNIT_SERVICE,
+        UNIT_MOUNT,
+        UNIT_SWAP,
         UNIT_SOCKET,
         UNIT_TARGET,
         UNIT_DEVICE,
-        UNIT_MOUNT,
         UNIT_AUTOMOUNT,
-        UNIT_SWAP,
         UNIT_TIMER,
         UNIT_PATH,
         UNIT_SLICE,
         UNIT_SCOPE,
         _UNIT_TYPE_MAX,
-        _UNIT_TYPE_INVALID = -1
+        _UNIT_TYPE_INVALID = -EINVAL,
+        _UNIT_TYPE_ERRNO_MAX = -ERRNO_MAX, /* Ensure the whole errno range fits into this enum */
 } UnitType;
 
 typedef enum UnitLoadState {
-        UNIT_STUB = 0,
+        UNIT_STUB,
         UNIT_LOADED,
-        UNIT_NOT_FOUND,
-        UNIT_ERROR,
+        UNIT_NOT_FOUND,    /* error condition #1: unit file not found */
+        UNIT_BAD_SETTING,  /* error condition #2: we couldn't parse some essential unit file setting */
+        UNIT_ERROR,        /* error condition #3: other "system" error, catchall for the rest */
         UNIT_MERGED,
         UNIT_MASKED,
         _UNIT_LOAD_STATE_MAX,
-        _UNIT_LOAD_STATE_INVALID = -1
+        _UNIT_LOAD_STATE_INVALID = -EINVAL,
 } UnitLoadState;
 
 typedef enum UnitActiveState {
@@ -58,9 +42,29 @@ typedef enum UnitActiveState {
         UNIT_FAILED,
         UNIT_ACTIVATING,
         UNIT_DEACTIVATING,
+        UNIT_MAINTENANCE,
+        UNIT_REFRESHING,
         _UNIT_ACTIVE_STATE_MAX,
-        _UNIT_ACTIVE_STATE_INVALID = -1
+        _UNIT_ACTIVE_STATE_INVALID = -EINVAL,
 } UnitActiveState;
+
+typedef enum FreezerState {
+        FREEZER_RUNNING,
+        FREEZER_FREEZING, /* freezing due to user request */
+        FREEZER_FROZEN,
+        FREEZER_FREEZING_BY_PARENT, /* freezing as a result of parent slice freezing */
+        FREEZER_FROZEN_BY_PARENT,
+        FREEZER_THAWING,
+        _FREEZER_STATE_MAX,
+        _FREEZER_STATE_INVALID = -EINVAL,
+} FreezerState;
+
+typedef enum UnitMarker {
+        UNIT_MARKER_NEEDS_RELOAD,
+        UNIT_MARKER_NEEDS_RESTART,
+        _UNIT_MARKER_MAX,
+        _UNIT_MARKER_INVALID = -EINVAL,
+} UnitMarker;
 
 typedef enum AutomountState {
         AUTOMOUNT_DEAD,
@@ -68,7 +72,7 @@ typedef enum AutomountState {
         AUTOMOUNT_RUNNING,
         AUTOMOUNT_FAILED,
         _AUTOMOUNT_STATE_MAX,
-        _AUTOMOUNT_STATE_INVALID = -1
+        _AUTOMOUNT_STATE_INVALID = -EINVAL,
 } AutomountState;
 
 /* We simply watch devices, we cannot plug/unplug them. That
@@ -78,7 +82,7 @@ typedef enum DeviceState {
         DEVICE_TENTATIVE, /* mounted or swapped, but not (yet) announced by udev */
         DEVICE_PLUGGED,   /* announced by udev */
         _DEVICE_STATE_MAX,
-        _DEVICE_STATE_INVALID = -1
+        _DEVICE_STATE_INVALID = -EINVAL,
 } DeviceState;
 
 typedef enum MountState {
@@ -93,8 +97,9 @@ typedef enum MountState {
         MOUNT_UNMOUNTING_SIGTERM,
         MOUNT_UNMOUNTING_SIGKILL,
         MOUNT_FAILED,
+        MOUNT_CLEANING,
         _MOUNT_STATE_MAX,
-        _MOUNT_STATE_INVALID = -1
+        _MOUNT_STATE_INVALID = -EINVAL,
 } MountState;
 
 typedef enum PathState {
@@ -103,54 +108,69 @@ typedef enum PathState {
         PATH_RUNNING,
         PATH_FAILED,
         _PATH_STATE_MAX,
-        _PATH_STATE_INVALID = -1
+        _PATH_STATE_INVALID = -EINVAL,
 } PathState;
 
 typedef enum ScopeState {
         SCOPE_DEAD,
+        SCOPE_START_CHOWN,
         SCOPE_RUNNING,
         SCOPE_ABANDONED,
         SCOPE_STOP_SIGTERM,
         SCOPE_STOP_SIGKILL,
         SCOPE_FAILED,
         _SCOPE_STATE_MAX,
-        _SCOPE_STATE_INVALID = -1
+        _SCOPE_STATE_INVALID = -EINVAL,
 } ScopeState;
 
 typedef enum ServiceState {
         SERVICE_DEAD,
+        SERVICE_CONDITION,
         SERVICE_START_PRE,
         SERVICE_START,
         SERVICE_START_POST,
         SERVICE_RUNNING,
-        SERVICE_EXITED,            /* Nothing is running anymore, but RemainAfterExit is true hence this is OK */
-        SERVICE_RELOAD,
-        SERVICE_STOP,              /* No STOP_PRE state, instead just register multiple STOP executables */
-        SERVICE_STOP_SIGABRT,      /* Watchdog timeout */
+        SERVICE_EXITED,                 /* Nothing is running anymore, but RemainAfterExit is true hence this is OK */
+        SERVICE_REFRESH_EXTENSIONS,     /* Refreshing extensions for a reload request */
+        SERVICE_RELOAD,                 /* Reloading via ExecReload= */
+        SERVICE_RELOAD_SIGNAL,          /* Reloading via SIGHUP requested */
+        SERVICE_RELOAD_NOTIFY,          /* Waiting for READY=1 after RELOADING=1 notify */
+        SERVICE_RELOAD_POST,
+        SERVICE_MOUNTING,               /* Performing a live mount into the namespace of the service */
+        SERVICE_STOP,                   /* No STOP_PRE state, instead just register multiple STOP executables */
+        SERVICE_STOP_WATCHDOG,
         SERVICE_STOP_SIGTERM,
         SERVICE_STOP_SIGKILL,
         SERVICE_STOP_POST,
-        SERVICE_FINAL_SIGTERM,     /* In case the STOP_POST executable hangs, we shoot that down, too */
+        SERVICE_FINAL_WATCHDOG,         /* In case the STOP_POST executable needs to be aborted. */
+        SERVICE_FINAL_SIGTERM,          /* In case the STOP_POST executable hangs, we shoot that down, too */
         SERVICE_FINAL_SIGKILL,
         SERVICE_FAILED,
+        SERVICE_DEAD_BEFORE_AUTO_RESTART,
+        SERVICE_FAILED_BEFORE_AUTO_RESTART,
+        SERVICE_DEAD_RESOURCES_PINNED,  /* Like SERVICE_DEAD, but with pinned resources */
         SERVICE_AUTO_RESTART,
+        SERVICE_AUTO_RESTART_QUEUED,
+        SERVICE_CLEANING,
         _SERVICE_STATE_MAX,
-        _SERVICE_STATE_INVALID = -1
+        _SERVICE_STATE_INVALID = -EINVAL,
 } ServiceState;
 
 typedef enum SliceState {
         SLICE_DEAD,
         SLICE_ACTIVE,
         _SLICE_STATE_MAX,
-        _SLICE_STATE_INVALID = -1
+        _SLICE_STATE_INVALID = -EINVAL,
 } SliceState;
 
 typedef enum SocketState {
         SOCKET_DEAD,
         SOCKET_START_PRE,
+        SOCKET_START_OPEN,
         SOCKET_START_CHOWN,
         SOCKET_START_POST,
         SOCKET_LISTENING,
+        SOCKET_DEFERRED,
         SOCKET_RUNNING,
         SOCKET_STOP_PRE,
         SOCKET_STOP_PRE_SIGTERM,
@@ -159,8 +179,9 @@ typedef enum SocketState {
         SOCKET_FINAL_SIGTERM,
         SOCKET_FINAL_SIGKILL,
         SOCKET_FAILED,
+        SOCKET_CLEANING,
         _SOCKET_STATE_MAX,
-        _SOCKET_STATE_INVALID = -1
+        _SOCKET_STATE_INVALID = -EINVAL,
 } SocketState;
 
 typedef enum SwapState {
@@ -172,15 +193,16 @@ typedef enum SwapState {
         SWAP_DEACTIVATING_SIGTERM,
         SWAP_DEACTIVATING_SIGKILL,
         SWAP_FAILED,
+        SWAP_CLEANING,
         _SWAP_STATE_MAX,
-        _SWAP_STATE_INVALID = -1
+        _SWAP_STATE_INVALID = -EINVAL,
 } SwapState;
 
 typedef enum TargetState {
         TARGET_DEAD,
         TARGET_ACTIVE,
         _TARGET_STATE_MAX,
-        _TARGET_STATE_INVALID = -1
+        _TARGET_STATE_INVALID = -EINVAL,
 } TargetState;
 
 typedef enum TimerState {
@@ -190,7 +212,7 @@ typedef enum TimerState {
         TIMER_ELAPSED,
         TIMER_FAILED,
         _TIMER_STATE_MAX,
-        _TIMER_STATE_INVALID = -1
+        _TIMER_STATE_INVALID = -EINVAL,
 } TimerState;
 
 typedef enum UnitDependency {
@@ -200,6 +222,7 @@ typedef enum UnitDependency {
         UNIT_WANTS,
         UNIT_BINDS_TO,
         UNIT_PART_OF,
+        UNIT_UPHOLDS,
 
         /* Inverse of the above */
         UNIT_REQUIRED_BY,             /* inverse of 'requires' is 'required_by' */
@@ -207,6 +230,7 @@ typedef enum UnitDependency {
         UNIT_WANTED_BY,               /* inverse of 'wants' */
         UNIT_BOUND_BY,                /* inverse of 'binds_to' */
         UNIT_CONSISTS_OF,             /* inverse of 'part_of' */
+        UNIT_UPHELD_BY,               /* inverse of 'uphold' */
 
         /* Negative dependencies */
         UNIT_CONFLICTS,               /* inverse of 'conflicts' is 'conflicted_by' */
@@ -216,8 +240,11 @@ typedef enum UnitDependency {
         UNIT_BEFORE,                  /* inverse of 'before' is 'after' and vice versa */
         UNIT_AFTER,
 
-        /* On Failure */
+        /* OnSuccess= + OnFailure= */
+        UNIT_ON_SUCCESS,
+        UNIT_ON_SUCCESS_OF,
         UNIT_ON_FAILURE,
+        UNIT_ON_FAILURE_OF,
 
         /* Triggers (i.e. a socket triggers a service) */
         UNIT_TRIGGERS,
@@ -227,6 +254,10 @@ typedef enum UnitDependency {
         UNIT_PROPAGATES_RELOAD_TO,
         UNIT_RELOAD_PROPAGATED_FROM,
 
+        /* Propagate stops */
+        UNIT_PROPAGATES_STOP_TO,
+        UNIT_STOP_PROPAGATED_FROM,
+
         /* Joins namespace of */
         UNIT_JOINS_NAMESPACE_OF,
 
@@ -234,8 +265,12 @@ typedef enum UnitDependency {
         UNIT_REFERENCES,              /* Inverse of 'references' is 'referenced_by' */
         UNIT_REFERENCED_BY,
 
+        /* Slice= */
+        UNIT_IN_SLICE,
+        UNIT_SLICE_OF,
+
         _UNIT_DEPENDENCY_MAX,
-        _UNIT_DEPENDENCY_INVALID = -1
+        _UNIT_DEPENDENCY_INVALID = -EINVAL,
 } UnitDependency;
 
 typedef enum NotifyAccess {
@@ -244,23 +279,57 @@ typedef enum NotifyAccess {
         NOTIFY_MAIN,
         NOTIFY_EXEC,
         _NOTIFY_ACCESS_MAX,
-        _NOTIFY_ACCESS_INVALID = -1
+        _NOTIFY_ACCESS_INVALID = -EINVAL,
 } NotifyAccess;
 
-char *unit_dbus_path_from_name(const char *name);
+typedef enum JobMode {
+        JOB_FAIL,                 /* Fail if a conflicting job is already queued */
+        JOB_LENIENT,              /* Fail if any conflicting unit is active (even weaker than JOB_FAIL) */
+        JOB_REPLACE,              /* Replace an existing conflicting job */
+        JOB_REPLACE_IRREVERSIBLY, /* Like JOB_REPLACE + produce irreversible jobs */
+        JOB_ISOLATE,              /* Start a unit, and stop all others */
+        JOB_FLUSH,                /* Flush out all other queued jobs when queueing this one */
+        JOB_IGNORE_DEPENDENCIES,  /* Ignore both requirement and ordering dependencies */
+        JOB_IGNORE_REQUIREMENTS,  /* Ignore requirement dependencies */
+        JOB_TRIGGERING,           /* Adds TRIGGERED_BY dependencies to the same transaction */
+        JOB_RESTART_DEPENDENCIES, /* A "start" job for the specified unit becomes "restart" for depending units */
+        _JOB_MODE_MAX,
+        _JOB_MODE_INVALID = -EINVAL,
+} JobMode;
+
+typedef enum ExecDirectoryType {
+        EXEC_DIRECTORY_RUNTIME,
+        EXEC_DIRECTORY_STATE,
+        EXEC_DIRECTORY_CACHE,
+        EXEC_DIRECTORY_LOGS,
+        EXEC_DIRECTORY_CONFIGURATION,
+        _EXEC_DIRECTORY_TYPE_MAX,
+        _EXEC_DIRECTORY_TYPE_INVALID = -EINVAL,
+} ExecDirectoryType;
+
+char* unit_dbus_path_from_name(const char *name);
 int unit_name_from_dbus_path(const char *path, char **name);
 
 const char* unit_dbus_interface_from_type(UnitType t);
-const char *unit_dbus_interface_from_name(const char *name);
+const char* unit_dbus_interface_from_name(const char *name);
 
-const char *unit_type_to_string(UnitType i) _const_;
+const char* unit_type_to_string(UnitType i) _const_;
 UnitType unit_type_from_string(const char *s) _pure_;
+void unit_types_list(void);
 
-const char *unit_load_state_to_string(UnitLoadState i) _const_;
+const char* unit_load_state_to_string(UnitLoadState i) _const_;
 UnitLoadState unit_load_state_from_string(const char *s) _pure_;
 
-const char *unit_active_state_to_string(UnitActiveState i) _const_;
+const char* unit_active_state_to_string(UnitActiveState i) _const_;
 UnitActiveState unit_active_state_from_string(const char *s) _pure_;
+
+const char* freezer_state_to_string(FreezerState i) _const_;
+FreezerState freezer_state_from_string(const char *s) _pure_;
+FreezerState freezer_state_finish(FreezerState state) _const_;
+FreezerState freezer_state_objective(FreezerState state) _const_;
+
+const char* unit_marker_to_string(UnitMarker m) _const_;
+UnitMarker unit_marker_from_string(const char *s) _pure_;
 
 const char* automount_state_to_string(AutomountState i) _const_;
 AutomountState automount_state_from_string(const char *s) _pure_;
@@ -292,11 +361,19 @@ SwapState swap_state_from_string(const char *s) _pure_;
 const char* target_state_to_string(TargetState i) _const_;
 TargetState target_state_from_string(const char *s) _pure_;
 
-const char *timer_state_to_string(TimerState i) _const_;
+const char* timer_state_to_string(TimerState i) _const_;
 TimerState timer_state_from_string(const char *s) _pure_;
 
-const char *unit_dependency_to_string(UnitDependency i) _const_;
+const char* unit_dependency_to_string(UnitDependency i) _const_;
 UnitDependency unit_dependency_from_string(const char *s) _pure_;
 
 const char* notify_access_to_string(NotifyAccess i) _const_;
 NotifyAccess notify_access_from_string(const char *s) _pure_;
+
+const char* job_mode_to_string(JobMode t) _const_;
+JobMode job_mode_from_string(const char *s) _pure_;
+
+const char* exec_directory_type_to_string(ExecDirectoryType i) _const_;
+ExecDirectoryType exec_directory_type_from_string(const char *s) _pure_;
+
+Glyph unit_active_state_to_glyph(UnitActiveState state);

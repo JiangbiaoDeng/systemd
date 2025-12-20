@@ -1,46 +1,49 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "basic-forward.h"
+#include "strv.h"
 
-  Copyright 2010-2015 Lennart Poettering
+/* HOST_NAME_MAX should be 64 on linux, but musl uses the one by POSIX (255). */
+#define LINUX_HOST_NAME_MAX CONST_MIN((size_t) HOST_NAME_MAX, (size_t) 64)
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+char* get_default_hostname_raw(void);
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
+bool valid_ldh_char(char c) _const_;
 
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+typedef enum ValidHostnameFlags {
+        VALID_HOSTNAME_TRAILING_DOT  = 1 << 0,   /* Accept trailing dot on multi-label names */
+        VALID_HOSTNAME_DOT_HOST      = 1 << 1,   /* Accept ".host" as valid hostname */
+        VALID_HOSTNAME_QUESTION_MARK = 1 << 2,   /* Accept "?" as place holder for hashed machine ID value */
+} ValidHostnameFlags;
 
-#include <stdbool.h>
-#include <stdio.h>
-
-#include "macro.h"
-
-bool hostname_is_set(void);
-
-char* gethostname_malloc(void);
-int gethostname_strict(char **ret);
-
-bool hostname_is_valid(const char *s, bool allow_trailing_dot) _pure_;
+bool hostname_is_valid(const char *s, ValidHostnameFlags flags) _pure_;
 char* hostname_cleanup(char *s);
 
-#define machine_name_is_valid(s) hostname_is_valid(s, false)
-
 bool is_localhost(const char *hostname);
-bool is_gateway_hostname(const char *hostname);
 
-int sethostname_idempotent(const char *s);
+static inline bool is_gateway_hostname(const char *hostname) {
+        /* This tries to identify the valid syntaxes for the our synthetic "gateway" host. */
+        return STRCASE_IN_SET(hostname, "_gateway", "_gateway.");
+}
 
-int shorten_overlong(const char *s, char **ret);
+static inline bool is_outbound_hostname(const char *hostname) {
+        /* This tries to identify the valid syntaxes for the our synthetic "outbound" host. */
+        return STRCASE_IN_SET(hostname, "_outbound", "_outbound.");
+}
 
-int read_etc_hostname_stream(FILE *f, char **ret);
-int read_etc_hostname(const char *path, char **ret);
+static inline bool is_dns_stub_hostname(const char *hostname) {
+        return STRCASE_IN_SET(hostname, "_localdnsstub", "_localdnsstub.");
+}
+
+static inline bool is_dns_proxy_stub_hostname(const char *hostname) {
+        return STRCASE_IN_SET(hostname, "_localdnsproxy", "_localdnsproxy.");
+}
+
+const char* etc_hostname(void);
+const char* etc_machine_info(void);
+
+int get_pretty_hostname(char **ret);
+
+int machine_spec_valid(const char *s);
+int split_user_at_host(const char *s, char **ret_user, char **ret_host);

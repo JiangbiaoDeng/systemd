@@ -1,39 +1,31 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 /***
-  This file is part of systemd.
-
-  Copyright (C) 2014-2015 Intel Corporation. All rights reserved.
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  Copyright © 2014-2015 Intel Corporation. All rights reserved.
 ***/
 
-#include <net/ethernet.h>
+#include <netinet/in.h>
 
-#include "time-util.h"
+#include "sd-forward.h"
 
-#define IN6ADDR_ALL_ROUTERS_MULTICAST_INIT \
-        { { { 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 } } }
+#define IN6_ADDR_ALL_ROUTERS_MULTICAST                                  \
+        ((const struct in6_addr) { { {                                  \
+                0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,         \
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,         \
+         } } } )
 
-#define IN6ADDR_ALL_NODES_MULTICAST_INIT \
-        { { { 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 } } }
+#define IN6_ADDR_ALL_NODES_MULTICAST                                    \
+        ((const struct in6_addr) { { {                                  \
+                0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,         \
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,         \
+         } } } )
 
-int icmp6_bind_router_solicitation(int index);
-int icmp6_bind_router_advertisement(int index);
-int icmp6_send_router_solicitation(int s, const struct ether_addr *ether_addr);
-int icmp6_receive(int fd, void *buffer, size_t size, struct in6_addr *dst,
-                  triple_timestamp *timestamp);
+int icmp6_bind(int ifindex, bool is_router);
+int icmp6_send(int fd, const struct in6_addr *dst, const struct iovec *iov, size_t n_iov);
+int icmp6_receive(
+                int fd,
+                void *buffer,
+                size_t size,
+                struct in6_addr *ret_sender,
+                triple_timestamp *ret_timestamp);

@@ -1,72 +1,117 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/*-*- Mode: C; c-basic-offset: 8; indent-tabs-mode: nil -*-*/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-/***
-  This file is part of systemd.
-
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#if HAVE_GCRYPT
-#include <gcrypt.h>
+#include <sys/syslog.h>
 
 #include "gcrypt-util.h"
-#include "hexdecoct.h"
 
-void initialize_libgcrypt(bool secmem) {
-        const char *p;
-        if (gcry_control(GCRYCTL_INITIALIZATION_FINISHED_P))
-                return;
+#if HAVE_GCRYPT
 
-        p = gcry_check_version("1.4.5");
-        assert(p);
+static void *gcrypt_dl = NULL;
+
+static DLSYM_PROTOTYPE(gcry_control) = NULL;
+static DLSYM_PROTOTYPE(gcry_check_version) = NULL;
+DLSYM_PROTOTYPE(gcry_md_close) = NULL;
+DLSYM_PROTOTYPE(gcry_md_copy) = NULL;
+DLSYM_PROTOTYPE(gcry_md_ctl) = NULL;
+DLSYM_PROTOTYPE(gcry_md_get_algo_dlen) = NULL;
+DLSYM_PROTOTYPE(gcry_md_open) = NULL;
+DLSYM_PROTOTYPE(gcry_md_read) = NULL;
+DLSYM_PROTOTYPE(gcry_md_reset) = NULL;
+DLSYM_PROTOTYPE(gcry_md_setkey) = NULL;
+DLSYM_PROTOTYPE(gcry_md_write) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_add) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_add_ui) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_cmp) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_cmp_ui) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_get_nbits) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_invm) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_mod) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_mul) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_mulm) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_new) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_powm) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_print) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_release) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_scan) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_set_ui) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_sub) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_subm) = NULL;
+DLSYM_PROTOTYPE(gcry_mpi_sub_ui) = NULL;
+DLSYM_PROTOTYPE(gcry_prime_check) = NULL;
+DLSYM_PROTOTYPE(gcry_randomize) = NULL;
+DLSYM_PROTOTYPE(gcry_strerror) = NULL;
+#endif
+
+int dlopen_gcrypt(void) {
+#if HAVE_GCRYPT
+        ELF_NOTE_DLOPEN("gcrypt",
+                        "Support for journald forward-sealing",
+                        ELF_NOTE_DLOPEN_PRIORITY_SUGGESTED,
+                        "libgcrypt.so.20");
+
+        return dlopen_many_sym_or_warn(
+                        &gcrypt_dl,
+                        "libgcrypt.so.20", LOG_DEBUG,
+                        DLSYM_ARG(gcry_control),
+                        DLSYM_ARG(gcry_check_version),
+                        DLSYM_ARG(gcry_md_close),
+                        DLSYM_ARG(gcry_md_copy),
+                        DLSYM_ARG(gcry_md_ctl),
+                        DLSYM_ARG(gcry_md_get_algo_dlen),
+                        DLSYM_ARG(gcry_md_open),
+                        DLSYM_ARG(gcry_md_read),
+                        DLSYM_ARG(gcry_md_reset),
+                        DLSYM_ARG(gcry_md_setkey),
+                        DLSYM_ARG(gcry_md_write),
+                        DLSYM_ARG(gcry_mpi_add),
+                        DLSYM_ARG(gcry_mpi_add_ui),
+                        DLSYM_ARG(gcry_mpi_cmp),
+                        DLSYM_ARG(gcry_mpi_cmp_ui),
+                        DLSYM_ARG(gcry_mpi_get_nbits),
+                        DLSYM_ARG(gcry_mpi_invm),
+                        DLSYM_ARG(gcry_mpi_mod),
+                        DLSYM_ARG(gcry_mpi_mul),
+                        DLSYM_ARG(gcry_mpi_mulm),
+                        DLSYM_ARG(gcry_mpi_new),
+                        DLSYM_ARG(gcry_mpi_powm),
+                        DLSYM_ARG(gcry_mpi_print),
+                        DLSYM_ARG(gcry_mpi_release),
+                        DLSYM_ARG(gcry_mpi_scan),
+                        DLSYM_ARG(gcry_mpi_set_ui),
+                        DLSYM_ARG(gcry_mpi_sub),
+                        DLSYM_ARG(gcry_mpi_subm),
+                        DLSYM_ARG(gcry_mpi_sub_ui),
+                        DLSYM_ARG(gcry_prime_check),
+                        DLSYM_ARG(gcry_randomize),
+                        DLSYM_ARG(gcry_strerror));
+#else
+        return -EOPNOTSUPP;
+#endif
+}
+
+int initialize_libgcrypt(bool secmem) {
+#if HAVE_GCRYPT
+        int r;
+
+        r = dlopen_gcrypt();
+        if (r < 0)
+                return r;
+
+        if (sym_gcry_control(GCRYCTL_INITIALIZATION_FINISHED_P))
+                return 0;
+
+        sym_gcry_control(GCRYCTL_SET_PREFERRED_RNG_TYPE, GCRY_RNG_TYPE_SYSTEM);
+        assert_se(sym_gcry_check_version("1.4.5"));
 
         /* Turn off "secmem". Clients which wish to make use of this
          * feature should initialize the library manually */
         if (!secmem)
-                gcry_control(GCRYCTL_DISABLE_SECMEM);
-        gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
-}
+                sym_gcry_control(GCRYCTL_DISABLE_SECMEM);
 
-int string_hashsum(const char *s, size_t len, int md_algorithm, char **out) {
-        _cleanup_(gcry_md_closep) gcry_md_hd_t md = NULL;
-        size_t hash_size;
-        void *hash;
-        char *enc;
+        sym_gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
 
-        initialize_libgcrypt(false);
-
-        hash_size = gcry_md_get_algo_dlen(md_algorithm);
-        assert(hash_size > 0);
-
-        gcry_md_open(&md, md_algorithm, 0);
-        if (!md)
-                return -EIO;
-
-        gcry_md_write(md, s, len);
-
-        hash = gcry_md_read(md, 0);
-        if (!hash)
-                return -EIO;
-
-        enc = hexmem(hash, hash_size);
-        if (!enc)
-                return -ENOMEM;
-
-        *out = enc;
         return 0;
-}
+#else
+        return -EOPNOTSUPP;
 #endif
+}

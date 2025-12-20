@@ -1,36 +1,11 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
-
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Kay Sievers, Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "sd-event.h"
-#include "sd-network.h"
-#include "sd-resolve.h"
 
 #include "list.h"
 #include "ratelimit.h"
 #include "time-util.h"
-
-typedef struct Manager Manager;
-
-#include "timesyncd-server.h"
+#include "timesyncd-forward.h"
+#include "timesyncd-ntp-message.h"
 
 /*
  * "A client MUST NOT under any conditions use a poll interval less
@@ -39,18 +14,26 @@ typedef struct Manager Manager;
 #define NTP_POLL_INTERVAL_MIN_USEC      (32 * USEC_PER_SEC)
 #define NTP_POLL_INTERVAL_MAX_USEC      (2048 * USEC_PER_SEC)
 
-struct Manager {
+#define NTP_RETRY_INTERVAL_MIN_USEC     (15 * USEC_PER_SEC)
+#define NTP_RETRY_INTERVAL_MAX_USEC     (6 * 60 * USEC_PER_SEC) /* 6 minutes */
+
+#define DEFAULT_CONNECTION_RETRY_USEC   (30 * USEC_PER_SEC)
+
+#define DEFAULT_SAVE_TIME_INTERVAL_USEC (60 * USEC_PER_SEC)
+
+typedef struct Manager {
+        sd_bus *bus;
         sd_event *event;
         sd_resolve *resolve;
 
         LIST_HEAD(ServerName, system_servers);
         LIST_HEAD(ServerName, link_servers);
+        LIST_HEAD(ServerName, runtime_servers);
         LIST_HEAD(ServerName, fallback_servers);
-
-        bool have_fallbacks:1;
 
         RateLimit ratelimit;
         bool exhausted_servers;
+        bool have_fallbacks;
 
         /* network */
         sd_event_source *network_event_source;
@@ -65,12 +48,17 @@ struct Manager {
         int missed_replies;
         uint64_t packet_count;
         sd_event_source *event_timeout;
-        bool good;
+        bool talking;
+
+        /* PolicyKit */
+        Hashmap *polkit_registry;
 
         /* last sent packet */
         struct timespec trans_time_mon;
         struct timespec trans_time;
+        struct ntp_ts request_nonce;
         usec_t retry_interval;
+        usec_t connection_retry_usec;
         bool pending;
 
         /* poll timer */
@@ -85,34 +73,53 @@ struct Manager {
                 double offset;
                 double delay;
         } samples[8];
-        unsigned int samples_idx;
+        unsigned samples_idx;
         double samples_jitter;
-        usec_t max_root_distance_usec;
+        usec_t root_distance_max_usec;
 
         /* last change */
         bool jumped;
-        bool sync;
-        int drift_ppm;
+        int64_t drift_freq;
 
         /* watch for time changes */
         sd_event_source *event_clock_watch;
-        int clock_watch_fd;
 
         /* Retry connections */
         sd_event_source *event_retry;
 
         /* RTC runs in local time, leave it alone */
         bool rtc_local_time;
-};
+
+        /* NTP response */
+        struct ntp_msg ntpmsg;
+        struct timespec origin_time, dest_time;
+        bool spike;
+
+        /* Indicates whether we ever managed to set the local clock from NTP */
+        bool synchronized;
+
+        /* save time event */
+        sd_event_source *event_save_time;
+        usec_t save_time_interval_usec;
+
+        /* Used to coalesce bus PropertiesChanged events */
+        sd_event_source *deferred_ntp_server_event_source;
+        unsigned ntp_server_change_mask;
+} Manager;
 
 int manager_new(Manager **ret);
-void manager_free(Manager *m);
+Manager* manager_free(Manager *m);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Manager*, manager_free);
 
 void manager_set_server_name(Manager *m, ServerName *n);
 void manager_set_server_address(Manager *m, ServerAddress *a);
 void manager_flush_server_names(Manager *m, ServerType t);
+void manager_flush_runtime_servers(Manager *m);
 
 int manager_connect(Manager *m);
 void manager_disconnect(Manager *m);
+
+int manager_setup_save_time_event(Manager *m);
+
+int bus_manager_emit_ntp_server_changed(Manager *m);

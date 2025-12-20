@@ -1,50 +1,76 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2016 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <sys/types.h>
-
-#include "sd-bus.h"
-#include "sd-event.h"
-
 #include "list.h"
-
-typedef struct Operation Operation;
-
-#include "machined.h"
+#include "machine-forward.h"
 
 #define OPERATIONS_MAX 64
 
-struct Operation {
+typedef struct Operation {
         Manager *manager;
         Machine *machine;
         pid_t pid;
+
+        /* only one of these two fields should be set */
+        sd_varlink *link;
         sd_bus_message *message;
+
         int errno_fd;
         int extra_fd;
         sd_event_source *event_source;
         int (*done)(Operation *o, int ret, sd_bus_error *error);
         LIST_FIELDS(Operation, operations);
         LIST_FIELDS(Operation, operations_by_machine);
-};
+} Operation;
 
-int operation_new(Manager *manager, Machine *machine, pid_t child, sd_bus_message *message, int errno_fd, Operation **ret);
+int operation_new(Manager *manager, Machine *machine, pid_t child, int errno_fd, Operation **ret);
 Operation *operation_free(Operation *o);
+
+void operation_attach_bus_reply(Operation *op, sd_bus_message *message);
+void operation_attach_varlink_reply(Operation *op, sd_varlink *link);
+
+static inline int operation_new_with_bus_reply(
+                Manager *manager,
+                Machine *machine,
+                pid_t child,
+                sd_bus_message *message,
+                int errno_fd,
+                Operation **ret) {
+
+        Operation *op;
+        int r;
+
+        r = operation_new(manager, machine, child, errno_fd, &op);
+        if (r < 0)
+                return r;
+
+        operation_attach_bus_reply(op, message);
+
+        if (ret)
+                *ret = op;
+
+        return 0;
+}
+
+static inline int operation_new_with_varlink_reply(
+                Manager *manager,
+                Machine *machine,
+                pid_t child,
+                sd_varlink *link,
+                int errno_fd,
+                Operation **ret) {
+
+        Operation *op;
+        int r;
+
+        r = operation_new(manager, machine, child, errno_fd, &op);
+        if (r < 0)
+                return r;
+
+        operation_attach_varlink_reply(op, link);
+
+        if (ret)
+                *ret = op;
+
+        return 0;
+}

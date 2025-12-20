@@ -1,91 +1,95 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <linux/fib_rules.h>
 
-  Copyright 2017 Susant Sahani
+#include "in-addr-prefix-util.h"
+#include "networkd-forward.h"
+#include "networkd-util.h"
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <inttypes.h>
-#include <stdbool.h>
-
-#include "in-addr-util.h"
-
-typedef struct RoutingPolicyRule RoutingPolicyRule;
-
-#include "networkd-link.h"
-#include "networkd-network.h"
-
-typedef struct Network Network;
-typedef struct Link Link;
-typedef struct NetworkConfigSection NetworkConfigSection;
-typedef struct Manager Manager;
-
-struct RoutingPolicyRule {
+typedef struct RoutingPolicyRule {
         Manager *manager;
         Network *network;
-        Link *link;
-        NetworkConfigSection *section;
+        ConfigSection *section;
+        NetworkConfigSource source;
+        NetworkConfigState state;
 
+        unsigned n_ref;
+
+        /* struct fib_rule_hdr */
+        AddressFamily address_family; /* Used when parsing Family= */
+        int family; /* Automatically determined by From=, To=, and Family= */
         uint8_t tos;
+        uint8_t action;
+        uint32_t flags;
 
-        uint32_t table;
-        uint32_t fwmark;
-        uint32_t fwmask;
-        uint32_t priority;
+        /* attributes */
+        struct in_addr_prefix to; /* FRA_DST */
+        struct in_addr_prefix from; /* FRA_SRC */
+        char *iif; /* FRA_IIFNAME */
+        uint32_t priority_goto; /* FRA_GOTO */
+        bool priority_set;
+        uint32_t priority; /* FRA_PRIORITY */
+        uint32_t fwmark; /* FRA_FWMARK */
+        uint32_t realms; /* FRA_FLOW (IPv4 only) */
+        uint64_t tunnel_id; /* FRA_TUN_ID */
+        int32_t suppress_ifgroup; /* FRA_SUPPRESS_IFGROUP */
+        int32_t suppress_prefixlen; /* FRA_SUPPRESS_PREFIXLEN */
+        uint32_t table; /* FRA_TABLE, also used in struct fib_rule_hdr */
+        uint32_t fwmask; /* FRA_FWMASK */
+        char *oif; /* FRA_OIFNAME */
+        bool l3mdev; /* FRA_L3MDEV */
+        struct fib_rule_uid_range uid_range; /* FRA_UID_RANGE */
+        uint8_t protocol; /* FRA_PROTOCOL */
+        uint8_t ipproto; /* FRA_IP_PROTO */
+        struct fib_rule_port_range sport; /* FRA_SPORT_RANGE */
+        struct fib_rule_port_range dport; /* FRA_DPORT_RANGE */
+} RoutingPolicyRule;
 
-        int family;
-        unsigned char to_prefixlen;
-        unsigned char from_prefixlen;
+int fr_act_type_from_string(const char *s) _pure_;
+const char* fr_act_type_to_string(int t) _const_;
 
-        char *iif;
-        char *oif;
+RoutingPolicyRule* routing_policy_rule_ref(RoutingPolicyRule *rule);
+RoutingPolicyRule* routing_policy_rule_unref(RoutingPolicyRule *rule);
 
-        union in_addr_union to;
-        union in_addr_union from;
+void network_drop_invalid_routing_policy_rules(Network *network);
 
-        LIST_FIELDS(RoutingPolicyRule, rules);
-};
+int link_request_static_routing_policy_rules(Link *link);
 
-int routing_policy_rule_new(RoutingPolicyRule **ret);
-void routing_policy_rule_free(RoutingPolicyRule *rule);
+int manager_rtnl_process_rule(sd_netlink *rtnl, sd_netlink_message *message, Manager *m);
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(RoutingPolicyRule*, routing_policy_rule_free);
-#define _cleanup_routing_policy_rule_free_ _cleanup_(routing_policy_rule_freep)
+int link_drop_routing_policy_rules(Link *link, bool only_static);
+static inline int link_drop_unmanaged_routing_policy_rules(Link *link) {
+        return link_drop_routing_policy_rules(link, false);
+}
+static inline int link_drop_static_routing_policy_rules(Link *link) {
+        return link_drop_routing_policy_rules(link, true);
+}
 
-int routing_policy_rule_configure(RoutingPolicyRule *address, Link *link, sd_netlink_message_handler_t callback, bool update);
-int routing_policy_rule_remove(RoutingPolicyRule *routing_policy_rule, Link *link, sd_netlink_message_handler_t callback);
-int link_routing_policy_rule_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata);
-int link_routing_policy_rule_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata);
+DEFINE_NETWORK_CONFIG_STATE_FUNCTIONS(RoutingPolicyRule, routing_policy_rule);
 
-int routing_policy_rule_add(Manager *m, int family, const union in_addr_union *from, uint8_t from_prefixlen, const union in_addr_union *to, uint8_t to_prefixlen,
-                            uint8_t tos, uint32_t fwmark, uint32_t table, char *iif, char *oif, RoutingPolicyRule **ret);
-int routing_policy_rule_add_foreign(Manager *m, int family, const union in_addr_union *from, uint8_t from_prefixlen, const union in_addr_union *to, uint8_t to_prefixlen,
-                                    uint8_t tos, uint32_t fwmark, uint32_t table, char *iif, char *oif, RoutingPolicyRule **ret);
-int routing_policy_rule_get(Manager *m, int family, const union in_addr_union *from, uint8_t from_prefixlen, const union in_addr_union *to, uint8_t to_prefixlen, uint8_t tos,
-                            uint32_t fwmark, uint32_t table, char *iif, char *oif, RoutingPolicyRule **ret);
-int routing_policy_rule_make_local(Manager *m, RoutingPolicyRule *rule);
-int routing_policy_serialize_rules(Set *rules, FILE *f);
-int routing_policy_load_rules(const char *state_file, Set **rules);
-void routing_policy_rule_purge(Manager *m, Link *link);
+typedef enum RoutingPolicyRuleConfParserType {
+        ROUTING_POLICY_RULE_IIF,
+        ROUTING_POLICY_RULE_OIF,
+        ROUTING_POLICY_RULE_FAMILY,
+        ROUTING_POLICY_RULE_FWMARK,
+        ROUTING_POLICY_RULE_GOTO,
+        ROUTING_POLICY_RULE_INVERT,
+        ROUTING_POLICY_RULE_IP_PROTOCOL,
+        ROUTING_POLICY_RULE_L3MDEV,
+        ROUTING_POLICY_RULE_SPORT,
+        ROUTING_POLICY_RULE_DPORT,
+        ROUTING_POLICY_RULE_FROM,
+        ROUTING_POLICY_RULE_TO,
+        ROUTING_POLICY_RULE_PRIORITY,
+        ROUTING_POLICY_RULE_SUPPRESS_IFGROUP,
+        ROUTING_POLICY_RULE_SUPPRESS_PREFIXLEN,
+        ROUTING_POLICY_RULE_TABLE,
+        ROUTING_POLICY_RULE_TOS,
+        ROUTING_POLICY_RULE_ACTION,
+        ROUTING_POLICY_RULE_UID_RANGE,
+        _ROUTING_POLICY_RULE_CONF_PARSER_MAX,
+        _ROUTING_POLICY_RULE_CONF_PARSER_INVALID = -EINVAL,
+} RoutingPolicyRuleConfParserType;
 
-int config_parse_routing_policy_rule_tos(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data,void *userdata);
-int config_parse_routing_policy_rule_table(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_routing_policy_rule_fwmark_mask(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_routing_policy_rule_prefix(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_routing_policy_rule_priority(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data,void *userdata);
-int config_parse_routing_policy_rule_device(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data,void *userdata);
+CONFIG_PARSER_PROTOTYPE(config_parse_routing_policy_rule);

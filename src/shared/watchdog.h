@@ -1,34 +1,20 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "shared-forward.h"
 
-  Copyright 2012 Lennart Poettering
+const char* watchdog_get_device(void);
+usec_t watchdog_get_last_ping(clockid_t clock);
+dual_timestamp* watchdog_get_last_ping_as_dual_timestamp(dual_timestamp *ret);
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-
-#include "time-util.h"
-#include "util.h"
-
-int watchdog_set_device(char *path);
-int watchdog_set_timeout(usec_t *usec);
+int watchdog_set_device(const char *path);
+int watchdog_setup(usec_t timeout);
+int watchdog_setup_pretimeout(usec_t timeout);
+int watchdog_setup_pretimeout_governor(const char *governor);
 int watchdog_ping(void);
+void watchdog_report_if_missing(void);
 void watchdog_close(bool disarm);
+usec_t watchdog_runtime_wait(unsigned divisor);
 
 static inline void watchdog_free_device(void) {
         (void) watchdog_set_device(NULL);

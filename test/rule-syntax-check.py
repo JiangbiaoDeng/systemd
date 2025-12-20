@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: LGPL-2.1+
+# SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # Simple udev rules syntax checker
 #
-# (C) 2010 Canonical Ltd.
+# © 2010 Canonical Ltd.
 # Author: Martin Pitt <martin.pitt@ubuntu.com>
-#
-# systemd is free software; you can redistribute it and/or modify it
-# under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation; either version 2.1 of the License, or
-# (at your option) any later version.
-
-# systemd is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
 
 import re
 import sys
-import os
-from glob import glob
 
 rules_files = sys.argv[1:]
 if not rules_files:
@@ -30,7 +15,9 @@ if not rules_files:
 
 quoted_string_re = r'"(?:[^\\"]|\\.)*"'
 no_args_tests = re.compile(r'(ACTION|DEVPATH|KERNELS?|NAME|SYMLINK|SUBSYSTEMS?|DRIVERS?|TAG|PROGRAM|RESULT|TEST)\s*(?:=|!)=\s*' + quoted_string_re + '$')
-args_tests = re.compile(r'(ATTRS?|ENV|TEST){([a-zA-Z0-9/_.*%-]+)}\s*(?:=|!)=\s*' + quoted_string_re + '$')
+# PROGRAM can also be specified as an assignment.
+program_assign = re.compile(r'PROGRAM\s*=\s*' + quoted_string_re + '$')
+args_tests = re.compile(r'(ATTRS?|ENV|CONST|TEST){([a-zA-Z0-9/_.*%-]+)}\s*(?:=|!)=\s*' + quoted_string_re + '$')
 no_args_assign = re.compile(r'(NAME|SYMLINK|OWNER|GROUP|MODE|TAG|RUN|LABEL|GOTO|OPTIONS|IMPORT)\s*(?:\+=|:=|=)\s*' + quoted_string_re + '$')
 args_assign = re.compile(r'(ATTR|ENV|IMPORT|RUN){([a-zA-Z0-9/_.*%-]+)}\s*(=|\+=)\s*' + quoted_string_re + '$')
 # Find comma-separated groups, but allow commas that are inside quoted strings.
@@ -64,7 +51,8 @@ for path in rules_files:
         for clause_match in comma_separated_group_re.finditer(line):
             clause = clause_match.group().strip()
             if not (no_args_tests.match(clause) or args_tests.match(clause) or
-                    no_args_assign.match(clause) or args_assign.match(clause)):
+                    no_args_assign.match(clause) or args_assign.match(clause) or
+                    program_assign.match(clause)):
 
                 print('Invalid line {}:{}: {}'.format(path, lineno, line))
                 print('  clause:', clause)

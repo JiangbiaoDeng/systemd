@@ -1,32 +1,13 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2016 Zbigniew Jędrzejewski-Szmek
+#include <sys/socket.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <sys/stat.h>
-
-#include "alloc-util.h"
 #include "fd-util.h"
 #include "log.h"
 #include "selinux-util.h"
 #include "string-util.h"
+#include "tests.h"
 #include "time-util.h"
-#include "util.h"
 
 static void test_testing(void) {
         bool b;
@@ -72,9 +53,9 @@ static void test_cleanup(void) {
 }
 
 static void test_misc(const char* fname) {
-        _cleanup_(mac_selinux_freep) char *label = NULL, *label2 = NULL, *label3 = NULL;
+        _cleanup_freecon_ char *label = NULL, *label2 = NULL, *label3 = NULL, *label4 = NULL;
         int r;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
 
         log_info("============ %s ==========", __func__);
 
@@ -92,6 +73,10 @@ static void test_misc(const char* fname) {
         r = mac_selinux_get_child_mls_label(fd, fname, label2, &label3);
         log_info_errno(r, "mac_selinux_get_child_mls_label → %d, \"%s\" (%m)",
                        r, strnull(label3));
+
+        r = mac_selinux_get_peer_label(fd, &label4);
+        log_info_errno(r, "mac_selinux_get_peer_label → %d, \"%s\" (%m)",
+                       r, strnull(label4));
 }
 
 static void test_create_file_prepare(const char* fname) {
@@ -110,8 +95,7 @@ int main(int argc, char **argv) {
         if (argc >= 2)
                 path = argv[1];
 
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
+        test_setup_logging(LOG_DEBUG);
 
         test_testing();
         test_loading();

@@ -1,47 +1,42 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd
-
-  Copyright 2014 Ronny Chevalier
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <unistd.h>
 
-#include "macro.h"
 #include "ratelimit.h"
+#include "tests.h"
 #include "time-util.h"
 
-static void test_ratelimit_test(void) {
+TEST(ratelimit_below) {
         int i;
-        RATELIMIT_DEFINE(ratelimit, 1 * USEC_PER_SEC, 10);
+        RateLimit ratelimit = { 1 * USEC_PER_SEC, 10 };
 
         for (i = 0; i < 10; i++)
-                assert_se(ratelimit_test(&ratelimit));
-        assert_se(!ratelimit_test(&ratelimit));
+                assert_se(ratelimit_below(&ratelimit));
+        assert_se(!ratelimit_below(&ratelimit));
         sleep(1);
         for (i = 0; i < 10; i++)
-                assert_se(ratelimit_test(&ratelimit));
+                assert_se(ratelimit_below(&ratelimit));
 
-        RATELIMIT_INIT(ratelimit, 0, 10);
+        ratelimit = (const RateLimit) { 0, 10 };
         for (i = 0; i < 10000; i++)
-                assert_se(ratelimit_test(&ratelimit));
+                assert_se(ratelimit_below(&ratelimit));
 }
 
-int main(int argc, char *argv[]) {
-        test_ratelimit_test();
+TEST(ratelimit_num_dropped) {
+        int i;
+        RateLimit ratelimit = { 1 * USEC_PER_SEC, 10 };
 
-        return 0;
+        for (i = 0; i < 10; i++) {
+                assert_se(ratelimit_below(&ratelimit));
+                assert_se(ratelimit_num_dropped(&ratelimit) == 0);
+        }
+        assert_se(!ratelimit_below(&ratelimit));
+        assert_se(ratelimit_num_dropped(&ratelimit) == 1);
+        assert_se(!ratelimit_below(&ratelimit));
+        assert_se(ratelimit_num_dropped(&ratelimit) == 2);
+        sleep(1);
+        assert_se(ratelimit_below(&ratelimit));
+        assert_se(ratelimit_num_dropped(&ratelimit) == 0);
 }
+
+DEFINE_TEST_MAIN(LOG_INFO);

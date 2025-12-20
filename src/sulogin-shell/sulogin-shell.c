@@ -1,89 +1,75 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /***
-  This file is part of systemd.
-
-  Copyright 2017 Felipe Sateler
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  Copyright © 2017 Felipe Sateler
 ***/
 
-#include <errno.h>
-#include <sys/prctl.h>
+#include <unistd.h>
 
-#include "bus-util.h"
-#include "bus-error.h"
-#include "def.h"
-#include "log.h"
-#include "process-util.h"
 #include "sd-bus.h"
-#include "signal-util.h"
 
-static int reload_manager(sd_bus *bus) {
+#include "alloc-util.h"
+#include "bus-error.h"
+#include "bus-locator.h"
+#include "bus-unit-util.h"
+#include "bus-util.h"
+#include "env-util.h"
+#include "initrd-util.h"
+#include "log.h"
+#include "main-func.h"
+#include "proc-cmdline.h"
+#include "process-util.h"
+#include "special.h"
+#include "string-util.h"
+#include "unit-def.h"
+
+static int target_is_inactive(sd_bus *bus, const char *target) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
+        _cleanup_free_ char *path = NULL, *state = NULL;
         int r;
 
-        log_info("Reloading system manager configuration");
+        path = unit_dbus_path_from_name(target);
+        if (!path)
+                return log_oom();
 
-        r = sd_bus_message_new_method_call(
-                        bus,
-                        &m,
-                        "org.freedesktop.systemd1",
-                        "/org/freedesktop/systemd1",
-                        "org.freedesktop.systemd1.Manager",
-                        "Reload");
+        r = sd_bus_get_property_string(bus,
+                                       "org.freedesktop.systemd1",
+                                       path,
+                                       "org.freedesktop.systemd1.Unit",
+                                       "ActiveState",
+                                       &error,
+                                       &state);
         if (r < 0)
-                return bus_log_create_error(r);
+                return log_error_errno(r, "Failed to retrieve unit state: %s", bus_error_message(&error, r));
 
-        /* Note we use an extra-long timeout here. This is because a reload or reexec means generators are rerun which
-         * are timed out after DEFAULT_TIMEOUT_USEC. Let's use twice that time here, so that the generators can have
-         * their timeout, and for everything else there's the same time budget in place. */
-
-        r = sd_bus_call(bus, m, DEFAULT_TIMEOUT_USEC * 2, &error, NULL);
-        if (r < 0)
-                return log_error_errno(r, "Failed to reload daemon: %s", bus_error_message(&error, r));
-
-        return 0;
+        return streq_ptr(state, "inactive");
 }
 
-static int start_default_target(sd_bus *bus) {
+static int start_target(sd_bus *bus, const char *target) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
-        log_info("Starting default target");
+        log_info("Starting %s", target);
 
-        /* Start these units only if we can replace base.target with it */
-        r = sd_bus_call_method(bus,
-                               "org.freedesktop.systemd1",
-                               "/org/freedesktop/systemd1",
-                               "org.freedesktop.systemd1.Manager",
-                               "StartUnit",
-                               &error,
-                               NULL,
-                               "ss", "default.target", "isolate");
+        /* Start this unit only if we can replace basic.target with it */
+        r = bus_call_method(
+                        bus,
+                        bus_systemd_mgr,
+                        "StartUnit",
+                        &error,
+                        NULL,
+                        "ss", target, "isolate");
 
         if (r < 0)
-                log_error("Failed to start default target: %s", bus_error_message(&error, r));
+                return log_error_errno(r, "Failed to start %s: %s", target, bus_error_message(&error, r));
 
-        return r;
+        return 0;
 }
 
 static int fork_wait(const char* const cmdline[]) {
         pid_t pid;
         int r;
 
-        r = safe_fork("(sulogin)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+        r = safe_fork("(sulogin)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pid);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -98,33 +84,73 @@ static int fork_wait(const char* const cmdline[]) {
 
 static void print_mode(const char* mode) {
         printf("You are in %s mode. After logging in, type \"journalctl -xb\" to view\n"
-                "system logs, \"systemctl reboot\" to reboot, \"systemctl default\" or \"exit\"\n"
-                "to boot into default mode.\n", mode);
+               "system logs, \"systemctl reboot\" to reboot, or \"exit\"\n" "to continue bootup.\n", mode);
         fflush(stdout);
 }
 
-int main(int argc, char *argv[]) {
-        static const char* const sulogin_cmdline[] = {SULOGIN, NULL};
-        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+static int run(int argc, char *argv[]) {
+        const char* sulogin_cmdline[] = {
+                SULOGIN,
+                NULL,             /* --force */
+                NULL
+        };
+        bool force = false;
         int r;
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         print_mode(argc > 1 ? argv[1] : "");
 
-        (void) fork_wait(sulogin_cmdline);
+        if (getenv_bool("SYSTEMD_SULOGIN_FORCE") > 0)
+                force = true;
 
-        r = bus_connect_system_systemd(&bus);
-        if (r < 0) {
-                log_warning_errno(r, "Failed to get D-Bus connection: %m");
-                r = 0;
-        } else {
-                (void) reload_manager(bus);
-
-                r = start_default_target(bus);
+        if (!force) {
+                /* We look the argument in the kernel cmdline under the same name as the environment variable
+                 * to express that this is not supported at the same level as the regular kernel cmdline
+                 * switches. */
+                r = proc_cmdline_get_bool("SYSTEMD_SULOGIN_FORCE", /* flags= */ 0, &force);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to parse SYSTEMD_SULOGIN_FORCE from kernel command line, ignoring: %m");
         }
 
-        return r >= 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        if (force)
+                /* allows passwordless logins if root account is locked. */
+                sulogin_cmdline[1] = "--force";
+
+        for (;;) {
+                _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+
+                (void) fork_wait(sulogin_cmdline);
+
+                r = bus_connect_system_systemd(&bus);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to get D-Bus connection: %m");
+                        goto fallback;
+                }
+
+                log_info("Reloading system manager configuration.");
+                r = bus_service_manager_reload(bus);
+                if (r < 0)
+                        goto fallback;
+
+                const char *target = in_initrd() ? SPECIAL_INITRD_TARGET : SPECIAL_DEFAULT_TARGET;
+
+                r = target_is_inactive(bus, target);
+                if (r < 0)
+                        goto fallback;
+                if (!r) {
+                        log_warning("%s is not inactive. Please review the %s setting.", target, target);
+                        goto fallback;
+                }
+
+                if (start_target(bus, target) >= 0)
+                        break;
+
+        fallback:
+                log_warning("Fallback to the single-user shell.");
+        }
+
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

@@ -1,45 +1,27 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2008-2011 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <errno.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <nss.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "alloc-util.h"
+#include "errno-util.h"
+#include "hostname-setup.h"
 #include "hostname-util.h"
+#include "in-addr-util.h"
 #include "local-addresses.h"
-#include "macro.h"
 #include "nss-util.h"
+#include "resolve-util.h"
 #include "signal-util.h"
+#include "socket-util.h"
 #include "string-util.h"
-#include "util.h"
 
 /* We use 127.0.0.2 as IPv4 address. This has the advantage over
  * 127.0.0.1 that it can be translated back to the local hostname. For
  * IPv6 we use ::1 which unfortunately will not translate back to the
  * hostname but instead something like "localhost" or so. */
 
-#define LOCALADDRESS_IPV4 (htobe32(0x7F000002))
+#define LOCALADDRESS_IPV4 (htobe32(INADDR_LOCALADDRESS))
 #define LOCALADDRESS_IPV6 &in6addr_loopback
 
 NSS_GETHOSTBYNAME_PROTOTYPES(myhostname);
@@ -58,12 +40,11 @@ enum nss_status _nss_myhostname_gethostbyname4_r(
         const char *canonical = NULL;
         int n_addresses = 0;
         uint32_t local_address_ipv4;
-        struct local_address *a;
         size_t l, idx, ms;
         char *r_name;
-        unsigned n;
 
-        BLOCK_SIGNALS(NSS_SIGNALS_BLOCK);
+        PROTECT_ERRNO;
+        NSS_ENTRYPOINT_BEGIN;
 
         assert(name);
         assert(pat);
@@ -72,8 +53,7 @@ enum nss_status _nss_myhostname_gethostbyname4_r(
         assert(h_errnop);
 
         if (is_localhost(name)) {
-                /* We respond to 'localhost', so that /etc/hosts
-                 * is optional */
+                /* We respond to 'localhost', so that /etc/hosts is optional */
 
                 canonical = "localhost";
                 local_address_ipv4 = htobe32(INADDR_LOOPBACK);
@@ -81,28 +61,31 @@ enum nss_status _nss_myhostname_gethostbyname4_r(
         } else if (is_gateway_hostname(name)) {
 
                 n_addresses = local_gateways(NULL, 0, AF_UNSPEC, &addresses);
-                if (n_addresses <= 0) {
-                        *errnop = ENOENT;
-                        *h_errnop = HOST_NOT_FOUND;
-                        return NSS_STATUS_NOTFOUND;
-                }
+                if (n_addresses <= 0)
+                        goto not_found;
 
                 canonical = "_gateway";
+
+        } else if (is_outbound_hostname(name)) {
+
+                n_addresses = local_outbounds(NULL, 0, AF_UNSPEC, &addresses);
+                if (n_addresses <= 0)
+                        goto not_found;
+
+                canonical = "_outbound";
 
         } else {
                 hn = gethostname_malloc();
                 if (!hn) {
+                        UNPROTECT_ERRNO;
                         *errnop = ENOMEM;
                         *h_errnop = NO_RECOVERY;
                         return NSS_STATUS_TRYAGAIN;
                 }
 
-                /* We respond to our local host name, our hostname suffixed with a single dot. */
-                if (!streq(name, hn) && !streq_ptr(startswith(name, hn), ".")) {
-                        *errnop = ENOENT;
-                        *h_errnop = HOST_NOT_FOUND;
-                        return NSS_STATUS_NOTFOUND;
-                }
+                /* We respond to our local hostname, our hostname suffixed with a single dot. */
+                if (!streq(name, hn) && !streq_ptr(startswith(name, hn), "."))
+                        goto not_found;
 
                 n_addresses = local_addresses(NULL, 0, AF_UNSPEC, &addresses);
                 if (n_addresses < 0)
@@ -113,8 +96,9 @@ enum nss_status _nss_myhostname_gethostbyname4_r(
         }
 
         l = strlen(canonical);
-        ms = ALIGN(l+1) + ALIGN(sizeof(struct gaih_addrtuple)) * (n_addresses > 0 ? n_addresses : 2);
+        ms = ALIGN(l+1) + ALIGN(sizeof(struct gaih_addrtuple)) * (n_addresses > 0 ? n_addresses : 1 + socket_ipv6_is_enabled());
         if (buflen < ms) {
+                UNPROTECT_ERRNO;
                 *errnop = ERANGE;
                 *h_errnop = NETDB_INTERNAL;
                 return NSS_STATUS_TRYAGAIN;
@@ -128,15 +112,17 @@ enum nss_status _nss_myhostname_gethostbyname4_r(
         assert(n_addresses >= 0);
         if (n_addresses == 0) {
                 /* Second, fill in IPv6 tuple */
-                r_tuple = (struct gaih_addrtuple*) (buffer + idx);
-                r_tuple->next = r_tuple_prev;
-                r_tuple->name = r_name;
-                r_tuple->family = AF_INET6;
-                memcpy(r_tuple->addr, LOCALADDRESS_IPV6, 16);
-                r_tuple->scopeid = 0;
+                if (socket_ipv6_is_enabled()) {
+                        r_tuple = (struct gaih_addrtuple*) (buffer + idx);
+                        r_tuple->next = r_tuple_prev;
+                        r_tuple->name = r_name;
+                        r_tuple->family = AF_INET6;
+                        memcpy(r_tuple->addr, LOCALADDRESS_IPV6, FAMILY_ADDRESS_SIZE(AF_INET6));
+                        r_tuple->scopeid = 0;
 
-                idx += ALIGN(sizeof(struct gaih_addrtuple));
-                r_tuple_prev = r_tuple;
+                        idx += ALIGN(sizeof(struct gaih_addrtuple));
+                        r_tuple_prev = r_tuple;
+                }
 
                 /* Third, fill in IPv4 tuple */
                 r_tuple = (struct gaih_addrtuple*) (buffer + idx);
@@ -151,13 +137,15 @@ enum nss_status _nss_myhostname_gethostbyname4_r(
         }
 
         /* Fourth, fill actual addresses in, but in backwards order */
-        for (a = addresses + n_addresses - 1, n = 0; (int) n < n_addresses; n++, a--) {
+        for (int i = n_addresses; i > 0; i--) {
+                struct local_address *a = addresses + i - 1;
+
                 r_tuple = (struct gaih_addrtuple*) (buffer + idx);
                 r_tuple->next = r_tuple_prev;
                 r_tuple->name = r_name;
                 r_tuple->family = a->family;
-                r_tuple->scopeid = a->family == AF_INET6 && IN6_IS_ADDR_LINKLOCAL(&a->address.in6) ? a->ifindex : 0;
-                memcpy(r_tuple->addr, &a->address, 16);
+                r_tuple->scopeid = a->family == AF_INET6 && in6_addr_is_link_local(&a->address.in6) ? a->ifindex : 0;
+                memcpy(r_tuple->addr, &a->address, FAMILY_ADDRESS_SIZE(a->family));
 
                 idx += ALIGN(sizeof(struct gaih_addrtuple));
                 r_tuple_prev = r_tuple;
@@ -175,12 +163,16 @@ enum nss_status _nss_myhostname_gethostbyname4_r(
         if (ttlp)
                 *ttlp = 0;
 
-        /* Explicitly reset all error variables */
-        *errnop = 0;
+        /* Explicitly reset both *h_errnop and h_errno to work around
+         * https://bugzilla.redhat.com/show_bug.cgi?id=1125975 */
         *h_errnop = NETDB_SUCCESS;
         h_errno = 0;
 
         return NSS_STATUS_SUCCESS;
+
+not_found:
+        *h_errnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
 }
 
 static enum nss_status fill_in_hostent(
@@ -200,10 +192,13 @@ static enum nss_status fill_in_hostent(
         unsigned n, c;
 
         assert(canonical);
+        assert(IN_SET(af, AF_INET, AF_INET6));
         assert(result);
         assert(buffer);
         assert(errnop);
         assert(h_errnop);
+
+        PROTECT_ERRNO;
 
         alen = FAMILY_ADDRESS_SIZE(af);
 
@@ -217,10 +212,11 @@ static enum nss_status fill_in_hostent(
                 (additional ? ALIGN(l_additional+1) : 0) +
                 sizeof(char*) +
                 (additional ? sizeof(char*) : 0) +
-                (c > 0 ? c : 1) * ALIGN(alen) +
-                (c > 0 ? c+1 : 2) * sizeof(char*);
+                (c > 0 ? c : af == AF_INET ? 1 : socket_ipv6_is_enabled()) * ALIGN(alen) +
+                (c > 0 ? c+1 : af == AF_INET ? 2 : (unsigned) socket_ipv6_is_enabled() + 1) * sizeof(char*);
 
         if (buflen < ms) {
+                UNPROTECT_ERRNO;
                 *errnop = ERANGE;
                 *h_errnop = NETDB_INTERNAL;
                 return NSS_STATUS_TRYAGAIN;
@@ -263,12 +259,12 @@ static enum nss_status fill_in_hostent(
 
                 assert(i == c);
                 idx += c*ALIGN(alen);
-        } else {
-                if (af == AF_INET)
-                        *(uint32_t*) r_addr = local_address_ipv4;
-                else
-                        memcpy(r_addr, LOCALADDRESS_IPV6, 16);
 
+        } else if (af == AF_INET) {
+                *(uint32_t*) r_addr = local_address_ipv4;
+                idx += ALIGN(alen);
+        } else if (socket_ipv6_is_enabled()) {
+                memcpy(r_addr, LOCALADDRESS_IPV6, FAMILY_ADDRESS_SIZE(AF_INET6));
                 idx += ALIGN(alen);
         }
 
@@ -283,10 +279,13 @@ static enum nss_status fill_in_hostent(
                 ((char**) r_addr_list)[i] = NULL;
                 idx += (c+1) * sizeof(char*);
 
-        } else {
+        } else if (af == AF_INET || socket_ipv6_is_enabled()) {
                 ((char**) r_addr_list)[0] = r_addr;
                 ((char**) r_addr_list)[1] = NULL;
                 idx += 2 * sizeof(char*);
+        } else {
+                ((char**) r_addr_list)[0] = NULL;
+                idx += sizeof(char*);
         }
 
         /* Verify the size matches */
@@ -304,8 +303,8 @@ static enum nss_status fill_in_hostent(
         if (canonp)
                 *canonp = r_name;
 
-        /* Explicitly reset all error variables */
-        *errnop = 0;
+        /* Explicitly reset both *h_errnop and h_errno to work around
+         * https://bugzilla.redhat.com/show_bug.cgi?id=1125975 */
         *h_errnop = NETDB_SUCCESS;
         h_errno = 0;
 
@@ -327,7 +326,8 @@ enum nss_status _nss_myhostname_gethostbyname3_r(
         uint32_t local_address_ipv4 = 0;
         int n_addresses = 0;
 
-        BLOCK_SIGNALS(NSS_SIGNALS_BLOCK);
+        PROTECT_ERRNO;
+        NSS_ENTRYPOINT_BEGIN;
 
         assert(name);
         assert(host);
@@ -339,39 +339,47 @@ enum nss_status _nss_myhostname_gethostbyname3_r(
                 af = AF_INET;
 
         if (!IN_SET(af, AF_INET, AF_INET6)) {
+                UNPROTECT_ERRNO;
                 *errnop = EAFNOSUPPORT;
                 *h_errnop = NO_DATA;
                 return NSS_STATUS_UNAVAIL;
         }
 
+        if (af == AF_INET6 && !socket_ipv6_is_enabled())
+                goto not_found;
+
         if (is_localhost(name)) {
+
                 canonical = "localhost";
                 local_address_ipv4 = htobe32(INADDR_LOOPBACK);
 
         } else if (is_gateway_hostname(name)) {
 
                 n_addresses = local_gateways(NULL, 0, af, &addresses);
-                if (n_addresses <= 0) {
-                        *errnop = ENOENT;
-                        *h_errnop = HOST_NOT_FOUND;
-                        return NSS_STATUS_NOTFOUND;
-                }
+                if (n_addresses <= 0)
+                        goto not_found;
 
                 canonical = "_gateway";
+
+        } else if (is_outbound_hostname(name)) {
+
+                n_addresses = local_outbounds(NULL, 0, af, &addresses);
+                if (n_addresses <= 0)
+                        goto not_found;
+
+                canonical = "_outbound";
 
         } else {
                 hn = gethostname_malloc();
                 if (!hn) {
+                        UNPROTECT_ERRNO;
                         *errnop = ENOMEM;
                         *h_errnop = NO_RECOVERY;
                         return NSS_STATUS_TRYAGAIN;
                 }
 
-                if (!streq(name, hn) && !streq_ptr(startswith(name, hn), ".")) {
-                        *errnop = ENOENT;
-                        *h_errnop = HOST_NOT_FOUND;
-                        return NSS_STATUS_NOTFOUND;
-                }
+                if (!streq(name, hn) && !streq_ptr(startswith(name, hn), "."))
+                        goto not_found;
 
                 n_addresses = local_addresses(NULL, 0, af, &addresses);
                 if (n_addresses < 0)
@@ -381,6 +389,8 @@ enum nss_status _nss_myhostname_gethostbyname3_r(
                 additional = n_addresses <= 0 && af == AF_INET6 ? "localhost" : NULL;
                 local_address_ipv4 = LOCALADDRESS_IPV4;
         }
+
+        UNPROTECT_ERRNO;
 
         return fill_in_hostent(
                         canonical, additional,
@@ -392,6 +402,10 @@ enum nss_status _nss_myhostname_gethostbyname3_r(
                         errnop, h_errnop,
                         ttlp,
                         canonp);
+
+not_found:
+        *h_errnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
 }
 
 enum nss_status _nss_myhostname_gethostbyaddr2_r(
@@ -411,7 +425,8 @@ enum nss_status _nss_myhostname_gethostbyaddr2_r(
         bool additional_from_hostname = false;
         unsigned n;
 
-        BLOCK_SIGNALS(NSS_SIGNALS_BLOCK);
+        PROTECT_ERRNO;
+        NSS_ENTRYPOINT_BEGIN;
 
         assert(addr);
         assert(host);
@@ -420,12 +435,14 @@ enum nss_status _nss_myhostname_gethostbyaddr2_r(
         assert(h_errnop);
 
         if (!IN_SET(af, AF_INET, AF_INET6)) {
+                UNPROTECT_ERRNO;
                 *errnop = EAFNOSUPPORT;
                 *h_errnop = NO_DATA;
                 return NSS_STATUS_UNAVAIL;
         }
 
         if (len != FAMILY_ADDRESS_SIZE(af)) {
+                UNPROTECT_ERRNO;
                 *errnop = EINVAL;
                 *h_errnop = NO_RECOVERY;
                 return NSS_STATUS_UNAVAIL;
@@ -444,36 +461,31 @@ enum nss_status _nss_myhostname_gethostbyaddr2_r(
         } else {
                 assert(af == AF_INET6);
 
-                if (memcmp(addr, LOCALADDRESS_IPV6, 16) == 0) {
+                if (!socket_ipv6_is_enabled())
+                        goto not_found;
+
+                if (memcmp(addr, LOCALADDRESS_IPV6, FAMILY_ADDRESS_SIZE(AF_INET6)) == 0) {
                         canonical = "localhost";
                         additional_from_hostname = true;
                         goto found;
                 }
         }
 
-        n_addresses = local_addresses(NULL, 0, AF_UNSPEC, &addresses);
-        for (a = addresses, n = 0; (int) n < n_addresses; n++, a++) {
-                if (af != a->family)
-                        continue;
-
+        n_addresses = local_addresses(NULL, 0, af, &addresses);
+        for (a = addresses, n = 0; (int) n < n_addresses; n++, a++)
                 if (memcmp(addr, &a->address, FAMILY_ADDRESS_SIZE(af)) == 0)
                         goto found;
-        }
 
         addresses = mfree(addresses);
 
-        n_addresses = local_gateways(NULL, 0, AF_UNSPEC, &addresses);
-        for (a = addresses, n = 0; (int) n < n_addresses; n++, a++) {
-                if (af != a->family)
-                        continue;
-
+        n_addresses = local_gateways(NULL, 0, af, &addresses);
+        for (a = addresses, n = 0; (int) n < n_addresses; n++, a++)
                 if (memcmp(addr, &a->address, FAMILY_ADDRESS_SIZE(af)) == 0) {
                         canonical = "_gateway";
                         goto found;
                 }
-        }
 
-        *errnop = ENOENT;
+not_found:
         *h_errnop = HOST_NOT_FOUND;
         return NSS_STATUS_NOTFOUND;
 
@@ -481,6 +493,7 @@ found:
         if (!canonical || additional_from_hostname) {
                 hn = gethostname_malloc();
                 if (!hn) {
+                        UNPROTECT_ERRNO;
                         *errnop = ENOMEM;
                         *h_errnop = NO_RECOVERY;
                         return NSS_STATUS_TRYAGAIN;
@@ -492,6 +505,7 @@ found:
                         additional = hn;
         }
 
+        UNPROTECT_ERRNO;
         return fill_in_hostent(
                         canonical, additional,
                         af,

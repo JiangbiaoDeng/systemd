@@ -1,28 +1,13 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <sys/socket.h>
 
-  Copyright 2014 Lennart Poettering
+#include "journald-forward.h"
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+void manager_process_audit_message(Manager *m, const void *buffer, size_t buffer_size, const struct ucred *ucred, const union sockaddr_union *sa, socklen_t salen);
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
+void process_audit_string(Manager *m, int type, const char *data, size_t size);
 
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "journald-server.h"
-#include "socket-util.h"
-
-void server_process_audit_message(Server *s, const void *buffer, size_t buffer_size, const struct ucred *ucred, const union sockaddr_union *sa, socklen_t salen);
-
-int server_open_audit(Server*s);
+int manager_open_audit(Manager *m);
+void manager_reset_kernel_audit(Manager *m, AuditSetMode old_set_audit);

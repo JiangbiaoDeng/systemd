@@ -1,28 +1,7 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-typedef struct Path Path;
-typedef struct PathSpec PathSpec;
-
+#include "core-forward.h"
 #include "unit.h"
 
 typedef enum PathType {
@@ -32,7 +11,7 @@ typedef enum PathType {
         PATH_CHANGED,
         PATH_MODIFIED,
         _PATH_TYPE_MAX,
-        _PATH_TYPE_INVALID = -1
+        _PATH_TYPE_INVALID = -EINVAL,
 } PathType;
 
 typedef struct PathSpec {
@@ -64,31 +43,44 @@ typedef enum PathResult {
         PATH_SUCCESS,
         PATH_FAILURE_RESOURCES,
         PATH_FAILURE_START_LIMIT_HIT,
+        PATH_FAILURE_UNIT_START_LIMIT_HIT,
+        PATH_FAILURE_TRIGGER_LIMIT_HIT,
         _PATH_RESULT_MAX,
-        _PATH_RESULT_INVALID = -1
+        _PATH_RESULT_INVALID = -EINVAL,
 } PathResult;
 
-struct Path {
+typedef struct Path {
         Unit meta;
 
         LIST_HEAD(PathSpec, specs);
 
         PathState state, deserialized_state;
 
-        bool inotify_triggered;
-
         bool make_directory;
         mode_t directory_mode;
 
         PathResult result;
-};
+
+        RateLimit trigger_limit;
+
+        sd_event_source *trigger_notify_event_source;
+} Path;
+
+typedef struct ActivationDetailsPath {
+        ActivationDetails meta;
+        char *trigger_path_filename;
+} ActivationDetailsPath;
 
 void path_free_specs(Path *p);
 
 extern const UnitVTable path_vtable;
+extern const ActivationDetailsVTable activation_details_path_vtable;
 
 const char* path_type_to_string(PathType i) _const_;
 PathType path_type_from_string(const char *s) _pure_;
 
 const char* path_result_to_string(PathResult i) _const_;
 PathResult path_result_from_string(const char *s) _pure_;
+
+DEFINE_CAST(PATH, Path);
+DEFINE_ACTIVATION_DETAILS_CAST(ACTIVATION_DETAILS_PATH, ActivationDetailsPath, PATH);

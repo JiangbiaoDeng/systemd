@@ -1,41 +1,21 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 /***
-  This file is part of systemd.
-
-  Copyright (C) 2013 Intel Corporation. All rights reserved.
-  Copyright (C) 2014 Tom Gundersen
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  Copyright © 2013 Intel Corporation. All rights reserved.
 ***/
 
-#include <stdint.h>
-#include <linux/if_packet.h>
+#include "sd-dhcp-lease.h"
 
-#include "sd-dhcp-client.h"
-
-#include "dhcp-protocol.h"
+#include "dhcp-client-id-internal.h"
+#include "dhcp-option.h"
+#include "sd-forward.h"
 #include "list.h"
-#include "util.h"
 
 struct sd_dhcp_route {
         struct in_addr dst_addr;
         struct in_addr gw_addr;
         unsigned char dst_prefixlen;
-
-        uint8_t option;
 };
 
 struct sd_dhcp_raw_option {
@@ -50,14 +30,15 @@ struct sd_dhcp_lease {
         unsigned n_ref;
 
         /* each 0 if unset */
-        uint32_t t1;
-        uint32_t t2;
-        uint32_t lifetime;
+        usec_t t1;
+        usec_t t2;
+        usec_t lifetime;
+        triple_timestamp timestamp;
+        usec_t ipv6_only_preferred_usec;
 
         /* each 0 if unset */
         be32_t address;
         be32_t server_address;
-        be32_t router;
         be32_t next_server;
 
         bool have_subnet_mask;
@@ -66,29 +47,42 @@ struct sd_dhcp_lease {
         bool have_broadcast;
         be32_t broadcast;
 
-        struct in_addr *dns;
-        size_t dns_size;
+        struct in_addr *router;
+        size_t router_size;
 
-        struct in_addr *ntp;
-        size_t ntp_size;
+        bool rapid_commit;
 
-        struct sd_dhcp_route *static_route;
-        size_t static_route_size, static_route_allocated;
+        DHCPServerData servers[_SD_DHCP_LEASE_SERVER_TYPE_MAX];
+
+        sd_dns_resolver *dnr;
+        size_t n_dnr;
+
+        struct sd_dhcp_route *static_routes;
+        size_t n_static_routes;
+        struct sd_dhcp_route *classless_routes;
+        size_t n_classless_routes;
 
         uint16_t mtu; /* 0 if unset */
 
         char *domainname;
         char **search_domains;
-        char *hostname;
+        char *hostname; /* SD_DHCP_OPTION_HOST_NAME (12) */
+        char *fqdn;     /* SD_DHCP_OPTION_FQDN (81) */
         char *root_path;
+        char *captive_portal;
 
-        void *client_id;
-        size_t client_id_len;
+        sd_dhcp_client_id client_id;
 
         void *vendor_specific;
         size_t vendor_specific_len;
 
         char *timezone;
+
+        uint8_t sixrd_ipv4masklen;
+        uint8_t sixrd_prefixlen;
+        struct in6_addr sixrd_prefix;
+        struct in_addr *sixrd_br_addresses;
+        size_t sixrd_n_br_addresses;
 
         LIST_HEAD(struct sd_dhcp_raw_option, private_options);
 };
@@ -99,9 +93,9 @@ int dhcp_lease_parse_options(uint8_t code, uint8_t len, const void *option, void
 int dhcp_lease_parse_search_domains(const uint8_t *option, size_t len, char ***domains);
 int dhcp_lease_insert_private_option(sd_dhcp_lease *lease, uint8_t tag, const void *data, uint8_t len);
 
+void dhcp_lease_set_timestamp(sd_dhcp_lease *lease, const triple_timestamp *timestamp);
 int dhcp_lease_set_default_subnet_mask(sd_dhcp_lease *lease);
+int dhcp_lease_set_client_id(sd_dhcp_lease *lease, const sd_dhcp_client_id *client_id);
 
-int dhcp_lease_set_client_id(sd_dhcp_lease *lease, const void *client_id, size_t client_id_len);
-
-int dhcp_lease_save(sd_dhcp_lease *lease, const char *lease_file);
-int dhcp_lease_load(sd_dhcp_lease **ret, const char *lease_file);
+#define dhcp_lease_unref_and_replace(a, b)                              \
+        unref_and_replace_full(a, b, sd_dhcp_lease_ref, sd_dhcp_lease_unref)

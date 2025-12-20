@@ -20,16 +20,16 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-#ifndef SPARSE_ENDIAN_H
-#define SPARSE_ENDIAN_H
+#pragma once
 
 #include <byteswap.h>
 #include <endian.h>
-#include <stdint.h>
+
+#include "basic-forward.h"
 
 #ifdef __CHECKER__
-#define __sd_bitwise __attribute__((bitwise))
-#define __sd_force __attribute__((force))
+#define __sd_bitwise __attribute__((__bitwise__))
+#define __sd_force __attribute__((__force__))
 #else
 #define __sd_bitwise
 #define __sd_force
@@ -56,9 +56,9 @@ typedef uint64_t __sd_bitwise be64_t;
 #undef le64toh
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-#define bswap_16_on_le(x) __bswap_16(x)
-#define bswap_32_on_le(x) __bswap_32(x)
-#define bswap_64_on_le(x) __bswap_64(x)
+#define bswap_16_on_le(x) bswap_16(x)
+#define bswap_32_on_le(x) bswap_32(x)
+#define bswap_64_on_le(x) bswap_64(x)
 #define bswap_16_on_be(x) (x)
 #define bswap_32_on_be(x) (x)
 #define bswap_64_on_be(x) (x)
@@ -66,9 +66,9 @@ typedef uint64_t __sd_bitwise be64_t;
 #define bswap_16_on_le(x) (x)
 #define bswap_32_on_le(x) (x)
 #define bswap_64_on_le(x) (x)
-#define bswap_16_on_be(x) __bswap_16(x)
-#define bswap_32_on_be(x) __bswap_32(x)
-#define bswap_64_on_be(x) __bswap_64(x)
+#define bswap_16_on_be(x) bswap_16(x)
+#define bswap_32_on_be(x) bswap_32(x)
+#define bswap_64_on_be(x) bswap_64(x)
 #endif
 
 static inline le16_t htole16(uint16_t value) { return (le16_t __sd_force) bswap_16_on_be(value); }
@@ -89,5 +89,3 @@ static inline uint64_t be64toh(be64_t value) { return bswap_64_on_le((uint64_t _
 
 #undef __sd_bitwise
 #undef __sd_force
-
-#endif /* SPARSE_ENDIAN_H */

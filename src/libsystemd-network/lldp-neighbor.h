@@ -1,33 +1,12 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <net/ethernet.h>
 
-  Copyright 2016 Lennart Poettering
+#include "sd-lldp-rx.h"
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <inttypes.h>
-#include <stdbool.h>
-#include <sys/types.h>
-
-#include "sd-lldp.h"
-
-#include "hash-funcs.h"
-#include "lldp-internal.h"
+#include "sd-forward.h"
+#include "memory-util.h"
 #include "time-util.h"
 
 typedef struct LLDPNeighborID {
@@ -40,8 +19,8 @@ typedef struct LLDPNeighborID {
 } LLDPNeighborID;
 
 struct sd_lldp_neighbor {
-        /* Neighbor objects stay around as long as they are linked into an "sd_lldp" object or n_ref > 0. */
-        sd_lldp *lldp;
+        /* Neighbor objects stay around as long as they are linked into an "sd_lldp_rx" object or n_ref > 0. */
+        sd_lldp_rx *lldp_rx;
         unsigned n_ref;
 
         triple_timestamp timestamp;
@@ -73,6 +52,7 @@ struct sd_lldp_neighbor {
         char *port_description;
         char *system_name;
         char *system_description;
+        char *mud_url;
 
         uint16_t port_vlan_id;
 
@@ -99,11 +79,13 @@ static inline void* LLDP_NEIGHBOR_TLV_DATA(const sd_lldp_neighbor *n) {
         return ((uint8_t*) LLDP_NEIGHBOR_RAW(n)) + n->rindex + 2;
 }
 
-extern const struct hash_ops lldp_neighbor_id_hash_ops;
-int lldp_neighbor_prioq_compare_func(const void *a, const void *b);
+extern const struct hash_ops lldp_neighbor_hash_ops;
+int lldp_neighbor_id_compare_func(const LLDPNeighborID *x, const LLDPNeighborID *y);
+int lldp_neighbor_prioq_compare_func(const sd_lldp_neighbor *x, const sd_lldp_neighbor *y);
 
 sd_lldp_neighbor *lldp_neighbor_unlink(sd_lldp_neighbor *n);
 sd_lldp_neighbor *lldp_neighbor_new(size_t raw_size);
 int lldp_neighbor_parse(sd_lldp_neighbor *n);
 void lldp_neighbor_start_ttl(sd_lldp_neighbor *n);
 bool lldp_neighbor_equal(const sd_lldp_neighbor *a, const sd_lldp_neighbor *b);
+int lldp_neighbor_build_json(sd_lldp_neighbor *n, sd_json_variant **ret);

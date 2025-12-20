@@ -1,21 +1,8 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #pragma once
 
 /*
- * Copyright (C) IBM Corp. 2003
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright © IBM Corp. 2003
  */
 
 #define MAX_PATH_LEN 512
@@ -42,10 +29,10 @@ struct scsi_id_device {
         char vendor[9];
         char model[17];
         char revision[5];
-        char type[33];
         char kernel[64];
         char serial[MAX_SERIAL_LEN];
         char serial_short[MAX_SERIAL_LEN];
+        unsigned type;
         int use_sg;
 
         /* Always from page 0x80 e.g. 'B3G1P8500RWT' - may not be unique */
@@ -61,8 +48,8 @@ struct scsi_id_device {
         char tgpt_group[8];
 };
 
-int scsi_std_inquiry(struct udev *udev, struct scsi_id_device *dev_scsi, const char *devname);
-int scsi_get_serial(struct udev *udev, struct scsi_id_device *dev_scsi, const char *devname,
+int scsi_std_inquiry(struct scsi_id_device *dev_scsi, const char *devname);
+int scsi_get_serial(struct scsi_id_device *dev_scsi, const char *devname,
                     int page_code, int len);
 
 /*

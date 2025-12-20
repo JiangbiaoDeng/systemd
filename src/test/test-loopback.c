@@ -1,39 +1,47 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2010 Lennart Poettering
+#include <sched.h>
+#include <stdlib.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdio.h>
-#include <string.h>
-
+#include "errno-util.h"
 #include "log.h"
 #include "loopback-setup.h"
+#include "tests.h"
 
-int main(int argc, char* argv[]) {
+TEST_RET(loopback_setup) {
         int r;
 
-        log_open();
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
+        if (unshare(CLONE_NEWUSER | CLONE_NEWNET) < 0) {
+                if (ERRNO_IS_PRIVILEGE(errno) || ERRNO_IS_NOT_SUPPORTED(errno))
+                        return log_tests_skipped("lacking privileges or namespaces not supported");
+                return log_error_errno(errno, "Failed to create user+network namespace: %m");
+        }
 
         r = loopback_setup();
+        if (ERRNO_IS_NEG_PRIVILEGE(r))
+                return log_tests_skipped("lacking privileges");
         if (r < 0)
-                log_error_errno(r, "loopback: %m");
+                return log_error_errno(r, "loopback: %m");
 
-        return r >= 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        log_info("> ipv6 main");
+        /* <0 → fork error, ==0 → success, >0 → error in child */
+        assert_se(system("ip -6 route show table main") >= 0);
+
+        log_info("> ipv6 local");
+        assert_se(system("ip -6 route show table local") >=0);
+
+        log_info("> ipv4 main");
+        assert_se(system("ip -4 route show table main") >= 0);
+
+        log_info("> ipv4 local");
+        assert_se(system("ip -4 route show table local") >= 0);
+
+        return EXIT_SUCCESS;
 }
+
+static int intro(void) {
+        log_show_color(true);
+        return EXIT_SUCCESS;
+}
+
+DEFINE_TEST_MAIN_WITH_INTRO(LOG_INFO, intro);

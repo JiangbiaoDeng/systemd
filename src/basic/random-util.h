@@ -1,33 +1,11 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "basic-forward.h"
 
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-
-int acquire_random_bytes(void *p, size_t n, bool high_quality_required);
-void pseudorandom_bytes(void *p, size_t n);
-void random_bytes(void *p, size_t n);
-void initialize_srand(void);
+void random_bytes(void *p, size_t n) _nonnull_if_nonzero_(1, 2); /* Returns random bytes suitable for most uses, but may be insecure sometimes. */
+int crypto_random_bytes(void *p, size_t n) _nonnull_if_nonzero_(1, 2); /* Returns secure random bytes after waiting for the RNG to initialize. */
+int crypto_random_bytes_allocate_iovec(size_t n, struct iovec *ret);
 
 static inline uint64_t random_u64(void) {
         uint64_t u;
@@ -40,3 +18,14 @@ static inline uint32_t random_u32(void) {
         random_bytes(&u, sizeof(u));
         return u;
 }
+
+/* Some limits on the pool sizes when we deal with the kernel random pool */
+#define RANDOM_POOL_SIZE_MIN 32U
+#define RANDOM_POOL_SIZE_MAX (10U*1024U*1024U)
+#define RANDOM_EFI_SEED_SIZE 32U
+
+size_t random_pool_size(void);
+
+int random_write_entropy(int fd, const void *seed, size_t size, bool credit) _nonnull_if_nonzero_(2, 3);
+
+uint64_t random_u64_range(uint64_t max);

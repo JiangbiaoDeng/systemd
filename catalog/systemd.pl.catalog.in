@@ -1,28 +1,10 @@
-# SPDX-License-Identifier: LGPL-2.1+
-#
-#  This file is part of systemd.
-#
-#  Copyright 2012 Lennart Poettering
-#  Copyright 2014-2017 Piotr Drąg
-#
-#  systemd is free software; you can redistribute it and/or modify it
-#  under the terms of the GNU Lesser General Public License as published by
-#  the Free Software Foundation; either version 2.1 of the License, or
-#  (at your option) any later version.
-#
-#  systemd is distributed in the hope that it will be useful, but
-#  WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-#  Lesser General Public License for more details.
-#
-#  You should have received a copy of the GNU Lesser General Public License
-#  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 # Message catalog for systemd's own messages
 # Polish translation
 
 # The catalog format is documented on
-# https://www.freedesktop.org/wiki/Software/systemd/catalog
+# https://systemd.io/CATALOG
 
 # For an explanation why we do all this, see https://xkcd.com/1024/
 
@@ -72,7 +54,9 @@ Nie ma to wpływu na komunikaty innych usług.
 
 Ograniczenia kontrolujące pomijanie komunikatów mogą być konfigurowane
 za pomocą opcji RateLimitIntervalSec= i RateLimitBurst= w pliku
-/etc/systemd/journald.conf. Strona journald.conf(5) zawiera więcej informacji.
+/etc/systemd/journald.conf lub LogRateLimitIntervalSec= i LogRateLimitBurst=
+w pliku jednostki. Strony journald.conf(5) i systemd.exec(5) zawierają więcej
+informacji.
 
 -- e9bf28e6e834481bb6f48f548ad13606
 Subject: Utracono komunikaty dziennika
@@ -108,7 +92,7 @@ gdb(1) będą ostrzegały o skróceniu pliku.
 Subject: Utworzono nową sesję @SESSION_ID@ dla użytkownika @USER_ID@
 Defined-By: systemd
 Support: %SUPPORT_URL%
-Documentation: https://www.freedesktop.org/wiki/Software/systemd/multiseat
+Documentation: sd-login(3)
 
 Nowa sesja o identyfikatorze @SESSION_ID@ została utworzona dla użytkownika
 @USER_ID@.
@@ -119,7 +103,7 @@ Proces prowadzący sesji: @LEADER@.
 Subject: Zakończono sesję @SESSION_ID@
 Defined-By: systemd
 Support: %SUPPORT_URL%
-Documentation: https://www.freedesktop.org/wiki/Software/systemd/multiseat
+Documentation: sd-login(3)
 
 Sesja o identyfikatorze @SESSION_ID@ została zakończona.
 
@@ -127,7 +111,7 @@ Sesja o identyfikatorze @SESSION_ID@ została zakończona.
 Subject: Dostępne jest nowe stanowisko @SEAT_ID@
 Defined-By: systemd
 Support: %SUPPORT_URL%
-Documentation: https://www.freedesktop.org/wiki/Software/systemd/multiseat
+Documentation: sd-login(3)
 
 Nowe stanowisko @SEAT_ID@ zostało skonfigurowane i jest teraz dostępne.
 
@@ -135,9 +119,21 @@ Nowe stanowisko @SEAT_ID@ zostało skonfigurowane i jest teraz dostępne.
 Subject: Usunięto stanowisko @SEAT_ID@
 Defined-By: systemd
 Support: %SUPPORT_URL%
-Documentation: https://www.freedesktop.org/wiki/Software/systemd/multiseat
+Documentation: sd-login(3)
 
 Stanowisko @SEAT_ID@ zostało usunięte i nie jest już dostępne.
+
+-- b2bcbaf5edf948e093ce50bbea0e81ec
+Subject: Klawisz SAK (Secure Attention Key) został naciśnięty na stanowisku @SEAT_ID@
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd-logind.service(8)
+
+Klawisz SAK (Secure Attention Key), Ctrl+Alt+Shift+Esc, został naciśnięty
+na stanowisku @SEAT_ID@.
+
+Naciśnięcie klawisza SAK wskazuje na bezpośrednie żądanie użytkownika,
+aby system wyświetlił zabezpieczone okno lub ekran logowania.
 
 -- c7a787079b354eaaa9e77b371893cd27
 Subject: Zmiana czasu
@@ -165,7 +161,7 @@ uruchamiania.
 
 Uruchamianie jądra zajęło @KERNEL_USEC@ μs.
 
-Uruchamianie początkowego dysku RAM zajęło @INITRD_USEC@ μs.
+Uruchamianie initrd zajęło @INITRD_USEC@ μs.
 
 Uruchamianie przestrzeni użytkownika zajęło @USERSPACE_USEC@ μs.
 
@@ -201,62 +197,248 @@ Defined-By: systemd
 Support: %SUPPORT_URL%
 
 Zainicjowano wyłączenie systemu. Wyłączenie zostało rozpoczęte i wszystkie
-usługi systemowe zostały zakończone, a wszystkie systemy plików odmontowane.
+usługi systemowe zostaną zakończone, a wszystkie systemy plików odmontowane.
+
+-- c14aaf76ec284a5fa1f105f88dfb061c
+Subject: Zainicjowano przywrócenie danych fabrycznych systemu
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Zainicjowano przywrócenie danych fabrycznych systemu. Dokładne działanie,
+jakie zostanie wykonane jest określone przez implementację, ale zwykle
+powoduje przywrócenie stanu i konfiguracji systemu do domyślnych wartości
+producenta.
+
+-- d9ec5e95e4b646aaaea2fd05214edbda
+Subject: Proces init kontenera uległ awarii
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Proces init kontenera uległ awarii i zakończył działanie.
+Szczegółowe informacje o awarii można uzyskać z menedżera kontenerów.
+
+-- 3ed0163e868a4417ab8b9e210407a96c
+Subject: Ponowne uruchomienie komputera po awarii się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Ponowne uruchomienie się nie powiodło, kiedy systemd próbował
+ponownie uruchomić po awarii.
+
+-- 645c735537634ae0a32b15a7c6cba7d4
+Subject: Wykonanie procesu init zostało zawieszone
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Systemd zawiesił wykonanie po błędzie krytycznym.
+
+-- 5addb3a06a734d3396b794bf98fb2d01
+Subject: Proces init otrzymał sygnał krytyczny, kiedy zrzut core jest wyłączony
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Systemd otrzymał sygnał krytyczny, ale zrzucanie core jest wyłączone.
+
+-- 5c9e98de4ab94c6a9d04d0ad793bd903
+Subject: Proces init otrzymał sygnał krytyczny, ale rozdzielenie się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Systemd otrzymał sygnał krytyczny, ale rozdzielenie w celu zrzucenia core
+się nie powiodło.
+
+-- 5e6f1f5e4db64a0eaee3368249d20b94
+Subject: Proces init otrzymał sygnał krytyczny od nieznanego procesu nadawcy
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 83f84b35ee264f74a3896a9717af34cb
+Subject: Proces init otrzymał sygnał krytyczny od naszego własnego procesu
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 3a73a98baf5b4b199929e3226c0be783
+Subject: Proces init otrzymał sygnał krytyczny od innego procesu
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 2ed18d4f78ca47f0a9bc25271c26adb4
+Subject: Proces init otrzymał sygnał krytyczny, ale waitpid() się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Systemd otrzymał sygnał krytyczny, ale waitpid() się nie powiodło podczas
+próby zrzucenia core.
+
+-- 56b1cd96f24246c5b607666fda952356
+Subject: Proces init otrzymał sygnał krytyczny, ale zrzucenie core się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 4ac7566d4d7548f4981f629a28f0f829
+Subject: Proces init otrzymał sygnał krytyczny i zrzucono core
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 38e8b1e039ad469291b18b44c553a5b7
+Subject: Rozdzielenie powłoki awarii przez proces init się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Systemd uległ awarii, ale rozdzielenie powłoki awarii się nie powiodło.
+
+-- 872729b47dbe473eb768ccecd477beda
+Subject: Wykonanie powłoki awarii się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Systemd uległ awarii, ale wywołanie powłoki awarii się nie powiodło.
+
+-- 658a67adc1c940b3b3316e7e8628834a
+Subject: Wczytanie zasad SELinuksa przez menedżera się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- e6f456bd92004d9580160b2207555186
+Subject: Poziom naładowania akumulatora jest krytycznie niski, oczekiwanie na ładowarkę
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Poziom naładowania akumulatora jest krytycznie niski. Proszę podłączyć
+ładowarkę, albo komputer wyłączy się za 10 sekund.
+
+-- 267437d33fdd41099ad76221cc24a335
+Subject: Poziom naładowania akumulatora jest krytycznie niski, wyłączanie komputera
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 79e05b67bc4545d1922fe47107ee60c5
+Subject: Wykonanie głównej pętli przez menedżera się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- dbb136b10ef4457ba47a795d62f108c9
+Subject: Ustalenie ścieżki $XDG_RUNTIME_DIR przez menedżera użytkownika się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- ed158c2df8884fa584eead2d902c1032
+Subject: Obniżenie zestawu przypisanych możliwości procesów pomocniczych trybu użytkownika przez proces init się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 42695b500df048298bee37159caa9f2e
+Subject: Obniżenie zestawu przypisanych możliwości przez proces init się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- bfc2430724ab44499735b4f94cca9295
+Subject: Wyłączenie nowych uprawnień przez menedżera użytkownika się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 59288af523be43a28d494e41e26e4510
+Subject: Uruchomienie domyślnego celu przez menedżera się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 689b4fcc97b4486ea5da92db69c9e314
+Subject: Odcięcie domyślnego celu przez menedżera się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 5ed836f1766f4a8a9fc5da45aae23b29
+Subject: Zebranie przekazanych deskryptorów plików przez menedżera się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 6a40fbfbd2ba4b8db02fb40c9cd090d7
+Subject: Naprawa zmiennych środowiskowych przez proces init się nie powiodła
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- 0e54470984ac419689743d957a119e2e
+Subject: Przydzielenie obiektu menedżera się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- d67fa9f847aa4b048a2ae33535331adb
+Subject: Zapisanie listy „onlycap” dla Smack przez menedżera się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- af55a6f75b544431b72649f36ff6d62c
+Subject: Błąd krytyczny podczas wykonywania wyłączania komputera
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+-- d18e0339efb24a068d9c1060221048c2
+Subject: Rozdzielenie procesu pomocniczego Valgrind przez proces init się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
 
 -- 7d4958e842da4a758f6c1cdc7b36dcc5
-Subject: Rozpoczęto uruchamianie jednostki @UNIT@
+Subject: Rozpoczęto wykonywanie zadania uruchamiania dla jednostki @UNIT@
 Defined-By: systemd
 Support: %SUPPORT_URL%
 
-Jednostka @UNIT@ rozpoczęła uruchamianie.
+Rozpoczęto wykonywanie zadania uruchamiania dla jednostki @UNIT@.
+
+Identyfikator zadania: @JOB_ID@.
 
 -- 39f53479d3a045ac8e11786248231fbf
-Subject: Ukończono uruchamianie jednostki @UNIT@
+Subject: Pomyślnie ukończono zadanie uruchamiania dla jednostki @UNIT@
 Defined-By: systemd
 Support: %SUPPORT_URL%
 
-Jednostka @UNIT@ ukończyła uruchamianie.
+Pomyślnie ukończono zadanie uruchamiania dla jednostki @UNIT@.
 
-Wynik uruchamiania: @RESULT@.
-
--- de5b426a63be47a7b6ac3eaac82e2f6f
-Subject: Rozpoczęto wyłączanie jednostki @UNIT@
-Defined-By: systemd
-Support: %SUPPORT_URL%
-
-Jednostka @UNIT@ rozpoczęła wyłączanie.
-
--- 9d1aaa27d60140bd96365438aad20286
-Subject: Ukończono wyłączanie jednostki @UNIT@
-Defined-By: systemd
-Support: %SUPPORT_URL%
-
-Jednostka @UNIT@ ukończyła wyłączanie.
+Identyfikator zadania: @JOB_ID@.
 
 -- be02cf6855d2428ba40df7e9d022f03d
-Subject: Jednostka @UNIT@ się nie powiodła
+Subject: Zadanie uruchamiania dla jednostki @UNIT@ się nie powiodło
 Defined-By: systemd
 Support: %SUPPORT_URL%
 
-Jednostka @UNIT@ się nie powiodła.
+Zadanie uruchamiania dla jednostki @UNIT@ zostało ukończone z niepowodzeniem.
 
-Wynik: @RESULT@.
+Identyfikator zadania: @JOB_ID@, wynik zadania: @JOB_RESULT@.
+
+-- de5b426a63be47a7b6ac3eaac82e2f6f
+Subject: Rozpoczęto wykonywanie zadania zatrzymania dla jednostki @UNIT@
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Rozpoczęto wykonywanie zadania zatrzymania dla jednostki @UNIT@.
+
+Identyfikator zadania: @JOB_ID@.
+
+-- 9d1aaa27d60140bd96365438aad20286
+Subject: Ukończono zadanie zatrzymania dla jednostki @UNIT@
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Ukończono zadanie zatrzymania dla jednostki @UNIT@.
+
+Identyfikator zadania: @JOB_ID@, wynik zadania: @JOB_RESULT@.
 
 -- d34d037fff1847e6ae669a370e694725
-Subject: Rozpoczęto ponowne wczytywanie konfiguracji jednostki @UNIT@
+Subject: Rozpoczęto wykonywanie zadania ponownego wczytania dla jednostki @UNIT@
 Defined-By: systemd
 Support: %SUPPORT_URL%
 
-Jednostka @UNIT@ rozpoczęła ponowne wczytywanie swojej konfiguracji.
+Rozpoczęto wykonywanie zadania ponownego wczytania dla jednostki @UNIT@.
+
+Identyfikator zadania: @JOB_ID@.
 
 -- 7b05ebc668384222baa8881179cfda54
-Subject: Ukończono ponowne wczytywanie konfiguracji jednostki @UNIT@
+Subject: Ukończono zadanie ponownego wczytania dla jednostki @UNIT@
 Defined-By: systemd
 Support: %SUPPORT_URL%
 
-Jednostka @UNIT@ ukończyła ponowne wczytywanie swojej konfiguracji.
+Ukończono zadanie ponownego wczytania dla jednostki @UNIT@.
 
-Wynik: @RESULT@.
+Identyfikator zadania: @JOB_ID@, wynik zadania: @JOB_RESULT@.
 
 -- 641257651c1b4ec9a8624d7a40a9e1e7
 Subject: Nie można wykonać procesu @EXECUTABLE@
@@ -287,6 +469,19 @@ wpływa to na montowanie, ale wcześniej istniejące pliki w tym katalogu staj�
 się niedostępne. Aby zobaczyć te pliki, proszę ręcznie zamontować system
 plików w innym położeniu.
 
+-- 1edabb4eda2a49c19bc0206f24b43889
+Subject: Ścieżka do punktu montowania zawiera dowiązania symboliczne
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Ścieżka @WHERE@ została podana jako ścieżka do punktu montowania (drugie pole
+w pliku /etc/fstab lub pole Where= w pliku jednostki systemd) i nie jest
+kanoniczna, tzn. zawiera co najmniej jedno dowiązanie symboliczne jako element
+ścieżki. Zazwyczaj nie jest to obsługiwane, a takie próby montowania są
+odrzucane, ponieważ informacje tabeli montowania wystawiane przez jądro
+i żądana ścieżka odbiegłyby od siebie po postawieniu. Należy kanonizować
+ścieżki przed żądaniem postawienia punktu montowania.
+
 -- 24d8d4452573402496068381a6312df2
 Subject: Uruchomiono maszynę wirtualną lub kontener
 Defined-By: systemd
@@ -306,7 +501,8 @@ Maszyna wirtualna @NAME@ (PID prowadzący @LEADER@) została wyłączona.
 Subject: Wyłączono tryb DNSSEC, ponieważ serwer go nie obsługuje
 Defined-By: systemd
 Support: %SUPPORT_URL%
-Documentation: man:systemd-resolved.service(8) resolved.conf(5)
+Documentation: man:systemd-resolved.service(8)
+Documentation: man:resolved.conf(5)
 
 Usługa resolver (systemd-resolved.service) wykryła, że skonfigurowany serwer
 DNS nie obsługuje DNSSEC, w wyniku czego walidacja DNSSEC została wyłączona.
@@ -354,21 +550,449 @@ Support: %SUPPORT_URL%
 
 Jednostka @UNIT@ została ukończona, zużywając wskazane zasoby.
 
+-- 7ad2d189f7e94e70a38c781354912448
+Subject: Jednostka się powiodła
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Jednostka @UNIT@ pomyślnie przeszła do stanu „dead” (martwego).
+
+-- 0e4284a0caca4bfc81c0bb6786972673
+Subject: Pominięto jednostkę
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Jednostka @UNIT@ została pominięta z powodu niepowodzenia
+polecenia ExecCondition=, i przeszła do stanu „dead” (martwego)
+z wynikiem „@UNIT_RESULT@”.
+
+-- d9b373ed55a64feb8242e02dbe79a49c
+Subject: Jednostka się nie powiodła
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Jednostka @UNIT@ przeszła do stanu „failed” (niepowodzenia)
+z wynikiem „@UNIT_RESULT@”.
+
+-- 98e322203f7a4ed290d09fe03c09fe15
+Subject: Proces jednostki zakończył działanie
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Proces @COMMAND@= należący do jednostki @UNIT@ zakończył działanie.
+
+Kod wyjścia procesu: „@EXIT_CODE@”, jego stan wyjścia: @EXIT_STATUS@.
+
 -- 50876a9db00f4c40bde1a2ad381c3a1b
 Subject: System jest skonfigurowany w sposób, który może powodować problemy
 Defined-By: systemd
 Support: %SUPPORT_URL%
 
 Możliwe są następujące „etykiety”:
-• „split-usr” — /usr jest oddzielnym systemem plików, który nie był
-  zamontowany w czasie uruchomienia systemd,
-• „cgroups-missing” — jądro zostało skompilowane bez obsługi cgroups
-  lub dostęp do oczekiwanych plików interfejsu jest ograniczony,
-• „var-run-bad” — /var/run nie jest dowiązaniem symbolicznym do /run,
+• „unmerged-usr” — /bin, /sbin, /lib* nie są dowiązaniami symbolicznymi
+  do swoich odpowiedników pod /usr/,
+• „unmerged-bin” — /usr/sbin nie jest dowiązaniem symbolicznym do /usr/bin/,
+• „var-run-bad” — /var/run nie jest dowiązaniem symbolicznym do /run/,
+• „cgroupsv1” — system używa przestarzałej hierarchii cgroup v1,
+• „local-hwclock” — lokalny zegar sprzętowy (RTC) jest skonfigurowany
+  do działania w czasie lokalnym zamiast w uniwersalnym czasie
+  koordynowanym (UTC),
+• „support-ended” — system działa po końcu wsparcia zadeklarowanym
+  przez producenta,
+• „old-kernel” — system działa na wersji jądra starszej niż minimalna
+  obsługiwana przez tę wersję systemd,
 • „overflowuid-not-65534” — identyfikator użytkownika dla „nieznanych”
   użytkowników (przy wykorzystaniu przestrzeni nazw użytkowników lub NFS)
   nie wynosi 65534,
 • „overflowgid-not-65534” — identyfikator grupy dla „nieznanych”
   użytkowników (przy wykorzystaniu przestrzeni nazw użytkowników lub NFS)
-  nie wynosi 65534.
+  nie wynosi 65534,
+• „short-uid-range” — zakres UID przydzielony do działającego wystąpienia
+  systemd pokrywa mniej niż 0…65534,
+• „short-gid-range” — zakres GID przydzielony do działającego wystąpienia
+  systemd pokrywa mniej niż 0…65534.
+
 Obecny system ma etykietę „@TAINT@”.
+
+-- fe6faa94e7774663a0da52717891d8ef
+Subject: Proces jednostki @UNIT@ został zakończony przez OOM Killer
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Proces jednostki @UNIT został zakończony przez mechanizm kończenia
+procesów przy braku pamięci (OOM) jądra Linux. Zwykle wskazuje to,
+że system ma mało pamięci i należało ją zwolnić. Proces powiązany
+z jednostką @UNIT@ został uznany za najlepszy do zakończenia
+i jądro wymusiło zakończenie jego działania.
+
+Proszę zauważyć, że brak pamięci mógł nie zostać spowodowany
+przez jednostkę @UNIT@.
+
+-- b61fdac612e94b9182285b998843061f
+Subject: Przyjmowanie nazwy użytkownika/grupy @USER_GROUP_NAME@, która nie zgadza się ze ścisłymi regułami nazw użytkowników/grup.
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: https://systemd.io/USER_NAMES
+
+Podano nazwę użytkownika/grupy @USER_GROUP_NAME@, co zostało przyjęte
+zgodnie z rozluźnionymi regułami nazw użytkowników/grup, ale nie spełnia
+ścisłych reguł.
+
+Ścisłe reguły nazw użytkowników/grup zapisane jako wyrażenie regularne to:
+
+^[a-zA-Z_][a-zA-Z0-9_-]{0,30}$
+
+Rozluźnione reguły nazw użytkowników/grup przyjmują wszystkie nazwy,
+oprócz pustego ciągu, nazw zawierających bajty NUL, znaki kontrolne,
+dwukropki lub ukośniki, nazw niebędących prawidłowym tekstem UTF-8,
+nazw z początkową lub końcową spacją, ciągów „.” lub „..”, ciągów
+zawierających tylko cyfry lub ciągów zaczynających się myślnikiem
+i zawierających oprócz niego tylko cyfry.
+
+-- 1b3bb94037f04bbf81028e135a12d293
+Subject: Utworzenie prawidłowej nazwy jednostki ze ścieżki „@MOUNT_POINT@” się nie powiodło.
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Następująca ścieżka do punktu montowania nie może zostać przekonwertowana
+na prawidłową nazwę jednostki .mount:
+
+    @MOUNT_POINT@
+
+Zwykle oznacza to, że ścieżka do punktu montowania jest dłuższa niż dozwolona
+dla prawidłowych nazw jednostek.
+
+systemd dynamicznie syntetyzuje jednostki .mount dla wszystkich punktów
+montowania pojawiających się na komputerze. Stosowany do tego jest prosty
+algorytm: używana jest bezwzględna nazwa ścieżki ze wszystkimi znakami „/”
+zastąpionymi znakami „-” (początkowy jest usuwany). Co więcej, wszystkie
+niealfanumeryczne znaki (a także „:”, „-”, „_”, „.”, „\”) są zastępowane
+„\xNN”, gdzie „NN” jest szesnastkowym kodem znaki. Na końcu dołączany jest
+przyrostek „.mount”. Wynikowy ciąg musi mieć poniżej 256 znaków długości,
+aby był prawidłową nazwą jednostki. To ograniczenie obowiązuje, aby wszystkie
+nazwy jednostek mogły być używane także jako nazwy plików. Jeśli punkt
+montowania — po zastosowaniu algorytmu — jest dłuższy niż to ograniczenie,
+to nie może zostać zmapowany do jednostki. W takim przypadku systemd nie
+zsyntetyzuje jednostki i nie może być używany do zarządzania punktem
+montowania. Nie pojawi się w tabeli jednostek menedżera usług, przez co
+nie zostanie także bezpiecznie i automatycznie zdjęty podczas wyłączania
+komputera.
+
+Zasadniczo zalecane jest unikanie takich za długich ścieżek do punktów
+montowania, a jeśli są używane mimo to, zarządzanie nimi niezależnie
+od systemd, tzn. stawianie ich i automatyczne zdejmowanie podczas
+wyłączania komputera przez inne oprogramowanie.
+
+-- b480325f9c394a7b802c231e51a2752c
+Subject: Skonfigurowany jest szczególny użytkownik @OFFENDING_USER@, jest to niebezpieczne!
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: https://systemd.io/UIDS-GIDS
+
+Jednostka @UNIT@ jest skonfigurowana do używania User=@OFFENDING_USER@.
+
+Nie jest to bezpieczne. Głównym zastosowaniem użytkownika @OFFENDING_USER@
+w linuksowych systemach operacyjnych jest bycie właścicielem plików, których
+nie można w inny sposób zmapować do żadnego lokalnego użytkownika. Jest
+używany między innymi przez klienta NFS i przestrzenie nazw użytkowników
+Linuksa. Wykonywanie procesów jednostki pod tożsamością tego użytkownika
+może spowodować, że będą one miały dostęp do odczytu, a może nawet do zapisu,
+plików, których nie można zmapować w inny sposób.
+
+Mocno zalecane jest unikanie wykonywania usług pod tą tożsamością użytkownika,
+zwłaszcza na komputerach używających NFS lub mających kontenery. Należy
+przydzielić identyfikator użytkownika dla tej konkretnej usługi, statycznie
+przez systemd-sysusers lub dynamicznie przez ustawienie usługi DynamicUser=.
+
+-- 1c0454c1bd2241e0ac6fefb4bc631433
+Subject: Usługa systemd-udev-settle.service jest przestarzała.
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Użycie jednostki usługi systemd „systemd-udev-settle.service” jest
+przestarzałe. Wstawia ona sztuczne opóźnienie do procesu uruchamiania
+bez dostarczania gwarancji, które były oczekiwane przez pozostałe
+podsystemy. Korzystanie z tej usługi może prowadzić do hazardów,
+i zasadniczo jest błędem.
+
+W przeszłości zadaniem tej usługi było oczekiwanie, aż wszystkie urządzenia
+komputera zostaną w pełni wykryte i zainicjowane, opóźniając uruchamianie
+do ukończenia tego etapu. Jednakże, współczesne komputery i urządzenia
+na ogół nie działają już w ten sposób, tylko mogą pojawić się w dowolnej
+chwili i zająć dowolny czas na wykrycie i inicjację. Z tego powodu,
+w ogólnym przypadku, nie jest już możliwe poprawne opóźnienie uruchamiania
+do przetworzenia „wszystkich urządzeń”, ponieważ nie jest jasne, co znaczy
+„wszystkie urządzenia” i kiedy zostały odnalezione. Dotyczy to zwłaszcza
+urządzeń podłączonych przez USB lub sieć.
+
+Nowoczesne oprogramowanie wymagające określonego sprzętu (takiego jak
+urządzenie sieciowe lub urządzenie blokowe) do działania powinno oczekiwać
+tylko na pojawienie się danego urządzenia, a w przeciwnym razie działać
+asynchronicznie, inicjując urządzenia, kiedy te pojawiają się w trakcie
+uruchamiania i w trakcie działania systemu bez opóźniania procesu uruchamiania.
+
+Jest to wada danego oprogramowania, jeśli nie działa ono w ten sposób
+i nadal wciąga usługę systemd-udev-settle.service do procesu uruchamiania.
+
+Prosimy zgłosić błąd w następujących jednostkach z prośbą
+o ich aktualizację tak, aby działały w sposób dynamiczny
+bez zależności od usługi systemd-udev-settle.service:
+
+    @OFFENDING_UNITS@
+
+-- 7c8a41f37b764941a0e1780b1be2f037
+Subject: Początkowa synchronizacja zegara
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Po raz pierwszy podczas obecnego uruchomienia uzyskano synchronizację NTP
+i zainicjowano regulację lokalnego zegara systemowego.
+
+-- 3f7d5ef3e54f4302b4f0b143bb270cab
+Subject: Rozszerzono PCR układu TPM
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Rejestr konfiguracji platformy (PCR) @PCR@ układu TPM, w rzędach @BANKS@,
+został rozszerzony ciągiem „@MEASURING@”.
+
+Kiedy system przechodzi do nowego etapu uruchamiania, podany PCR jest
+rozszerzany innym ciągiem, aby zapewnić, że zasady zabezpieczeń dla haseł
+związanych z TPM i innych zasobów są ograniczone do konkretnych etapów
+uruchamiania.
+
+-- f9b0be465ad540d0850ad32172d57c21
+Subject: Obniżono zużycie pamięci
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Obniżono zużycie pamięci procesu @_PID@ (@_COMM@).
+
+Na żądanie użytkownika lub w wyniku zdarzenia braku pamięci obniżono zużycie
+pamięci procesu, zwracając niepotrzebne bufory przydziału i inne zasoby
+z powrotem do jądra systemu operacyjnego, udostępniając je innym częściom
+systemu.
+
+Zwrócono @TRIMMED_BYTES@ pamięci do systemu operacyjnego, co zajęło @TRIMMED_USEC@ μs.
+
+-- a8fa8dacdb1d443e9503b8be367a6adb
+Subject: Znaleziono usługę SysV
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Na komputerze odnaleziono skrypt usługi System V @SYSVSCRIPT@, który nie ma
+natywnej jednostki systemd. Utworzono automatyczny plik jednostki @UNIT@,
+aby zapewnić zgodność.
+
+Proszę zauważyć, że tego rodzaju automatycznie tworzone pliki jednostek
+nie mogą zastąpić natywnych plików jednostek, jako że zazwyczaj spowalniają
+one komputer (przez tworzenie niepotrzebnych, dodatkowych punktów
+synchronizacji), są mniej solidne (jako że nie można właściwie zarządzać
+usługami SysV ani ich automatycznie uruchamiać ponownie) oraz mniej
+bezpieczne (jako że nie można wymuszać żadnych ograniczeń piaskownicy).
+
+Obsługa zgodności z usługami System V w systemd jest oznaczona jako
+przestarzała. Proszę się upewnić, że zaktualizowano wymieniony pakiet,
+aby zapewnić właściwe, natywne pliki jednostek systemd. W razie potrzeby
+należy skontaktować się z producentem pakietu. Obsługa zgodności z usługami
+System V jest oznaczona jako przestarzała i niedługo zostanie usunięta.
+
+-- 187c62eb1e7f463bb530394f52cb090f
+Subject: Dołączono usługę przenośną
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: https://systemd.io/PORTABLE_SERVICES/
+
+Do systemu dołączono nową usługę przenośną @PORTABLE_ROOT@ (z rozszerzeniami:
+@PORTABLE_EXTENSION@) i jest teraz dostępna do użytku. Polecenie
+„portablectl list” wyświetli listę dołączonych usług przenośnych.
+
+-- 76c5c754d628490d8ecba4c9d042112b
+Subject: Odłączono usługę przenośną
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: https://systemd.io/PORTABLE_SERVICES/
+
+Z systemu odłączono usługę przenośną @PORTABLE_ROOT@ (z rozszerzeniami:
+@PORTABLE_EXTENSION@) i nie jest już dostępna do użytku. Polecenie
+„portablectl list” wyświetli listę dołączonych usług przenośnych.
+
+-- ad7089f928ac4f7ea00c07457d47ba8a
+Subject: Niepowodzenie upoważnienia podczas próby zapisania klucza SRK w układzie TPM
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd-tpm2-setup.service(8)
+
+Wystąpiło niepowodzenie upoważnienia podczas próby zapisania klucza
+SRK (Storage Root Key) na układzie TPM (Trusted Platform Module).
+Najprawdopodobniej oznacza to, że kod PIN/hasło (authValue) zostało
+ustawione na hierarchii właściciela (Owner) układu TPM.
+
+Automatyczny zapis klucza SRK na układach TPM w takich przypadkach
+nie jest obsługiwany. Aby usunąć ustawienie ochrony kodem PIN/hasłem
+na hierarchii właściciela, należy wykonać to polecenie:
+„tpm2_changeauth -c o -p <POPRZEDNIE-HASŁO> ""”.
+
+-- 9cf56b8baf9546cf9478783a8de42113
+Subject: Obcy proces zmienił sysctl zarządzane przez systemd-networkd
+Defined-By: systemd
+Support: %SUPPORT_URL%
+
+Ustawienie konfiguracji sysctl @SYSCTL@, które jest zarządzane przez
+systemd-networkd, zostało zmienione przez inny, niepowiązany proces
+(„@OBJECT_COMM@”, PID @OBJECT_PID@). To tworzy konflikt właścicielstwa,
+co prawdopodobnie spowoduje problemy w późniejszym czasie.
+
+Wartość zmieniła się na „@NEWVALUE@”, a powinna wynosić „@OURVALUE@”.
+
+-- 438188861e0b427a9d638a90487a0ca6
+Subject: Zażądano wyczyszczenia układu TPM
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd-tpm2-clear.service(8)
+
+Żądanie wyczyszczenia układu bezpieczeństwa TPM zostało wydane oprogramowaniu
+sprzętowemu. Jest to zazwyczaj wykonywane jako część pełnego przywrócenia
+danych fabrycznych i zapewnia, że podczas następnego uruchomienia
+oprogramowanie sprzętowe przywróci układ TPM po interaktywnej prośbie
+o potwierdzenie przez użytkownika.
+
+Wyczyszczenie układu TPM powoduje unieważnienie wszystkich kluczy
+zablokowanych na układzie TPM, w tym kluczy szyfrowania całego dysku.
+Z tego powodu należy zadbać, aby dostęp do właściwych zasobów został
+zachowany w inny sposób.
+
+-- 1f4e0a44a88649939aaea34fc6da8c95
+Subject: Proces @COREDUMP_PID@ (@COREDUMP_COMM@) nieprawidłowo zakończył działanie
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd-coredump(8)
+
+Proces @COREDUMP_PID@ (@COREDUMP_COMM@) nieprawidłowo zakończył działanie
+i utworzył ślad stosu.
+
+Zwykle wskazuje to na błąd programistyczny w danym programie i powinno zostać
+zgłoszone jego producentowi jako błąd. Dostępny jest ślad stosu programu,
+który wskazuje, gdzie wystąpił błąd, co może być przydatne do ustalenia
+szczegółów problemu.
+
+-- d989611b15e44c9dbf31e3c81256e4ed
+Subject: Usługa systemd-oomd zakończyła co najmniej jeden proces w jednostce @UNIT@
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd-oomd.service(8)
+
+Co najmniej jeden proces w jednostce @UNIT@ został zakończony przez usługę
+systemd-oomd w celu przeciwdziałania sytuacji braku pamięci w systemie. Zwykle
+wskazuje to, że system ma mało pamięci i usługa systemd-oomd zdecydowała się
+zakończyć co najmniej jeden proces, aby zmniejszyć brak pamięci.
+
+Proszę zauważyć, że brak pamięci mógł nie zostać spowodowany
+przez jednostkę @UNIT@.
+
+-- 010190138f494e29a0ef6669749531aa
+Subject: Dla urządzenia @DEVICE@ nie można utworzyć prawidłowej nazwy jednostki
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd(1)
+
+Wykryto urządzenie jądra @DEVICE@, którego identyfikacji nie można zamienić
+na prawidłową nazwę jednostki systemd. Zwykle wskazuje to na problematyczną
+hierarchię urządzeń (tzn. za dużo poziomów zagnieżdżenia magistrali) lub
+problematyczne sterowniki.
+
+Dla takich urządzeń nie zostaną utworzone jednostki .device korzystające ze
+stanu urządzenia jądra, więc nie można wypełnić zależności na takiej jednostce.
+
+-- 7db73c8af0d94eeb822ae04323fe6ab6
+Subject: Zegar systemowy został zmieniony
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd(1) man:systemd-timesyncd.service(8)
+
+Zegar systemowy został przesunięty @DIRECTION@, nowy czas wynosi
+@REALTIME_USEC@ ms po epoce.
+
+Zazwyczaj powinno to się stać tylko po znaczącej błędnej konfiguracji zegara
+systemowego lub jeśli komputer nie ma zegara sprzętowego buforowanego
+akumulatorem (albo akumulator się wyczerpał).
+
+-- 8739789eca064325af15a8ed0ecfc556
+Subject: Wysłanie komunikatu „keep-alive” do sprzętowego urządzenia watchdog się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd(1)
+
+Wystąpił błąd podczas wysyłania komunikatu „keep-alive” do sprzętowego
+urządzenia watchdog @WATCHDOG_DEVICE@. Zwykle wskazuje to na problemy
+ze sterownikiem lub sprzętem.
+
+Regularne niepowodzenia wysłania komunikatów „keep-alive” do sprzętowego
+urządzenia watchdog może powodować automatyczne ponowne uruchamianie komputera.
+
+-- 375ac151ef9d4de39068b3efbfed0cee
+Subject: Otwarcie skonfigurowanego urządzenia watchdog się nie powiodło
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd(1)
+
+Wystąpił błąd podczas otwierania sprzętowego urządzenia watchdog
+@WATCHDOG_DEVICE@. Zwykle wskazuje to na nieprawidłową konfigurację
+(tzn. konfiguracja nie pasuje do lokalnego systemu) lub problemy
+ze sterownikiem albo sprzętem.
+
+Jeśli obsługa urządzenia watchdog jest skonfigurowana, ale nie można otworzyć
+sprzętowego urządzenia watchdog, to system nie będzie chroniony przez logikę
+urządzenia watchdog.
+
+-- f27a3f94406a4783b946a9bc849e9452
+Subject: Znaleziono cykliczną kolejność jednostek
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd(1)
+
+Zainicjowano transakcję jednostki zawierającą cykliczną kolejność, tzn.
+zażądano uruchomienie jakiejś jednostki (bezpośrednio lub niebezpośrednio przez
+zależność wymagania, taką jak Wants= lub Requires=) w kolejności przed jakąś
+inną jednostką, ale ta druga jednostka jest także w kolejności przed pierwszą
+przez jakąś zależność (bezpośrednio lub niebezpośrednio).
+
+Cykliczna kolejność składa się z co najmniej dwóch jednostek, ale może
+dotyczyć wielu więcej. Zwykle wskazuje to na błąd w definicjach jednostek,
+jako że w teorii jednostka nie może być wykonywana zarówno przed, jak i po
+jakiejś innej jednostce, tylko musi być ściśle w kolejności przed lub po.
+
+Cykliczna kolejność jest widoczna w komunikacie dziennika. Zostanie wykonana
+próba usunięcia zadania jednostki z transakcji, aby transakcja powiodła się
+chociaż częściowo. Proszę zauważyć, że tego rodzaju przerwanie cykliczności
+nie naprawi problemu, a tylko spróbuje zmniejszyć problematyczność wyniku.
+
+Prawdziwa poprawka wiąże się z analizą cykliczności i przerwaniem jej we
+właściwym miejscu przez usunięcie właściwych wierszy After= lub Before=
+z co najmniej jednego pliku jednostki, którego to dotyczy.
+
+-- 5084367542f7472dbc6a94125d5debce
+Subject: Usunięto zadanie jednostki z powodu cyklicznej kolejności
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd(1)
+
+Zadanie zostało usunięte z transakcji w celu częściowego rozwiązania
+cyklicznej kolejności między dodanymi do niej jednostkami.
+
+Usunięte zadanie to „@DELETED_TYPE@”dla jednostki @DELETED_UNIT@.
+
+Usunięcie zadania jest wykonywane w celu zminimalizowania negatywnych skutków
+cyklicznej kolejności — nie spowoduje naprawienia zasadniczego problemu, jakim
+jest błąd w plikach jednostek. Usunięte zadanie może być niezbędne do działania
+pozostałych jednostek w transakcji, która może z tego powodu się nie powieść.
+
+-- b3112ddad19045538c76685ba5918a80
+Subject: Nie można przerwać cyklicznej kolejności między jednostkami
+Defined-By: systemd
+Support: %SUPPORT_URL%
+Documentation: man:systemd(1)
+
+Nastąpiła próba przerwania cyklicznej kolejności między jednostkami, dla
+których zadania zostały zakolejkowane jako część transakcji, ale się nie
+powiodła. Transakcja się nie powiedzie.

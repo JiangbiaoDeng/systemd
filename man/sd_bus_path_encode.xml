@@ -1,42 +1,13 @@
-<?xml version='1.0'?> <!--*- Mode: nxml; nxml-child-indent: 2; indent-tabs-mode: nil -*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-"http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<?xml version='1.0'?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
-  This file is part of systemd.
-
-  Copyright 2014 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
--->
-
-<refentry id="sd_bus_path_encode">
+<refentry id="sd_bus_path_encode" xmlns:xi="http://www.w3.org/2001/XInclude">
 
   <refentryinfo>
     <title>sd_bus_path_encode</title>
     <productname>systemd</productname>
-
-    <authorgroup>
-      <author>
-        <contrib>A monkey with a typewriter</contrib>
-        <firstname>Zbigniew</firstname>
-        <surname>Jędrzejewski-Szmek</surname>
-        <email>zbyszek@in.waw.pl</email>
-      </author>
-    </authorgroup>
   </refentryinfo>
 
   <refmeta>
@@ -106,7 +77,7 @@
     always be <constant>NUL</constant>-terminated. The returned string
     will be the concatenation of the bus path prefix plus an escaped
     version of the external identifier string. This operation may be
-    reversed with <function>sd_bus_decode()</function>. It is
+    reversed with <function>sd_bus_path_decode()</function>. It is
     recommended to only use external identifiers that generally
     require little escaping to be turned into valid bus path
     identifiers (for example, by sticking to a 7-bit ASCII character
@@ -147,7 +118,7 @@
     will be stored there. Each <literal>%</literal> character will
     only match the current label. It will never match across labels.
     Furthermore, only a single directive is allowed per label.
-    If <literal>NULL</literal> is passed as output storage, the
+    If <constant>NULL</constant> is passed as output storage, the
     label is verified but not returned to the caller.</para>
   </refsect1>
 
@@ -159,7 +130,7 @@
     argument. On success, <function>sd_bus_path_decode()</function>
     returns a positive value if the prefixed matched, or 0 if it
     did not. If the prefix matched, the external identifier is returned
-    in the return parameter. If it did not match, NULL is returned in
+    in the return parameter. If it did not match, <constant>NULL</constant> is returned in
     the return parameter. On failure, a negative errno-style error
     number is returned by either function. The returned strings must
     be
@@ -167,24 +138,24 @@
     by the caller.</para>
   </refsect1>
 
-  <refsect1>
-    <title>Notes</title>
+  <xi:include href="libsystemd-pkgconfig.xml" />
 
+  <refsect1>
+    <title>History</title>
     <para><function>sd_bus_path_encode()</function> and
-    <function>sd_bus_path_decode()</function> are available as a
-    shared library, which can be compiled and linked to with the
-    <constant>libsystemd</constant> <citerefentry project='die-net'><refentrytitle>pkg-config</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-    file.</para>
+    <function>sd_bus_path_decode()</function> were added in version 211.</para>
+    <para><function>sd_bus_path_encode_many()</function> and
+    <function>sd_bus_path_decode_many()</function> were added in version 227.</para>
   </refsect1>
 
   <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry project='man-pages'><refentrytitle>free</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry project='man-pages'><refentrytitle>free</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

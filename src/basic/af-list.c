@@ -1,43 +1,39 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <string.h>
 #include <sys/socket.h>
 
 #include "af-list.h"
-#include "macro.h"
+#include "string-util.h"
 
 static const struct af_name* lookup_af(register const char *str, register GPERF_LEN_TYPE len);
 
-#include "af-from-name.h"
-#include "af-to-name.h"
+#include "af-from-name.inc"
+#include "af-to-name.inc"
 
-const char *af_to_name(int id) {
+const char* af_to_name(int id) {
 
         if (id <= 0)
                 return NULL;
 
-        if (id >= (int) ELEMENTSOF(af_names))
+        if ((size_t) id >= ELEMENTSOF(af_names))
                 return NULL;
 
         return af_names[id];
+}
+
+const char* af_to_name_short(int id) {
+        const char *f;
+
+        if (id == AF_UNSPEC)
+                return "*";
+
+        f = af_to_name(id);
+        if (!f)
+                return "unknown";
+
+        assert(startswith(f, "AF_"));
+        return f + 3;
 }
 
 int af_from_name(const char *name) {
@@ -47,11 +43,23 @@ int af_from_name(const char *name) {
 
         sc = lookup_af(name, strlen(name));
         if (!sc)
-                return AF_UNSPEC;
+                return -EINVAL;
 
         return sc->id;
 }
 
 int af_max(void) {
         return ELEMENTSOF(af_names);
+}
+
+const char* af_to_ipv4_ipv6(int id) {
+        /* Pretty often we want to map the address family to the typically used protocol name for IPv4 +
+         * IPv6. Let's add special helpers for that. */
+        return id == AF_INET ? "ipv4" :
+                id == AF_INET6 ? "ipv6" : NULL;
+}
+
+int af_from_ipv4_ipv6(const char *af) {
+        return streq_ptr(af, "ipv4") ? AF_INET :
+                streq_ptr(af, "ipv6") ? AF_INET6 : AF_UNSPEC;
 }

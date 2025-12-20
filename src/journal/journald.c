@@ -1,130 +1,142 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2011 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#include <sys/stat.h>
 #include <unistd.h>
 
-#include "sd-daemon.h"
+#include "sd-event.h"
 #include "sd-messages.h"
 
 #include "format-util.h"
 #include "journal-authenticate.h"
 #include "journald-kmsg.h"
-#include "journald-server.h"
+#include "journald-manager.h"
 #include "journald-syslog.h"
+#include "log.h"
+#include "main-func.h"
 #include "process-util.h"
 #include "sigbus.h"
+#include "string-util.h"
+#include "terminal-util.h"
+#include "time-util.h"
 
-int main(int argc, char *argv[]) {
-        Server server;
+static int run(int argc, char *argv[]) {
+        _cleanup_(manager_freep) Manager *m = NULL;
+        const char *namespace;
+        LogTarget log_target;
         int r;
 
-        if (argc > 1) {
-                log_error("This program does not take arguments.");
-                return EXIT_FAILURE;
-        }
+        if (argc > 2)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "This program takes one or no arguments.");
 
-        log_set_prohibit_ipc(true);
-        log_set_target(LOG_TARGET_AUTO);
+        namespace = argc > 1 ? empty_to_null(argv[1]) : NULL;
+
         log_set_facility(LOG_SYSLOG);
-        log_parse_environment();
-        log_open();
+
+        if (namespace)
+                /* If we run for a log namespace, then we ourselves can log to the main journald. */
+                log_setup();
+        else {
+                /* So here's the deal if we run as the main journald: we can't be considered as regular
+                 * daemon when it comes to logging hence LOG_TARGET_AUTO won't do the right thing for
+                 * us. Hence explicitly log to the console if we're started from a console or to kmsg
+                 * otherwise. */
+                log_target = isatty_safe(STDERR_FILENO) ? LOG_TARGET_CONSOLE : LOG_TARGET_KMSG;
+
+                log_set_prohibit_ipc(true); /* better safe than sorry */
+                log_set_target(log_target);
+                log_parse_environment();
+                log_open();
+        }
 
         umask(0022);
 
         sigbus_install();
 
-        r = server_init(&server);
+        r = manager_new(&m);
         if (r < 0)
-                goto finish;
+                return log_oom();
 
-        server_vacuum(&server, false);
-        server_flush_to_var(&server, true);
-        server_flush_dev_kmsg(&server);
+        r = manager_set_namespace(m, namespace);
+        if (r < 0)
+                return r;
 
-        log_debug("systemd-journald running as pid "PID_FMT, getpid_cached());
-        server_driver_message(&server, 0,
-                              "MESSAGE_ID=" SD_MESSAGE_JOURNAL_START_STR,
-                              LOG_MESSAGE("Journal started"),
-                              NULL);
+        manager_load_config(m);
+
+        r = manager_init(m);
+        if (r < 0)
+                return r;
+
+        manager_vacuum(m, /* verbose= */ false);
+        manager_flush_to_var(m, /* require_flag_file= */ true);
+        manager_flush_dev_kmsg(m);
+
+        if (m->namespace)
+                log_debug("systemd-journald running as PID "PID_FMT" for namespace '%s'.", getpid_cached(), m->namespace);
+        else
+                log_debug("systemd-journald running as PID "PID_FMT" for the system.", getpid_cached());
+
+        manager_driver_message(m, 0,
+                               LOG_MESSAGE_ID(SD_MESSAGE_JOURNAL_START_STR),
+                               LOG_MESSAGE("Journal started"));
 
         /* Make sure to send the usage message *after* flushing the
          * journal so entries from the runtime journals are ordered
          * before this message. See #4190 for some details. */
-        server_space_usage_message(&server, NULL);
+        manager_space_usage_message(m, NULL);
 
         for (;;) {
-                usec_t t = USEC_INFINITY, n;
+                usec_t t, n;
 
-                r = sd_event_get_state(server.event);
+                r = sd_event_get_state(m->event);
                 if (r < 0)
-                        goto finish;
+                        return log_error_errno(r, "Failed to get event loop state: %m");
                 if (r == SD_EVENT_FINISHED)
                         break;
 
-                n = now(CLOCK_REALTIME);
+                r = sd_event_now(m->event, CLOCK_REALTIME, &n);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to get the current time: %m");
 
-                if (server.max_retention_usec > 0 && server.oldest_file_usec > 0) {
+                if (m->config.max_retention_usec > 0 && m->oldest_file_usec > 0) {
+                        /* Calculate when to rotate the next time */
+                        t = usec_sub_unsigned(usec_add(m->oldest_file_usec, m->config.max_retention_usec), n);
 
                         /* The retention time is reached, so let's vacuum! */
-                        if (server.oldest_file_usec + server.max_retention_usec < n) {
-                                log_info("Retention time reached.");
-                                server_rotate(&server);
-                                server_vacuum(&server, false);
+                        if (t <= 0) {
+                                log_info("Retention time reached, vacuuming.");
+                                manager_vacuum(m, /* verbose= */ false);
                                 continue;
                         }
-
-                        /* Calculate when to rotate the next time */
-                        t = server.oldest_file_usec + server.max_retention_usec - n;
-                }
+                } else
+                        t = USEC_INFINITY;
 
 #if HAVE_GCRYPT
-                if (server.system_journal) {
+                if (m->system_journal) {
                         usec_t u;
 
-                        if (journal_file_next_evolve_usec(server.system_journal, &u)) {
-                                if (n >= u)
-                                        t = 0;
-                                else
-                                        t = MIN(t, u - n);
-                        }
+                        if (journal_file_next_evolve_usec(m->system_journal, &u))
+                                t = MIN(t, usec_sub_unsigned(u, n));
                 }
 #endif
 
-                r = sd_event_run(server.event, t);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to run event loop: %m");
-                        goto finish;
-                }
+                r = sd_event_run(m->event, t);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to run event loop: %m");
 
-                server_maybe_append_tags(&server);
-                server_maybe_warn_forward_syslog_missed(&server);
+                manager_maybe_append_tags(m);
+                manager_maybe_warn_forward_syslog_missed(m);
         }
 
-        log_debug("systemd-journald stopped as pid "PID_FMT, getpid_cached());
-        server_driver_message(&server, 0,
-                              "MESSAGE_ID=" SD_MESSAGE_JOURNAL_STOP_STR,
-                              LOG_MESSAGE("Journal stopped"),
-                              NULL);
+        if (m->namespace)
+                log_debug("systemd-journald stopped as PID "PID_FMT" for namespace '%s'.", getpid_cached(), m->namespace);
+        else
+                log_debug("systemd-journald stopped as PID "PID_FMT" for the system.", getpid_cached());
 
-finish:
-        server_done(&server);
+        manager_driver_message(m, 0,
+                               LOG_MESSAGE_ID(SD_MESSAGE_JOURNAL_STOP_STR),
+                               LOG_MESSAGE("Journal stopped"));
 
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

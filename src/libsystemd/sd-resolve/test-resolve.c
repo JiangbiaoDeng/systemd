@@ -1,38 +1,18 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2005-2008 Lennart Poettering
-  Copyright 2014 Daniel Buch
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <arpa/inet.h>
-#include <errno.h>
+#include <netdb.h>
 #include <netinet/in.h>
-#include <resolv.h>
 #include <stdio.h>
-#include <string.h>
-#include <sys/socket.h>
+#include <stdlib.h>
 
 #include "sd-resolve.h"
 
 #include "alloc-util.h"
-#include "macro.h"
 #include "socket-util.h"
 #include "string-util.h"
+#include "tests.h"
+#include "time-util.h"
 
 #define TEST_TIMEOUT_USEC (20*USEC_PER_SEC)
 
@@ -73,18 +53,20 @@ static int getnameinfo_handler(sd_resolve_query *q, int ret, const char *host, c
 int main(int argc, char *argv[]) {
         _cleanup_(sd_resolve_query_unrefp) sd_resolve_query *q1 = NULL, *q2 = NULL;
         _cleanup_(sd_resolve_unrefp) sd_resolve *resolve = NULL;
-        int r = 0;
+        int r;
 
         struct addrinfo hints = {
-                .ai_family = PF_UNSPEC,
+                .ai_family = AF_UNSPEC,
                 .ai_socktype = SOCK_STREAM,
-                .ai_flags = AI_CANONNAME
+                .ai_flags = AI_CANONNAME,
         };
 
-        struct sockaddr_in sa = {
-                .sin_family = AF_INET,
-                .sin_port = htons(80)
+        union sockaddr_union sa = {
+                .in.sin_family = AF_INET,
+                .in.sin_port = htobe16(80),
         };
+
+        test_setup_logging(LOG_DEBUG);
 
         assert_se(sd_resolve_default(&resolve) >= 0);
 
@@ -99,8 +81,8 @@ int main(int argc, char *argv[]) {
                 log_error_errno(r, "sd_resolve_getaddrinfo(): %m");
 
         /* Make an address -> name query */
-        sa.sin_addr.s_addr = inet_addr(argc >= 3 ? argv[2] : "193.99.144.71");
-        r = sd_resolve_getnameinfo(resolve, &q2, (struct sockaddr*) &sa, sizeof(sa), 0, SD_RESOLVE_GET_BOTH, getnameinfo_handler, NULL);
+        sa.in.sin_addr.s_addr = inet_addr(argc >= 3 ? argv[2] : "193.99.144.71");
+        r = sd_resolve_getnameinfo(resolve, &q2, &sa.sa, sockaddr_len(&sa), 0, SD_RESOLVE_GET_BOTH, getnameinfo_handler, NULL);
         if (r < 0)
                 log_error_errno(r, "sd_resolve_getnameinfo(): %m");
 
@@ -110,17 +92,16 @@ int main(int argc, char *argv[]) {
                 if (r == 0)
                         break;
                 if (r == -ETIMEDOUT) {
-                        /* Let's catch time-outs here, so that we can run safely in a CI that has no reliable DNS. Note
+                        /* Let's catch timeouts here, so that we can run safely in a CI that has no reliable DNS. Note
                          * that we invoke exit() directly here, as the stuck NSS call will not allow us to exit
                          * cleanly. */
 
                         log_notice_errno(r, "sd_resolve_wait() timed out, but that's OK");
                         exit(EXIT_SUCCESS);
-                        break;
                 }
                 if (r < 0) {
                         log_error_errno(r, "sd_resolve_wait(): %m");
-                        assert_not_reached("sd_resolve_wait() failed");
+                        assert_not_reached();
                 }
         }
 

@@ -1,26 +1,45 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "in-addr-util.h"
+#include "resolved-forward.h"
 
-  Copyright 2016 Lennart Poettering
+typedef enum DnsStubListenerMode {
+        DNS_STUB_LISTENER_NO,
+        DNS_STUB_LISTENER_UDP = 1 << 0,
+        DNS_STUB_LISTENER_TCP = 1 << 1,
+        DNS_STUB_LISTENER_YES = DNS_STUB_LISTENER_UDP | DNS_STUB_LISTENER_TCP,
+        _DNS_STUB_LISTENER_MODE_MAX,
+        _DNS_STUB_LISTENER_MODE_INVALID = -EINVAL,
+} DnsStubListenerMode;
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+typedef struct DnsStubListenerExtra {
+        Manager *manager;
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
+        DnsStubListenerMode mode;
 
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+        int family;
+        union in_addr_union address;
+        uint16_t port;
 
-#include "resolved-manager.h"
+        sd_event_source *udp_event_source;
+        sd_event_source *tcp_event_source;
+
+        Hashmap *queries_by_packet;
+} DnsStubListenerExtra;
+
+extern const struct hash_ops dns_stub_listener_extra_hash_ops;
+
+int dns_stub_listener_extra_new(Manager *m, DnsStubListenerExtra **ret);
+DnsStubListenerExtra *dns_stub_listener_extra_free(DnsStubListenerExtra *p);
+static inline uint16_t dns_stub_listener_extra_port(DnsStubListenerExtra *p) {
+        assert(p);
+
+        return p->port > 0 ? p->port : 53;
+}
 
 void manager_dns_stub_stop(Manager *m);
 int manager_dns_stub_start(Manager *m);
+
+const char* dns_stub_listener_mode_to_string(DnsStubListenerMode p) _const_;
+DnsStubListenerMode dns_stub_listener_mode_from_string(const char *s) _pure_;

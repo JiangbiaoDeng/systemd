@@ -1,41 +1,22 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <glob.h>       /* IWYU pragma: export */
 
-  Copyright 2010 Lennart Poettering
+#include "basic-forward.h"
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+typedef DIR* (*opendir_t)(const char *);
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <glob.h>
-#include <stdbool.h>
-#include <string.h>
-
-#include "macro.h"
-#include "string-util.h"
-
-/* Note: this function modifies pglob to set various functions. */
-int safe_glob(const char *path, int flags, glob_t *pglob);
-
-int glob_exists(const char *path);
-int glob_extend(char ***strv, const char *path);
-
-#define _cleanup_globfree_ _cleanup_(globfree)
-
-_pure_ static inline bool string_is_glob(const char *p) {
-        /* Check if a string contains any glob patterns. */
-        return !!strpbrk(p, GLOB_CHARS);
+int safe_glob_full(const char *path, int flags, opendir_t opendir_func, char ***ret);
+static inline int safe_glob(const char *path, int flags, char ***ret) {
+        return safe_glob_full(path, flags, NULL, ret);
 }
+
+/* Note: which match is returned depends on the implementation/system and not guaranteed to be stable */
+int glob_first(const char *path, char **ret);
+#define glob_exists(path) glob_first(path, NULL)
+int glob_extend(char ***strv, const char *path, int flags);
+
+int glob_non_glob_prefix(const char *path, char **ret);
+
+bool string_is_glob(const char *p) _pure_;

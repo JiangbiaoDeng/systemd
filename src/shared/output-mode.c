@@ -1,25 +1,27 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+#include "sd-json.h"
 
 #include "output-mode.h"
 #include "string-table.h"
+
+sd_json_format_flags_t output_mode_to_json_format_flags(OutputMode m) {
+
+        switch (m) {
+
+        case OUTPUT_JSON_SSE:
+                return SD_JSON_FORMAT_SSE;
+
+        case OUTPUT_JSON_SEQ:
+                return SD_JSON_FORMAT_SEQ;
+
+        case OUTPUT_JSON_PRETTY:
+                return SD_JSON_FORMAT_PRETTY;
+
+        default:
+                return SD_JSON_FORMAT_NEWLINE;
+        }
+}
 
 static const char *const output_mode_table[_OUTPUT_MODE_MAX] = {
         [OUTPUT_SHORT] = "short",
@@ -28,13 +30,16 @@ static const char *const output_mode_table[_OUTPUT_MODE_MAX] = {
         [OUTPUT_SHORT_ISO_PRECISE] = "short-iso-precise",
         [OUTPUT_SHORT_PRECISE] = "short-precise",
         [OUTPUT_SHORT_MONOTONIC] = "short-monotonic",
+        [OUTPUT_SHORT_DELTA] = "short-delta",
         [OUTPUT_SHORT_UNIX] = "short-unix",
         [OUTPUT_VERBOSE] = "verbose",
         [OUTPUT_EXPORT] = "export",
         [OUTPUT_JSON] = "json",
         [OUTPUT_JSON_PRETTY] = "json-pretty",
         [OUTPUT_JSON_SSE] = "json-sse",
-        [OUTPUT_CAT] = "cat"
+        [OUTPUT_JSON_SEQ] = "json-seq",
+        [OUTPUT_CAT] = "cat",
+        [OUTPUT_WITH_UNIT] = "with-unit",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(output_mode, OutputMode);

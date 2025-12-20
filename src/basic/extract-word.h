@@ -1,36 +1,25 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "macro.h"
+#include "basic-forward.h"
 
 typedef enum ExtractFlags {
-        EXTRACT_RELAX                    = 1,
-        EXTRACT_CUNESCAPE                = 2,
-        EXTRACT_CUNESCAPE_RELAX          = 4,
-        EXTRACT_QUOTES                   = 8,
-        EXTRACT_DONT_COALESCE_SEPARATORS = 16,
-        EXTRACT_RETAIN_ESCAPE            = 32,
+        EXTRACT_RELAX                    = 1 << 0, /* Allow unbalanced quote and eat up trailing backslash. */
+        EXTRACT_CUNESCAPE                = 1 << 1, /* Unescape known escape sequences. */
+        EXTRACT_UNESCAPE_RELAX           = 1 << 2, /* Allow and keep unknown escape sequences, allow and keep trailing backslash. */
+        EXTRACT_UNESCAPE_SEPARATORS      = 1 << 3, /* Unescape separators (those specified, or whitespace by default). */
+        EXTRACT_KEEP_QUOTE               = 1 << 4, /* Ignore separators in quoting with "" and ''. */
+        EXTRACT_UNQUOTE                  = 1 << 5, /* Ignore separators in quoting with "" and '', and remove the quotes. */
+        EXTRACT_DONT_COALESCE_SEPARATORS = 1 << 6, /* Don't treat multiple adjacent separators as one */
+        EXTRACT_RETAIN_ESCAPE            = 1 << 7, /* Treat escape character '\' as any other character without special meaning */
+        EXTRACT_RETAIN_SEPARATORS        = 1 << 8, /* Do not advance the original string pointer past the separator(s) */
+
+        /* Note that if no flags are specified, escaped escape characters will be silently stripped. */
 } ExtractFlags;
 
 int extract_first_word(const char **p, char **ret, const char *separators, ExtractFlags flags);
 int extract_first_word_and_warn(const char **p, char **ret, const char *separators, ExtractFlags flags, const char *unit, const char *filename, unsigned line, const char *rvalue);
-int extract_many_words(const char **p, const char *separators, unsigned flags, ...) _sentinel_;
+
+int extract_many_words_internal(const char **p, const char *separators, unsigned flags, ...) _sentinel_;
+#define extract_many_words(p, separators, flags, ...) \
+        extract_many_words_internal(p, separators, flags, ##__VA_ARGS__, NULL)

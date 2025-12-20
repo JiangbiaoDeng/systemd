@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
 import sys
 import argparse
 
 PARSER = argparse.ArgumentParser()
 PARSER.add_argument('n', type=int)
 PARSER.add_argument('--dots', action='store_true')
-PARSER.add_argument('--data-size', type=int, default=4000)
+PARSER.add_argument('-m', '--message-size', type=int, default=200)
+PARSER.add_argument('-d', '--data-size', type=int, default=4000)
 PARSER.add_argument('--data-type', choices={'random', 'simple'})
 OPTIONS = PARSER.parse_args()
 
@@ -29,10 +32,6 @@ _SOURCE_REALTIME_TIMESTAMP={source_realtime_ts}
 DATA={data}
 """
 
-m = 0x198603b12d7
-realtime_ts = 1404101101501873
-monotonic_ts = 1753961140951
-source_realtime_ts = 1404101101483516
 priority = 3
 facility = 6
 
@@ -42,7 +41,9 @@ bytes = 0
 counter = 0
 
 for i in range(OPTIONS.n):
-    message = repr(src.read(2000))
+    message = src.read(OPTIONS.message_size)
+    message = repr(message)[2:-1]
+
     if OPTIONS.data_type == 'random':
         data = repr(src.read(OPTIONS.data_size))
     else:
@@ -50,18 +51,14 @@ for i in range(OPTIONS.n):
         data = '{:0{}}'.format(counter, OPTIONS.data_size)
         counter += 1
 
-    entry = template.format(m=m,
-                            realtime_ts=realtime_ts,
-                            monotonic_ts=monotonic_ts,
-                            source_realtime_ts=source_realtime_ts,
+    entry = template.format(m=0x198603b12d7 + i,
+                            realtime_ts=1404101101501873 + i,
+                            monotonic_ts=1753961140951 + i,
+                            source_realtime_ts=1404101101483516 + i,
                             priority=priority,
                             facility=facility,
                             message=message,
                             data=data)
-    m += 1
-    realtime_ts += 1
-    monotonic_ts += 1
-    source_realtime_ts += 1
 
     bytes += len(entry)
 

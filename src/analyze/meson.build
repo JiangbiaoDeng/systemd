@@ -1,22 +1,65 @@
-# SPDX-License-Identifier: LGPL-2.1+
-#
-# Copyright 2017 Zbigniew Jędrzejewski-Szmek
-#
-# systemd is free software; you can redistribute it and/or modify it
-# under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation; either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# systemd is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
-systemd_analyze_sources = files('''
-        analyze.c
-        analyze-verify.c
-        analyze-verify.h
-'''.split())
+systemd_analyze_sources = files(
+        'analyze-architectures.c',
+        'analyze-blame.c',
+        'analyze-calendar.c',
+        'analyze-capability.c',
+        'analyze-cat-config.c',
+        'analyze-chid.c',
+        'analyze-compare-versions.c',
+        'analyze-condition.c',
+        'analyze-critical-chain.c',
+        'analyze-dlopen-metadata.c',
+        'analyze-dot.c',
+        'analyze-dump.c',
+        'analyze-exit-status.c',
+        'analyze-fdstore.c',
+        'analyze-filesystems.c',
+        'analyze-has-tpm2.c',
+        'analyze-image-policy.c',
+        'analyze-inspect-elf.c',
+        'analyze-log-control.c',
+        'analyze-malloc.c',
+        'analyze-nvpcrs.c',
+        'analyze-pcrs.c',
+        'analyze-plot.c',
+        'analyze-security.c',
+        'analyze-service-watchdogs.c',
+        'analyze-smbios11.c',
+        'analyze-srk.c',
+        'analyze-syscall-filter.c',
+        'analyze-time.c',
+        'analyze-time-data.c',
+        'analyze-timespan.c',
+        'analyze-timestamp.c',
+        'analyze-unit-files.c',
+        'analyze-unit-gdb.c',
+        'analyze-unit-paths.c',
+        'analyze-unit-shell.c',
+        'analyze-verify.c',
+        'analyze.c',
+)
+systemd_analyze_extract_sources = files(
+        'analyze-verify-util.c'
+)
+
+executables += [
+        executable_template + {
+                'name' : 'systemd-analyze',
+                'public' : conf.get('ENABLE_ANALYZE') == 1,
+                'sources' : systemd_analyze_sources,
+                'extract' : systemd_analyze_extract_sources,
+                'include_directories' : core_includes,
+                'link_with' : [
+                        libcore,
+                        libshared,
+                ],
+                'dependencies' : libseccomp_cflags,
+                'install' : conf.get('ENABLE_ANALYZE') == 1,
+        },
+        core_test_template + {
+                'sources' : files('test-verify.c'),
+                'objects' : ['systemd-analyze'],
+        },
+]

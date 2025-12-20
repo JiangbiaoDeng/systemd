@@ -1,34 +1,21 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+#include <stdio.h>
 
 #include "kill.h"
 #include "signal-util.h"
 #include "string-table.h"
-#include "util.h"
+#include "string-util.h"
 
 void kill_context_init(KillContext *c) {
         assert(c);
 
         c->kill_signal = SIGTERM;
+        /* restart_kill_signal is unset by default and we fall back to kill_signal */
+        c->final_kill_signal = SIGKILL;
         c->send_sigkill = true;
         c->send_sighup = false;
+        c->watchdog_signal = SIGABRT;
 }
 
 void kill_context_dump(KillContext *c, FILE *f, const char *prefix) {
@@ -39,30 +26,36 @@ void kill_context_dump(KillContext *c, FILE *f, const char *prefix) {
         fprintf(f,
                 "%sKillMode: %s\n"
                 "%sKillSignal: SIG%s\n"
+                "%sRestartKillSignal: SIG%s\n"
+                "%sFinalKillSignal: SIG%s\n"
                 "%sSendSIGKILL: %s\n"
-                "%sSendSIGHUP:  %s\n",
+                "%sSendSIGHUP: %s\n",
                 prefix, kill_mode_to_string(c->kill_mode),
                 prefix, signal_to_string(c->kill_signal),
+                prefix, signal_to_string(restart_kill_signal(c)),
+                prefix, signal_to_string(c->final_kill_signal),
                 prefix, yes_no(c->send_sigkill),
                 prefix, yes_no(c->send_sighup));
 }
 
 static const char* const kill_mode_table[_KILL_MODE_MAX] = {
         [KILL_CONTROL_GROUP] = "control-group",
-        [KILL_PROCESS] = "process",
-        [KILL_MIXED] = "mixed",
-        [KILL_NONE] = "none"
+        [KILL_PROCESS]       = "process",
+        [KILL_MIXED]         = "mixed",
+        [KILL_NONE]          = "none",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(kill_mode, KillMode);
 
-static const char* const kill_who_table[_KILL_WHO_MAX] = {
-        [KILL_MAIN] = "main",
-        [KILL_CONTROL] = "control",
-        [KILL_ALL] = "all",
-        [KILL_MAIN_FAIL] = "main-fail",
+static const char* const kill_whom_table[_KILL_WHOM_MAX] = {
+        [KILL_MAIN]         = "main",
+        [KILL_CONTROL]      = "control",
+        [KILL_ALL]          = "all",
+        [KILL_MAIN_FAIL]    = "main-fail",
         [KILL_CONTROL_FAIL] = "control-fail",
-        [KILL_ALL_FAIL] = "all-fail"
+        [KILL_ALL_FAIL]     = "all-fail",
+        [KILL_CGROUP]       = "cgroup",
+        [KILL_CGROUP_FAIL]  = "cgroup-fail",
 };
 
-DEFINE_STRING_TABLE_LOOKUP(kill_who, KillWho);
+DEFINE_STRING_TABLE_LOOKUP(kill_whom, KillWhom);

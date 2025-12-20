@@ -1,31 +1,16 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2015 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#if HAVE_BZIP2
 #include <bzlib.h>
+#endif
 #include <lzma.h>
-#include <sys/types.h>
 #include <zlib.h>
+#if HAVE_ZSTD
+#include <zstd.h>
+#endif
 
-#include "macro.h"
+#include "shared-forward.h"
 
 typedef enum ImportCompressType {
         IMPORT_COMPRESS_UNKNOWN,
@@ -33,8 +18,9 @@ typedef enum ImportCompressType {
         IMPORT_COMPRESS_XZ,
         IMPORT_COMPRESS_GZIP,
         IMPORT_COMPRESS_BZIP2,
+        IMPORT_COMPRESS_ZSTD,
         _IMPORT_COMPRESS_TYPE_MAX,
-        _IMPORT_COMPRESS_TYPE_INVALID = -1,
+        _IMPORT_COMPRESS_TYPE_INVALID = -EINVAL,
 } ImportCompressType;
 
 typedef struct ImportCompress {
@@ -43,7 +29,13 @@ typedef struct ImportCompress {
         union {
                 lzma_stream xz;
                 z_stream gzip;
+#if HAVE_BZIP2
                 bz_stream bzip2;
+#endif
+#if HAVE_ZSTD
+                ZSTD_CCtx *c_zstd;
+                ZSTD_DCtx *d_zstd;
+#endif
         };
 } ImportCompress;
 
@@ -52,6 +44,7 @@ typedef int (*ImportCompressCallback)(const void *data, size_t size, void *userd
 void import_compress_free(ImportCompress *c);
 
 int import_uncompress_detect(ImportCompress *c, const void *data, size_t size);
+void import_uncompress_force_off(ImportCompress *c);
 int import_uncompress(ImportCompress *c, const void *data, size_t size, ImportCompressCallback callback, void *userdata);
 
 int import_compress_init(ImportCompress *c, ImportCompressType t);

@@ -1,51 +1,89 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2012 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+#include "logind-forward.h"
+#include "logind-inhibit.h"
+#include "sleep-config.h"
 
 typedef enum HandleAction {
         HANDLE_IGNORE,
+
         HANDLE_POWEROFF,
+        _HANDLE_ACTION_SHUTDOWN_FIRST = HANDLE_POWEROFF,
         HANDLE_REBOOT,
         HANDLE_HALT,
         HANDLE_KEXEC,
+        HANDLE_SOFT_REBOOT,
+        _HANDLE_ACTION_SHUTDOWN_LAST = HANDLE_SOFT_REBOOT,
+
         HANDLE_SUSPEND,
+        _HANDLE_ACTION_SLEEP_FIRST = HANDLE_SUSPEND,
         HANDLE_HIBERNATE,
         HANDLE_HYBRID_SLEEP,
-        HANDLE_SUSPEND_TO_HIBERNATE,
+        HANDLE_SUSPEND_THEN_HIBERNATE,
+        HANDLE_SLEEP, /* A "high-level" action that automatically choose an appropriate low-level sleep action */
+        _HANDLE_ACTION_SLEEP_LAST = HANDLE_SLEEP,
+
+        HANDLE_SECURE_ATTENTION_KEY,
         HANDLE_LOCK,
+        HANDLE_FACTORY_RESET,
+
         _HANDLE_ACTION_MAX,
-        _HANDLE_ACTION_INVALID = -1
+        _HANDLE_ACTION_INVALID = -EINVAL,
 } HandleAction;
 
-#include "logind-inhibit.h"
-#include "logind.h"
+typedef enum HandleActionSleepMask {
+        HANDLE_SLEEP_SUSPEND_MASK                = 1U << HANDLE_SUSPEND,
+        HANDLE_SLEEP_HIBERNATE_MASK              = 1U << HANDLE_HIBERNATE,
+        HANDLE_SLEEP_HYBRID_SLEEP_MASK           = 1U << HANDLE_HYBRID_SLEEP,
+        HANDLE_SLEEP_SUSPEND_THEN_HIBERNATE_MASK = 1U << HANDLE_SUSPEND_THEN_HIBERNATE,
+} HandleActionSleepMask;
+
+#define HANDLE_ACTION_SLEEP_MASK_DEFAULT (HANDLE_SLEEP_SUSPEND_THEN_HIBERNATE_MASK|HANDLE_SLEEP_SUSPEND_MASK|HANDLE_SLEEP_HIBERNATE_MASK)
+
+static inline bool handle_action_valid(HandleAction a) {
+        return a >= 0 && a < _HANDLE_ACTION_MAX;
+}
+
+static inline bool HANDLE_ACTION_IS_SHUTDOWN(HandleAction a) {
+        return a >= _HANDLE_ACTION_SHUTDOWN_FIRST && a <= _HANDLE_ACTION_SHUTDOWN_LAST;
+}
+
+static inline bool HANDLE_ACTION_IS_SLEEP(HandleAction a) {
+        return a >= _HANDLE_ACTION_SLEEP_FIRST && a <= _HANDLE_ACTION_SLEEP_LAST;
+}
+
+typedef struct HandleActionData {
+        HandleAction handle;
+        const char *target;
+        InhibitWhat inhibit_what;
+        const char *polkit_action;
+        const char *polkit_action_multiple_sessions;
+        const char *polkit_action_ignore_inhibit;
+        SleepOperation sleep_operation;
+        const char* message_id;
+        const char* message;
+        const char* log_verb;
+} HandleActionData;
+
+int handle_action_get_enabled_sleep_actions(HandleActionSleepMask mask, char ***ret);
+HandleAction handle_action_sleep_select(Manager *m);
 
 int manager_handle_action(
                 Manager *m,
                 InhibitWhat inhibit_key,
-                HandleAction handle,
+                HandleAction action,
                 bool ignore_inhibited,
-                bool is_edge);
+                bool is_edge,
+                const char *action_seat);
+
+const char* handle_action_verb_to_string(HandleAction h) _const_;
 
 const char* handle_action_to_string(HandleAction h) _const_;
 HandleAction handle_action_from_string(const char *s) _pure_;
 
-int config_parse_handle_action(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+const HandleActionData* handle_action_lookup(HandleAction action);
+
+CONFIG_PARSER_PROTOTYPE(config_parse_handle_action);
+
+CONFIG_PARSER_PROTOTYPE(config_parse_handle_action_sleep);

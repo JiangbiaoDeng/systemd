@@ -1,30 +1,20 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "basic-forward.h"
 
-  Copyright 2013 Zbigniew Jędrzejewski-Szmek
+#define SD_LOGIND_ROOT_CHECK_INHIBITORS           (UINT64_C(1) << 0)
+#define SD_LOGIND_REBOOT_VIA_KEXEC                (UINT64_C(1) << 1)
+#define SD_LOGIND_SOFT_REBOOT                     (UINT64_C(1) << 2)
+#define SD_LOGIND_SOFT_REBOOT_IF_NEXTROOT_SET_UP  (UINT64_C(1) << 3)
+#define SD_LOGIND_SKIP_INHIBITORS                 (UINT64_C(1) << 4)
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+/* For internal use only */
+#define SD_LOGIND_INTERACTIVE                     (UINT64_C(1) << 63)
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
+#define SD_LOGIND_SHUTDOWN_AND_SLEEP_FLAGS_PUBLIC (SD_LOGIND_ROOT_CHECK_INHIBITORS|SD_LOGIND_REBOOT_VIA_KEXEC|SD_LOGIND_SOFT_REBOOT|SD_LOGIND_SOFT_REBOOT_IF_NEXTROOT_SET_UP|SD_LOGIND_SKIP_INHIBITORS)
+#define SD_LOGIND_SHUTDOWN_AND_SLEEP_FLAGS_ALL    (SD_LOGIND_SHUTDOWN_AND_SLEEP_FLAGS_PUBLIC|SD_LOGIND_INTERACTIVE)
 
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+bool session_id_valid(const char *id) _pure_;
 
-#include <stdbool.h>
-#include <unistd.h>
-
-bool session_id_valid(const char *id);
-
-static inline bool logind_running(void) {
-        return access("/run/systemd/seats/", F_OK) >= 0;
-}
+bool logind_running(void);

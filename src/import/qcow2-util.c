@@ -1,30 +1,11 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2015 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <zlib.h>
 
 #include "alloc-util.h"
-#include "btrfs-util.h"
+#include "copy.h"
 #include "qcow2-util.h"
 #include "sparse-endian.h"
-#include "util.h"
 
 #define QCOW2_MAGIC 0x514649fb
 
@@ -88,7 +69,7 @@ static int copy_cluster(
         ssize_t l;
         int r;
 
-        r = btrfs_clone_range(sfd, soffset, dfd, doffset, cluster_size);
+        r = reflink_range(sfd, soffset, dfd, doffset, cluster_size);
         if (r >= 0)
                 return r;
 
@@ -292,7 +273,7 @@ int qcow2_convert(int qcow2_fd, int raw_fd) {
         if ((uint64_t) l != sz)
                 return -EIO;
 
-        for (i = 0; i < HEADER_L1_SIZE(&header); i ++) {
+        for (i = 0; i < HEADER_L1_SIZE(&header); i++) {
                 uint64_t l2_begin, j;
 
                 r = normalize_offset(&header, l1_table[i], &l2_begin, NULL, NULL);

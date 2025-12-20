@@ -1,43 +1,25 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2014 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+#include "sd-event.h"
 
 #include "alloc-util.h"
-#include "fd-util.h"
 #include "journal-remote-parse.h"
-#include "journald-native.h"
-#include "parse-util.h"
-#include "string-util.h"
+#include "log.h"
 
-void source_free(RemoteSource *source) {
+RemoteSource* source_free(RemoteSource *source) {
         if (!source)
-                return;
+                return NULL;
 
         journal_importer_cleanup(&source->importer);
 
-        log_debug("Writer ref count %i", source->writer->n_ref);
+        log_trace("Writer ref count %u", source->writer->n_ref);
         writer_unref(source->writer);
 
         sd_event_source_unref(source->event);
         sd_event_source_unref(source->buffer_event);
 
-        free(source);
+        free(source->encoding);
+        return mfree(source);
 }
 
 /**
@@ -45,7 +27,6 @@ void source_free(RemoteSource *source) {
  * ownership of fd, name, and writer, otherwise does not touch them.
  */
 RemoteSource* source_new(int fd, bool passive_fd, char *name, Writer *writer) {
-
         RemoteSource *source;
 
         log_debug("Creating source for %sfd:%d (%s)",
@@ -57,7 +38,7 @@ RemoteSource* source_new(int fd, bool passive_fd, char *name, Writer *writer) {
         if (!source)
                 return NULL;
 
-        source->importer.fd = fd;
+        source->importer = JOURNAL_IMPORTER_MAKE(fd);
         source->importer.passive_fd = passive_fd;
         source->importer.name = name;
 
@@ -66,7 +47,7 @@ RemoteSource* source_new(int fd, bool passive_fd, char *name, Writer *writer) {
         return source;
 }
 
-int process_source(RemoteSource *source, bool compress, bool seal) {
+int process_source(RemoteSource *source, JournalFileFlags file_flags) {
         int r;
 
         assert(source);
@@ -87,8 +68,15 @@ int process_source(RemoteSource *source, bool compress, bool seal) {
 
         assert(source->importer.iovw.iovec);
 
-        r = writer_write(source->writer, &source->importer.iovw, &source->importer.ts, compress, seal);
-        if (r < 0)
+        r = writer_write(source->writer,
+                         &source->importer.iovw,
+                         &source->importer.ts,
+                         &source->importer.boot_id,
+                         file_flags);
+        if (IN_SET(r, -EBADMSG, -EADDRNOTAVAIL)) {
+                log_warning_errno(r, "Entry is invalid, ignoring.");
+                r = 0;
+        } else if (r < 0)
                 log_error_errno(r, "Failed to write entry of %zu bytes: %m",
                                 iovw_size(&source->importer.iovw));
         else

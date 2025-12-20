@@ -1,33 +1,15 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2014 Tom Gundersen
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "sparse-endian.h"
+#include "memory-util.h"
+#include "tests.h"
 #include "unaligned.h"
-#include "util.h"
 
 static uint8_t data[] = {
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
         0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 };
 
-static void test_be(void) {
+TEST(be) {
         uint8_t scratch[16];
 
         assert_se(unaligned_read_be16(&data[0]) == 0x0001);
@@ -93,7 +75,7 @@ static void test_be(void) {
         assert_se(memcmp(&scratch[7], &data[7], sizeof(uint64_t)) == 0);
 }
 
-static void test_le(void) {
+TEST(le) {
         uint8_t scratch[16];
 
         assert_se(unaligned_read_le16(&data[0]) == 0x0100);
@@ -160,7 +142,7 @@ static void test_le(void) {
         assert_se(memcmp(&scratch[7], &data[7], sizeof(uint64_t)) == 0);
 }
 
-static void test_ne(void) {
+TEST(ne) {
         uint16_t x = 4711;
         uint32_t y = 123456;
         uint64_t z = 9876543210;
@@ -182,9 +164,4 @@ static void test_ne(void) {
         assert_se(z == 3);
 }
 
-int main(int argc, const char *argv[]) {
-        test_be();
-        test_le();
-        test_ne();
-        return 0;
-}
+DEFINE_TEST_MAIN(LOG_INFO);

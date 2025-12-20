@@ -1,268 +1,195 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <sys/param.h>
+#include <arpa/inet.h>
 
 #include "alloc-util.h"
 #include "dhcp-lease-internal.h"
-#include "hostname-util.h"
+#include "hashmap.h"
+#include "hostname-setup.h"
 #include "network-internal.h"
 #include "networkd-manager.h"
-#include "string-util.h"
-#include "udev-util.h"
+#include "networkd-route-util.h"
+#include "strv.h"
+#include "tests.h"
 
-static void test_deserialize_in_addr(void) {
+TEST(deserialize_in_addr) {
         _cleanup_free_ struct in_addr *addresses = NULL;
         _cleanup_free_ struct in6_addr *addresses6 = NULL;
-        struct in_addr  a, b, c;
-        struct in6_addr d, e, f;
-        int size;
-        const char *addresses_string = "192.168.0.1 0:0:0:0:0:FFFF:204.152.189.116 192.168.0.2 ::1 192.168.0.3 1:0:0:0:0:0:0:8";
+        union in_addr_union a, b, c, d, e, f;
+        static const char *addresses_string = "192.168.0.1 0:0:0:0:0:FFFF:204.152.189.116 192.168.0.2 ::1 192.168.0.3 1:0:0:0:0:0:0:8";
 
-        assert_se(inet_pton(AF_INET, "0:0:0:0:0:FFFF:204.152.189.116", &a) == 0);
-        assert_se(inet_pton(AF_INET6, "192.168.0.1", &d) == 0);
+        ASSERT_ERROR(in_addr_from_string(AF_INET, "0:0:0:0:0:FFFF:204.152.189.116", &a), EINVAL);
+        ASSERT_ERROR(in_addr_from_string(AF_INET6, "192.168.0.1", &d), EINVAL);
 
-        assert_se(inet_pton(AF_INET, "192.168.0.1", &a) == 1);
-        assert_se(inet_pton(AF_INET, "192.168.0.2", &b) == 1);
-        assert_se(inet_pton(AF_INET, "192.168.0.3", &c) == 1);
-        assert_se(inet_pton(AF_INET6, "0:0:0:0:0:FFFF:204.152.189.116", &d) == 1);
-        assert_se(inet_pton(AF_INET6, "::1", &e) == 1);
-        assert_se(inet_pton(AF_INET6, "1:0:0:0:0:0:0:8", &f) == 1);
+        ASSERT_OK(in_addr_from_string(AF_INET, "192.168.0.1", &a));
+        ASSERT_OK(in_addr_from_string(AF_INET, "192.168.0.2", &b));
+        ASSERT_OK(in_addr_from_string(AF_INET, "192.168.0.3", &c));
+        ASSERT_OK(in_addr_from_string(AF_INET6, "0:0:0:0:0:FFFF:204.152.189.116", &d));
+        ASSERT_OK(in_addr_from_string(AF_INET6, "::1", &e));
+        ASSERT_OK(in_addr_from_string(AF_INET6, "1:0:0:0:0:0:0:8", &f));
 
-        assert_se((size = deserialize_in_addrs(&addresses, addresses_string)) >= 0);
-        assert_se(size == 3);
-        assert_se(!memcmp(&a, &addresses[0], sizeof(struct in_addr)));
-        assert_se(!memcmp(&b, &addresses[1], sizeof(struct in_addr)));
-        assert_se(!memcmp(&c, &addresses[2], sizeof(struct in_addr)));
+        ASSERT_OK_EQ(deserialize_in_addrs(&addresses, addresses_string), 3);
+        ASSERT_NOT_NULL(addresses);
+        ASSERT_TRUE(in4_addr_equal(&a.in, &addresses[0]));
+        ASSERT_TRUE(in4_addr_equal(&b.in, &addresses[1]));
+        ASSERT_TRUE(in4_addr_equal(&c.in, &addresses[2]));
 
-        assert_se((size = deserialize_in6_addrs(&addresses6, addresses_string)) >= 0);
-        assert_se(size == 3);
-        assert_se(!memcmp(&d, &addresses6[0], sizeof(struct in6_addr)));
-        assert_se(!memcmp(&e, &addresses6[1], sizeof(struct in6_addr)));
-        assert_se(!memcmp(&f, &addresses6[2], sizeof(struct in6_addr)));
+        ASSERT_OK_EQ(deserialize_in6_addrs(&addresses6, addresses_string), 3);
+        ASSERT_NOT_NULL(addresses6);
+        ASSERT_TRUE(in6_addr_equal(&d.in6, &addresses6[0]));
+        ASSERT_TRUE(in6_addr_equal(&e.in6, &addresses6[1]));
+        ASSERT_TRUE(in6_addr_equal(&f.in6, &addresses6[2]));
 }
 
-static void test_deserialize_dhcp_routes(void) {
-        size_t size, allocated;
+TEST(deserialize_dhcp_routes) {
+        _cleanup_free_ struct sd_dhcp_route *routes = NULL;
+        size_t size;
 
-        {
-                _cleanup_free_ struct sd_dhcp_route *routes = NULL;
-                assert_se(deserialize_dhcp_routes(&routes, &size, &allocated, "") >= 0);
-                assert_se(size == 0);
-        }
+        ASSERT_OK(deserialize_dhcp_routes(&routes, &size, ""));
+        ASSERT_EQ(size, 0U);
+        ASSERT_NULL(routes);
 
-        {
-                /* no errors */
-                _cleanup_free_ struct sd_dhcp_route *routes = NULL;
-                const char *routes_string = "192.168.0.0/16,192.168.0.1 10.1.2.0/24,10.1.2.1 0.0.0.0/0,10.0.1.1";
+        ASSERT_OK(deserialize_dhcp_routes(&routes, &size, "192.168.0.0/16,192.168.0.1 10.1.2.0/24,10.1.2.1 0.0.0.0/0,10.0.1.1"));
+        ASSERT_EQ(size, 3U);
+        ASSERT_NOT_NULL(routes);
 
-                assert_se(deserialize_dhcp_routes(&routes, &size, &allocated, routes_string) >= 0);
+        ASSERT_EQ(routes[0].dst_addr.s_addr, inet_addr("192.168.0.0"));
+        ASSERT_EQ(routes[0].gw_addr.s_addr, inet_addr("192.168.0.1"));
+        ASSERT_EQ(routes[0].dst_prefixlen, 16U);
 
-                assert_se(size == 3);
-                assert_se(routes[0].dst_addr.s_addr == inet_addr("192.168.0.0"));
-                assert_se(routes[0].gw_addr.s_addr == inet_addr("192.168.0.1"));
-                assert_se(routes[0].dst_prefixlen == 16);
+        ASSERT_EQ(routes[1].dst_addr.s_addr, inet_addr("10.1.2.0"));
+        ASSERT_EQ(routes[1].gw_addr.s_addr, inet_addr("10.1.2.1"));
+        ASSERT_EQ(routes[1].dst_prefixlen, 24U);
 
-                assert_se(routes[1].dst_addr.s_addr == inet_addr("10.1.2.0"));
-                assert_se(routes[1].gw_addr.s_addr == inet_addr("10.1.2.1"));
-                assert_se(routes[1].dst_prefixlen == 24);
+        ASSERT_EQ(routes[2].dst_addr.s_addr, inet_addr("0.0.0.0"));
+        ASSERT_EQ(routes[2].gw_addr.s_addr, inet_addr("10.0.1.1"));
+        ASSERT_EQ(routes[2].dst_prefixlen, 0U);
 
-                assert_se(routes[2].dst_addr.s_addr == inet_addr("0.0.0.0"));
-                assert_se(routes[2].gw_addr.s_addr == inet_addr("10.0.1.1"));
-                assert_se(routes[2].dst_prefixlen == 0);
-        }
+        routes = mfree(routes);
 
-        {
-                /* error in second word */
-                _cleanup_free_ struct sd_dhcp_route *routes = NULL;
-                const char *routes_string = "192.168.0.0/16,192.168.0.1 10.1.2.0#24,10.1.2.1 0.0.0.0/0,10.0.1.1";
+        ASSERT_OK(deserialize_dhcp_routes(&routes, &size, "192.168.0.0/16,192.168.0.1 10.1.2.0#24,10.1.2.1 0.0.0.0/0,10.0.1.1"));
+        ASSERT_EQ(size, 2U);
+        ASSERT_NOT_NULL(routes);
 
-                assert_se(deserialize_dhcp_routes(&routes, &size, &allocated, routes_string) >= 0);
+        ASSERT_EQ(routes[0].dst_addr.s_addr, inet_addr("192.168.0.0"));
+        ASSERT_EQ(routes[0].gw_addr.s_addr, inet_addr("192.168.0.1"));
+        ASSERT_EQ(routes[0].dst_prefixlen, 16U);
 
-                assert_se(size == 2);
-                assert_se(routes[0].dst_addr.s_addr == inet_addr("192.168.0.0"));
-                assert_se(routes[0].gw_addr.s_addr == inet_addr("192.168.0.1"));
-                assert_se(routes[0].dst_prefixlen == 16);
+        ASSERT_EQ(routes[1].dst_addr.s_addr, inet_addr("0.0.0.0"));
+        ASSERT_EQ(routes[1].gw_addr.s_addr, inet_addr("10.0.1.1"));
+        ASSERT_EQ(routes[1].dst_prefixlen, 0U);
 
-                assert_se(routes[1].dst_addr.s_addr == inet_addr("0.0.0.0"));
-                assert_se(routes[1].gw_addr.s_addr == inet_addr("10.0.1.1"));
-                assert_se(routes[1].dst_prefixlen == 0);
-        }
+        routes = mfree(routes);
 
-        {
-                /* error in every word */
-                _cleanup_free_ struct sd_dhcp_route *routes = NULL;
-                const char *routes_string = "192.168.0.0/55,192.168.0.1 10.1.2.0#24,10.1.2.1 0.0.0.0/0,10.0.1.X";
-
-                assert_se(deserialize_dhcp_routes(&routes, &size, &allocated, routes_string) >= 0);
-                assert_se(size == 0);
-        }
+        ASSERT_OK(deserialize_dhcp_routes(&routes, &size, "192.168.0.0/55,192.168.0.1 10.1.2.0#24,10.1.2.1 0.0.0.0/0,10.0.1.X"));
+        ASSERT_EQ(size, 0U);
+        ASSERT_NULL(routes);
 }
 
-static int test_load_config(Manager *manager) {
-        int r;
-/*  TODO: should_reload, is false if the config dirs do not exist, so
- *        so we can't do this test here, move it to a test for paths_check_timestamps
- *        directly
- *
- *        assert_se(network_should_reload(manager) == true);
-*/
+static void test_route_tables_one(Manager *manager, const char *name, uint32_t number) {
+        _cleanup_free_ char *str = NULL, *expected = NULL, *num_str = NULL;
+        uint32_t t;
 
-        r = manager_load_config(manager);
-        if (r == -EPERM)
-                return r;
-        assert_se(r >= 0);
-
-        assert_se(manager_should_reload(manager) == false);
-
-        return 0;
-}
-
-static void test_network_get(Manager *manager, struct udev_device *loopback) {
-        Network *network;
-        const struct ether_addr mac = {};
-
-        /* let's assume that the test machine does not have a .network file
-           that applies to the loopback device... */
-        assert_se(network_get(manager, loopback, "lo", &mac, &network) == -ENOENT);
-        assert_se(!network);
-}
-
-static void test_address_equality(void) {
-        _cleanup_address_free_ Address *a1 = NULL, *a2 = NULL;
-
-        assert_se(address_new(&a1) >= 0);
-        assert_se(address_new(&a2) >= 0);
-
-        assert_se(address_equal(NULL, NULL));
-        assert_se(!address_equal(a1, NULL));
-        assert_se(!address_equal(NULL, a2));
-        assert_se(address_equal(a1, a2));
-
-        a1->family = AF_INET;
-        assert_se(!address_equal(a1, a2));
-
-        a2->family = AF_INET;
-        assert_se(address_equal(a1, a2));
-
-        assert_se(inet_pton(AF_INET, "192.168.3.9", &a1->in_addr.in));
-        assert_se(!address_equal(a1, a2));
-        assert_se(inet_pton(AF_INET, "192.168.3.9", &a2->in_addr.in));
-        assert_se(address_equal(a1, a2));
-        assert_se(inet_pton(AF_INET, "192.168.3.10", &a1->in_addr_peer.in));
-        assert_se(address_equal(a1, a2));
-        assert_se(inet_pton(AF_INET, "192.168.3.11", &a2->in_addr_peer.in));
-        assert_se(address_equal(a1, a2));
-        a1->prefixlen = 10;
-        assert_se(!address_equal(a1, a2));
-        a2->prefixlen = 10;
-        assert_se(address_equal(a1, a2));
-
-        a1->family = AF_INET6;
-        assert_se(!address_equal(a1, a2));
-
-        a2->family = AF_INET6;
-        assert_se(inet_pton(AF_INET6, "2001:4ca0:4f01::2", &a1->in_addr.in6));
-        assert_se(inet_pton(AF_INET6, "2001:4ca0:4f01::2", &a2->in_addr.in6));
-        assert_se(address_equal(a1, a2));
-
-        a2->prefixlen = 8;
-        assert_se(address_equal(a1, a2));
-
-        assert_se(inet_pton(AF_INET6, "2001:4ca0:4f01::1", &a2->in_addr.in6));
-        assert_se(!address_equal(a1, a2));
-}
-
-static void test_dhcp_hostname_shorten_overlong(void) {
-        int r;
-
-        {
-                /* simple hostname, no actions, no errors */
-                _cleanup_free_ char *shortened = NULL;
-                r = shorten_overlong("name1", &shortened);
-                assert_se(r == 0);
-                assert_se(streq("name1", shortened));
+        if (!STR_IN_SET(name, "default", "main", "local")) {
+                ASSERT_STREQ(hashmap_get(manager->route_table_names_by_number, UINT32_TO_PTR(number)), name);
+                ASSERT_EQ(PTR_TO_UINT32(hashmap_get(manager->route_table_numbers_by_name, name)), number);
         }
 
-        {
-                /* simple fqdn, no actions, no errors */
-                _cleanup_free_ char *shortened = NULL;
-                r = shorten_overlong("name1.example.com", &shortened);
-                assert_se(r == 0);
-                assert_se(streq("name1.example.com", shortened));
-        }
+        ASSERT_OK(asprintf(&expected, "%s(%" PRIu32 ")", name, number));
+        ASSERT_OK(manager_get_route_table_to_string(manager, number, /* append_num= */ true, &str));
+        ASSERT_STREQ(str, expected);
 
-        {
-                /* overlong fqdn, cut to first dot, no errors */
-                _cleanup_free_ char *shortened = NULL;
-                r = shorten_overlong("name1.test-dhcp-this-one-here-is-a-very-very-long-domain.example.com", &shortened);
-                assert_se(r == 1);
-                assert_se(streq("name1", shortened));
-        }
+        str = mfree(str);
 
-        {
-                /* overlong hostname, cut to HOST_MAX_LEN, no errors */
-                _cleanup_free_ char *shortened = NULL;
-                r = shorten_overlong("test-dhcp-this-one-here-is-a-very-very-long-hostname-without-domainname", &shortened);
-                assert_se(r == 1);
-                assert_se(streq("test-dhcp-this-one-here-is-a-very-very-long-hostname-without-dom", shortened));
-        }
+        ASSERT_OK(manager_get_route_table_to_string(manager, number, /* append_num= */ false, &str));
+        ASSERT_STREQ(str, name);
 
-        {
-                /* overlong fqdn, cut to first dot, empty result error */
-                _cleanup_free_ char *shortened = NULL;
-                r = shorten_overlong(".test-dhcp-this-one-here-is-a-very-very-long-hostname.example.com", &shortened);
-                assert_se(r == -EDOM);
-                assert_se(shortened == NULL);
-        }
+        ASSERT_OK(manager_get_route_table_from_string(manager, name, &t));
+        ASSERT_EQ(t, number);
 
+        ASSERT_OK(asprintf(&num_str, "%" PRIu32, number));
+        ASSERT_OK(manager_get_route_table_from_string(manager, num_str, &t));
+        ASSERT_EQ(t, number);
 }
 
-int main(void) {
-        _cleanup_manager_free_ Manager *manager = NULL;
-        _cleanup_(sd_event_unrefp) sd_event *event = NULL;
-        _cleanup_udev_unref_ struct udev *udev = NULL;
-        _cleanup_udev_device_unref_ struct udev_device *loopback = NULL;
-        int r;
+TEST(route_tables) {
+        _cleanup_(manager_freep) Manager *manager = NULL;
 
-        test_deserialize_in_addr();
-        test_deserialize_dhcp_routes();
-        test_address_equality();
-        test_dhcp_hostname_shorten_overlong();
+        ASSERT_OK(manager_new(&manager, /* test_mode= */ true));
+        ASSERT_OK(manager_setup(manager));
 
-        assert_se(sd_event_default(&event) >= 0);
+        ASSERT_OK(config_parse_route_table_names("manager", "filename", 1, "section", 1, "RouteTable", 0, "hoge:123 foo:456 aaa:111", manager, manager));
+        ASSERT_OK(config_parse_route_table_names("manager", "filename", 1, "section", 1, "RouteTable", 0, "bbb:11111 ccc:22222", manager, manager));
+        ASSERT_OK(config_parse_route_table_names("manager", "filename", 1, "section", 1, "RouteTable", 0, "ddd:22222", manager, manager));
 
-        assert_se(manager_new(&manager, event) >= 0);
+        test_route_tables_one(manager, "hoge", 123);
+        test_route_tables_one(manager, "foo", 456);
+        test_route_tables_one(manager, "aaa", 111);
+        test_route_tables_one(manager, "bbb", 11111);
+        test_route_tables_one(manager, "ccc", 22222);
 
-        r = test_load_config(manager);
-        if (r == -EPERM)
-                return EXIT_TEST_SKIP;
+        ASSERT_NULL(hashmap_get(manager->route_table_numbers_by_name, "ddd"));
 
-        udev = udev_new();
-        assert_se(udev);
+        test_route_tables_one(manager, "default", 253);
+        test_route_tables_one(manager, "main", 254);
+        test_route_tables_one(manager, "local", 255);
 
-        loopback = udev_device_new_from_syspath(udev, "/sys/class/net/lo");
-        assert_se(loopback);
-        assert_se(udev_device_get_ifindex(loopback) == 1);
+        ASSERT_OK(config_parse_route_table_names("manager", "filename", 1, "section", 1, "RouteTable", 0, "", manager, manager));
+        ASSERT_NULL(manager->route_table_names_by_number);
+        ASSERT_NULL(manager->route_table_numbers_by_name);
 
-        test_network_get(manager, loopback);
+        /* Invalid pairs */
+        ASSERT_OK(config_parse_route_table_names("manager", "filename", 1, "section", 1, "RouteTable", 0, "main:123 default:333 local:999", manager, manager));
+        ASSERT_OK(config_parse_route_table_names("manager", "filename", 1, "section", 1, "RouteTable", 0, "xxx:253 yyy:254 local:255", manager, manager));
+        ASSERT_OK(config_parse_route_table_names("manager", "filename", 1, "section", 1, "RouteTable", 0, "1234:321 :567 hoge:foo aaa:-888", manager, manager));
+        ASSERT_NULL(manager->route_table_names_by_number);
+        ASSERT_NULL(manager->route_table_numbers_by_name);
 
-        assert_se(manager_rtnl_enumerate_links(manager) >= 0);
+        test_route_tables_one(manager, "default", 253);
+        test_route_tables_one(manager, "main", 254);
+        test_route_tables_one(manager, "local", 255);
 }
+
+TEST(manager_enumerate) {
+        _cleanup_(manager_freep) Manager *manager = NULL;
+
+        ASSERT_OK(manager_new(&manager, /* test_mode= */ true));
+        ASSERT_OK(manager_setup(manager));
+
+        /* TODO: should_reload, is false if the config dirs do not exist, so we can't do this test here, move
+         * it to a test for paths_check_timestamps directly. */
+        if (ASSERT_OK_OR(manager_load_config(manager), -EPERM) < 0)
+                return (void) log_tests_skipped("Cannot load configuration files");
+
+        ASSERT_OK(manager_enumerate(manager));
+}
+
+TEST(dhcp_hostname_shorten_overlong) {
+        _cleanup_free_ char *s = NULL;
+
+        /* simple hostname, no actions, no errors */
+        ASSERT_OK_ZERO(shorten_overlong("name1", &s));
+        ASSERT_STREQ(s, "name1");
+        s = mfree(s);
+
+        /* simple fqdn, no actions, no errors */
+        ASSERT_OK_ZERO(shorten_overlong("name1.example.com", &s));
+        ASSERT_STREQ(s, "name1.example.com");
+        s = mfree(s);
+
+        /* overlong fqdn, cut to first dot, no errors */
+        ASSERT_OK_POSITIVE(shorten_overlong("name1.test-dhcp-this-one-here-is-a-very-very-long-domain.example.com", &s));
+        ASSERT_STREQ(s, "name1");
+        s = mfree(s);
+
+        /* overlong hostname, cut to HOST_MAX_LEN, no errors */
+        ASSERT_OK_POSITIVE(shorten_overlong("test-dhcp-this-one-here-is-a-very-very-long-hostname-without-domainname", &s));
+        ASSERT_STREQ(s, "test-dhcp-this-one-here-is-a-very-very-long-hostname-without-dom");
+        s = mfree(s);
+
+        /* overlong fqdn, cut to first dot, empty result error */
+        ASSERT_ERROR(shorten_overlong(".test-dhcp-this-one-here-is-a-very-very-long-hostname.example.com", &s), EDOM);
+        ASSERT_NULL(s);
+}
+
+DEFINE_TEST_MAIN(LOG_INFO);

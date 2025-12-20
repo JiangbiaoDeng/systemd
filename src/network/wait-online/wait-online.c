@@ -1,47 +1,107 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <getopt.h>
+#include <sys/stat.h>
 
-#include "sd-daemon.h"
+#include "sd-event.h"
 
-#include "manager.h"
-#include "signal-util.h"
+#include "alloc-util.h"
+#include "build.h"
+#include "daemon-util.h"
+#include "hashmap.h"
+#include "log.h"
+#include "main-func.h"
+#include "parse-argument.h"
+#include "pretty-print.h"
+#include "socket-util.h"
 #include "strv.h"
+#include "time-util.h"
+#include "wait-online-manager.h"
 
 static bool arg_quiet = false;
 static usec_t arg_timeout = 120 * USEC_PER_SEC;
-static char **arg_interfaces = NULL;
+static Hashmap *arg_interfaces = NULL;
 static char **arg_ignore = NULL;
+static LinkOperationalStateRange arg_required_operstate = LINK_OPERSTATE_RANGE_INVALID;
+static AddressFamily arg_required_family = ADDRESS_FAMILY_NO;
+static bool arg_any = false;
+static bool arg_requires_dns = false;
 
-static void help(void) {
+STATIC_DESTRUCTOR_REGISTER(arg_interfaces, hashmap_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_ignore, strv_freep);
+
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-networkd-wait-online.service", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]\n\n"
                "Block until network is configured.\n\n"
                "  -h --help                 Show this help\n"
                "     --version              Print version string\n"
                "  -q --quiet                Do not show status information\n"
-               "  -i --interface=INTERFACE  Block until at least these interfaces have appeared\n"
+               "  -i --interface=INTERFACE[:MIN_OPERSTATE[:MAX_OPERSTATE]]\n"
+               "                            Block until at least these interfaces have appeared\n"
                "     --ignore=INTERFACE     Don't take these interfaces into account\n"
+               "  -o --operational-state=MIN_OPERSTATE[:MAX_OPERSTATE]\n"
+               "                            Required operational state\n"
+               "  -4 --ipv4                 Requires at least one IPv4 address\n"
+               "  -6 --ipv6                 Requires at least one IPv6 address\n"
+               "     --any                  Wait until at least one of the interfaces is online\n"
                "     --timeout=SECS         Maximum time to wait for network connectivity\n"
-               , program_invocation_short_name);
+               "     --dns                  Requires at least one DNS server to be accessible\n"
+               "\nSee the %s for details.\n",
+               program_invocation_short_name,
+               link);
+
+        return 0;
+}
+
+static int parse_interface_with_operstate_range(const char *str) {
+        _cleanup_free_ char *ifname = NULL;
+        _cleanup_free_ LinkOperationalStateRange *range = NULL;
+        const char *p;
+        int r;
+
+        assert(str);
+
+        range = new(LinkOperationalStateRange, 1);
+        if (!range)
+                return log_oom();
+
+        p = strchr(str, ':');
+        if (p) {
+                r = parse_operational_state_range(p + 1, range);
+                if (r < 0)
+                        return log_error_errno(r, "Invalid operational state range: %s", p + 1);
+
+                ifname = strndup(optarg, p - optarg);
+        } else {
+                *range = LINK_OPERSTATE_RANGE_INVALID;
+                ifname = strdup(str);
+        }
+        if (!ifname)
+                return log_oom();
+
+        if (!ifname_valid(ifname))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Invalid interface name: %s", ifname);
+
+        r = hashmap_ensure_put(&arg_interfaces, &string_hash_ops_free_free, ifname, range);
+        if (r == -ENOMEM)
+                return log_oom();
+        if (r < 0)
+                return log_error_errno(r, "Failed to store interface name: %m");
+        if (r == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EEXIST),
+                                       "Interface name %s is already specified.", ifname);
+
+        TAKE_PTR(ifname);
+        TAKE_PTR(range);
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -49,16 +109,23 @@ static int parse_argv(int argc, char *argv[]) {
         enum {
                 ARG_VERSION = 0x100,
                 ARG_IGNORE,
+                ARG_ANY,
                 ARG_TIMEOUT,
+                ARG_DNS,
         };
 
         static const struct option options[] = {
-                { "help",            no_argument,       NULL, 'h'         },
-                { "version",         no_argument,       NULL, ARG_VERSION },
-                { "quiet",           no_argument,       NULL, 'q'         },
-                { "interface",       required_argument, NULL, 'i'         },
-                { "ignore",          required_argument, NULL, ARG_IGNORE  },
-                { "timeout",         required_argument, NULL, ARG_TIMEOUT  },
+                { "help",              no_argument,       NULL, 'h'         },
+                { "version",           no_argument,       NULL, ARG_VERSION },
+                { "quiet",             no_argument,       NULL, 'q'         },
+                { "interface",         required_argument, NULL, 'i'         },
+                { "ignore",            required_argument, NULL, ARG_IGNORE  },
+                { "operational-state", required_argument, NULL, 'o'         },
+                { "ipv4",              no_argument,       NULL, '4'         },
+                { "ipv6",              no_argument,       NULL, '6'         },
+                { "any",               no_argument,       NULL, ARG_ANY     },
+                { "timeout",           required_argument, NULL, ARG_TIMEOUT },
+                { "dns",               optional_argument, NULL, ARG_DNS     },
                 {}
         };
 
@@ -67,7 +134,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "+hi:q", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "hi:qo:46", options, NULL)) >= 0)
 
                 switch (c) {
 
@@ -83,9 +150,9 @@ static int parse_argv(int argc, char *argv[]) {
                         return version();
 
                 case 'i':
-                        if (strv_extend(&arg_interfaces, optarg) < 0)
-                                return log_oom();
-
+                        r = parse_interface_with_operstate_range(optarg);
+                        if (r < 0)
+                                return r;
                         break;
 
                 case ARG_IGNORE:
@@ -94,30 +161,52 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
+                case 'o':
+                        r = parse_operational_state_range(optarg, &arg_required_operstate);
+                        if (r < 0)
+                                return log_error_errno(r, "Invalid operational state range '%s'", optarg);
+                        break;
+
+                case '4':
+                        arg_required_family |= ADDRESS_FAMILY_IPV4;
+                        break;
+
+                case '6':
+                        arg_required_family |= ADDRESS_FAMILY_IPV6;
+                        break;
+
+                case ARG_ANY:
+                        arg_any = true;
+                        break;
+
                 case ARG_TIMEOUT:
                         r = parse_sec(optarg, &arg_timeout);
                         if (r < 0)
                                 return r;
+                        break;
 
+                case ARG_DNS:
+                        r = parse_boolean_argument("--dns", optarg, &arg_requires_dns);
+                        if (r < 0)
+                                return r;
                         break;
 
                 case '?':
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         _cleanup_(manager_freep) Manager *m = NULL;
+        _unused_ _cleanup_(notify_on_cleanup) const char *notify_message = NULL;
         int r;
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         umask(0022);
 
@@ -126,42 +215,36 @@ int main(int argc, char *argv[]) {
                 return r;
 
         if (arg_quiet)
-                log_set_max_level(LOG_WARNING);
+                log_set_max_level(LOG_ERR);
 
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, -1) >= 0);
+        r = manager_new(&m,
+                        arg_interfaces,
+                        arg_ignore,
+                        arg_required_operstate,
+                        arg_required_family,
+                        arg_any,
+                        arg_timeout,
+                        arg_requires_dns);
+        if (r < 0)
+                return log_error_errno(r, "Could not create manager: %m");
 
-        r = manager_new(&m, arg_interfaces, arg_ignore, arg_timeout);
-        if (r < 0) {
-                log_error_errno(r, "Could not create manager: %m");
-                goto finish;
-        }
+        if (manager_configured(m))
+                goto success;
 
-        if (manager_all_configured(m)) {
-                r = 0;
-                goto finish;
-        }
-
-        sd_notify(false,
-                  "READY=1\n"
-                  "STATUS=Waiting for network connections...");
+        notify_message = notify_start("READY=1\n"
+                                      "STATUS=Waiting for network connections...",
+                                      "STATUS=Failed to wait for network connectivity...");
 
         r = sd_event_loop(m->event);
-        if (r < 0) {
-                log_error_errno(r, "Event loop failed: %m");
-                goto finish;
-        }
+        if (r == -ETIMEDOUT)
+                return log_error_errno(r, "Timeout occurred while waiting for network connectivity.");
+        if (r < 0)
+                return log_error_errno(r, "Event loop failed: %m");
 
-finish:
-        strv_free(arg_interfaces);
-        strv_free(arg_ignore);
+success:
+        notify_message = "STATUS=All interfaces configured...";
 
-        if (r >= 0) {
-                sd_notify(false, "STATUS=All interfaces configured...");
-
-                return EXIT_SUCCESS;
-        } else {
-                sd_notify(false, "STATUS=Failed waiting for network connectivity...");
-
-                return EXIT_FAILURE;
-        }
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

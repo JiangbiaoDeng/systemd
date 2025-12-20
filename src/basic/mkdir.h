@@ -1,45 +1,38 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-  Copyright 2013 Kay Sievers
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <sys/types.h>
+#include "basic-forward.h"
 
 typedef enum MkdirFlags {
-        MKDIR_FOLLOW_SYMLINK = 1 << 0,
-        MKDIR_WARN_MODE      = 1 << 1,
+        MKDIR_FOLLOW_SYMLINK  = 1 << 0,
+        MKDIR_IGNORE_EXISTING = 1 << 1,  /* Quietly accept a preexisting directory (or file) */
+        MKDIR_WARN_MODE       = 1 << 2,  /* Log at LOG_WARNING when mode doesn't match */
 } MkdirFlags;
 
-int mkdir_errno_wrapper(const char *pathname, mode_t mode);
-int mkdir_safe(const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags);
-int mkdir_parents(const char *path, mode_t mode);
+int mkdirat_errno_wrapper(int dirfd, const char *pathname, mode_t mode);
+
+int mkdirat_safe(int dir_fd, const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags);
+static inline int mkdir_safe(const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags) {
+        return mkdirat_safe(AT_FDCWD, path, mode, uid, gid, flags);
+}
+int mkdirat_parents(int dir_fd, const char *path, mode_t mode);
+static inline int mkdir_parents(const char *path, mode_t mode) {
+        return mkdirat_parents(AT_FDCWD, path, mode);
+}
+int mkdir_parents_safe(const char *prefix, const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags);
 int mkdir_p(const char *path, mode_t mode);
+int mkdir_p_safe(const char *prefix, const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags);
+int mkdir_p_root_full(const char *root, const char *p, uid_t uid, gid_t gid, mode_t m, usec_t ts, Hashmap *subvolumes);
+static inline int mkdir_p_root(const char *root, const char *p, uid_t uid, gid_t gid, mode_t m) {
+        return mkdir_p_root_full(root, p, uid, gid, m, USEC_INFINITY, NULL);
+}
 
-/* mandatory access control(MAC) versions */
-int mkdir_safe_label(const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags);
-int mkdir_parents_label(const char *path, mode_t mode);
-int mkdir_p_label(const char *path, mode_t mode);
-
-/* internally used */
-typedef int (*mkdir_func_t)(const char *pathname, mode_t mode);
-int mkdir_safe_internal(const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags, mkdir_func_t _mkdir);
-int mkdir_parents_internal(const char *prefix, const char *path, mode_t mode, mkdir_func_t _mkdir);
-int mkdir_p_internal(const char *prefix, const char *path, mode_t mode, mkdir_func_t _mkdir);
+/* The following are used to implement the mkdir_xyz_label() calls, don't use otherwise. */
+typedef int (*mkdirat_func_t)(int dir_fd, const char *pathname, mode_t mode);
+int mkdirat_safe_internal(int dir_fd, const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags, mkdirat_func_t _mkdir);
+static inline int mkdir_safe_internal(const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags, mkdirat_func_t _mkdir) {
+        return mkdirat_safe_internal(AT_FDCWD, path, mode, uid, gid, flags, _mkdir);
+}
+int mkdirat_parents_internal(int dir_fd, const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags, mkdirat_func_t _mkdirat);
+int mkdir_parents_internal(const char *prefix, const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags, mkdirat_func_t _mkdir);
+int mkdir_p_internal(const char *prefix, const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags, mkdirat_func_t _mkdir);

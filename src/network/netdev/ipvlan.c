@@ -1,82 +1,49 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013-2015 Tom Gundersen <teg@jklm.no>
+#include <linux/if_arp.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <net/if.h>
+#include "sd-netlink.h"
 
 #include "conf-parser.h"
-#include "netdev/ipvlan.h"
-#include "string-table.h"
+#include "ipvlan.h"
+#include "ipvlan-util.h"
+#include "networkd-link.h"
 
-static const char* const ipvlan_mode_table[_NETDEV_IPVLAN_MODE_MAX] = {
-        [NETDEV_IPVLAN_MODE_L2] = "L2",
-        [NETDEV_IPVLAN_MODE_L3] = "L3",
-        [NETDEV_IPVLAN_MODE_L3S] = "L3S",
-};
-
-DEFINE_STRING_TABLE_LOOKUP(ipvlan_mode, IPVlanMode);
-DEFINE_CONFIG_PARSE_ENUM(config_parse_ipvlan_mode, ipvlan_mode, IPVlanMode, "Failed to parse ipvlan mode");
-
-static const char* const ipvlan_flags_table[_NETDEV_IPVLAN_FLAGS_MAX] = {
-        [NETDEV_IPVLAN_FLAGS_BRIGDE] = "bridge",
-        [NETDEV_IPVLAN_FLAGS_PRIVATE] = "private",
-        [NETDEV_IPVLAN_FLAGS_VEPA] = "vepa",
-};
-
-DEFINE_STRING_TABLE_LOOKUP(ipvlan_flags, IPVlanFlags);
-DEFINE_CONFIG_PARSE_ENUM(config_parse_ipvlan_flags, ipvlan_flags, IPVlanFlags, "Failed to parse ipvlan flags");
+DEFINE_CONFIG_PARSE_ENUM(config_parse_ipvlan_mode, ipvlan_mode, IPVlanMode);
+DEFINE_CONFIG_PARSE_ENUM(config_parse_ipvlan_flags, ipvlan_flags, IPVlanFlags);
 
 static int netdev_ipvlan_fill_message_create(NetDev *netdev, Link *link, sd_netlink_message *req) {
-        IPVlan *m;
-        int r;
-
         assert(netdev);
         assert(link);
         assert(netdev->ifname);
 
-        m = IPVLAN(netdev);
-
-        assert(m);
+        IPVlan *m = netdev->kind == NETDEV_KIND_IPVLAN ? IPVLAN(netdev) : IPVTAP(netdev);
+        int r;
 
         if (m->mode != _NETDEV_IPVLAN_MODE_INVALID) {
                 r = sd_netlink_message_append_u16(req, IFLA_IPVLAN_MODE, m->mode);
                 if (r < 0)
-                        return log_netdev_error_errno(netdev, r, "Could not append IFLA_IPVLAN_MODE attribute: %m");
+                        return r;
         }
 
         if (m->flags != _NETDEV_IPVLAN_FLAGS_INVALID) {
                 r = sd_netlink_message_append_u16(req, IFLA_IPVLAN_FLAGS, m->flags);
                 if (r < 0)
-                        return log_netdev_error_errno(netdev, r, "Could not append IFLA_IPVLAN_FLAGS attribute: %m");
+                        return r;
         }
 
         return 0;
 }
 
-static void ipvlan_init(NetDev *n) {
-        IPVlan *m;
+static bool ipvlan_can_set_mac(NetDev *netdev, const struct hw_addr_data *hw_addr) {
+        assert(netdev);
 
-        assert(n);
+        /* MAC address cannot be updated. Even unchanged, IFLA_ADDRESS attribute cannot be set in the message. */
+        return netdev->ifindex <= 0;
+}
 
-        m = IPVLAN(n);
-
-        assert(m);
+static void ipvlan_init(NetDev *netdev) {
+        IPVlan *m = ASSERT_PTR(netdev)->kind == NETDEV_KIND_IPVLAN ? IPVLAN(netdev) : IPVTAP(netdev);
 
         m->mode = _NETDEV_IPVLAN_MODE_INVALID;
         m->flags = _NETDEV_IPVLAN_FLAGS_INVALID;
@@ -85,7 +52,32 @@ static void ipvlan_init(NetDev *n) {
 const NetDevVTable ipvlan_vtable = {
         .object_size = sizeof(IPVlan),
         .init = ipvlan_init,
-        .sections = "Match\0NetDev\0IPVLAN\0",
+        .sections = NETDEV_COMMON_SECTIONS "IPVLAN\0",
         .fill_message_create = netdev_ipvlan_fill_message_create,
         .create_type = NETDEV_CREATE_STACKED,
+        .can_set_mac = ipvlan_can_set_mac,
+        .iftype = ARPHRD_ETHER,
+        .generate_mac = true,
+        .keep_existing = true,
 };
+
+const NetDevVTable ipvtap_vtable = {
+        .object_size = sizeof(IPVlan),
+        .init = ipvlan_init,
+        .sections = NETDEV_COMMON_SECTIONS "IPVTAP\0",
+        .fill_message_create = netdev_ipvlan_fill_message_create,
+        .create_type = NETDEV_CREATE_STACKED,
+        .can_set_mac = ipvlan_can_set_mac,
+        .iftype = ARPHRD_ETHER,
+        .generate_mac = true,
+        .keep_existing = true,
+};
+
+IPVlanMode link_get_ipvlan_mode(Link *link) {
+        assert(link);
+
+        if (!link->netdev || link->netdev->kind != NETDEV_KIND_IPVLAN)
+                return _NETDEV_IPVLAN_MODE_INVALID;
+
+        return IPVLAN(link->netdev)->mode;
+}

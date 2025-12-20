@@ -1,37 +1,24 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include <sys/mman.h>           /* IWYU pragma: export */
 
-  Copyright 2013 Lennart Poettering
+#include "basic-forward.h"
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+int memfd_create_wrapper(const char *name, unsigned mode);
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
+int memfd_new_full(const char *name, unsigned extra_flags);
+static inline int memfd_new(const char *name) {
+        return memfd_new_full(name, 0);
+}
 
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <inttypes.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <sys/types.h>
-
-int memfd_new(const char *name);
-int memfd_new_and_map(const char *name, size_t sz, void **p);
-
-int memfd_map(int fd, uint64_t offset, size_t size, void **p);
+int memfd_new_and_seal(const char *name, const void *data, size_t sz) _nonnull_if_nonzero_(2, 3);
+static inline int memfd_new_and_seal_string(const char *name, const char *s) {
+        return memfd_new_and_seal(name, s, SIZE_MAX);
+}
 
 int memfd_set_sealed(int fd);
 int memfd_get_sealed(int fd);
 
-int memfd_get_size(int fd, uint64_t *sz);
+int memfd_get_size(int fd, uint64_t *ret);
 int memfd_set_size(int fd, uint64_t sz);

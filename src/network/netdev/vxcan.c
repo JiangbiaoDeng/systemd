@@ -1,89 +1,131 @@
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2017 Susant Sahani
+#include <linux/can/vxcan.h>
+#include <linux/if_arp.h>
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
+#include "sd-netlink.h"
 
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "netdev/vxcan.h"
-#include "missing.h"
+#include "string-util.h"
+#include "vxcan.h"
 
 static int netdev_vxcan_fill_message_create(NetDev *netdev, Link *link, sd_netlink_message *m) {
-        VxCan *v;
-        int r;
-
-        assert(netdev);
         assert(!link);
         assert(m);
 
-        v = VXCAN(netdev);
-
-        assert(v);
+        VxCan *v = VXCAN(netdev);
+        int r;
 
         r = sd_netlink_message_open_container(m, VXCAN_INFO_PEER);
         if (r < 0)
-                return log_netdev_error_errno(netdev, r, "Could not append VXCAN_INFO_PEER attribute: %m");
+                return r;
 
         if (v->ifname_peer) {
                 r = sd_netlink_message_append_string(m, IFLA_IFNAME, v->ifname_peer);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to add vxcan netlink interface peer name: %m");
+                        return r;
         }
 
         r = sd_netlink_message_close_container(m);
         if (r < 0)
-                return log_netdev_error_errno(netdev, r, "Could not append VXCAN_INFO_PEER attribute: %m");
-
-        return r;
-}
-
-static int netdev_vxcan_verify(NetDev *netdev, const char *filename) {
-        VxCan *v;
-
-        assert(netdev);
-        assert(filename);
-
-        v = VXCAN(netdev);
-
-        assert(v);
-
-        if (!v->ifname_peer) {
-                log_warning("VxCan NetDev without peer name configured in %s. Ignoring", filename);
-                return -EINVAL;
-        }
+                return r;
 
         return 0;
 }
 
-static void vxcan_done(NetDev *n) {
-        VxCan *v;
+static int netdev_vxcan_verify(NetDev *netdev, const char *filename) {
+        assert(filename);
 
-        assert(n);
+        VxCan *v = VXCAN(netdev);
 
-        v = VXCAN(n);
+        if (!v->ifname_peer)
+                return log_netdev_warning_errno(netdev, SYNTHETIC_ERRNO(EINVAL),
+                                                "VxCan NetDev without peer name configured in %s. Ignoring", filename);
 
-        assert(v);
+        if (streq(v->ifname_peer, netdev->ifname))
+                return log_netdev_warning_errno(netdev, SYNTHETIC_ERRNO(EINVAL),
+                                                "VxCan peer name cannot be the same as the main interface name.");
+
+        return 0;
+}
+
+static int netdev_vxcan_attach(NetDev *netdev) {
+        VxCan *v = VXCAN(netdev);
+        assert(v->ifname_peer);
+
+        return netdev_attach_name(netdev, v->ifname_peer);
+}
+
+static void netdev_vxcan_detach(NetDev *netdev) {
+        VxCan *v = VXCAN(netdev);
+
+        netdev_detach_name(netdev, v->ifname_peer);
+}
+
+static int netdev_vxcan_set_ifindex(NetDev *netdev, const char *name, int ifindex) {
+        VxCan *v = VXCAN(netdev);
+        int r;
+
+        assert(name);
+        assert(ifindex > 0);
+
+        if (streq(netdev->ifname, name)) {
+                r = netdev_set_ifindex_internal(netdev, ifindex);
+                if (r <= 0)
+                        return r;
+
+        } else if (streq(v->ifname_peer, name)) {
+                if (v->ifindex_peer == ifindex)
+                        return 0; /* already set */
+                if (v->ifindex_peer > 0 && v->ifindex_peer != ifindex)
+                        return log_netdev_warning_errno(netdev, SYNTHETIC_ERRNO(EEXIST),
+                                                        "Could not set ifindex %i for peer %s, already set to %i.",
+                                                        ifindex, v->ifname_peer, v->ifindex_peer);
+
+                v->ifindex_peer = ifindex;
+                log_netdev_debug(netdev, "Peer interface %s gained index %i.", v->ifname_peer, ifindex);
+
+        } else
+                return log_netdev_warning_errno(netdev, SYNTHETIC_ERRNO(EINVAL),
+                                                "Received netlink message with unexpected interface name %s (ifindex=%i).",
+                                                name, ifindex);
+
+        if (netdev->ifindex > 0 && v->ifindex_peer > 0)
+                return netdev_enter_ready(netdev);
+
+        return 0;
+}
+
+static int netdev_vxcan_get_ifindex(NetDev *netdev, const char *name) {
+        VxCan *v = VXCAN(netdev);
+
+        assert(name);
+
+        if (streq(netdev->ifname, name))
+                return netdev->ifindex;
+
+        if (streq(v->ifname_peer, name))
+                return v->ifindex_peer;
+
+        return -ENODEV;
+}
+
+static void vxcan_done(NetDev *netdev) {
+        VxCan *v = VXCAN(netdev);
 
         free(v->ifname_peer);
 }
 
 const NetDevVTable vxcan_vtable = {
         .object_size = sizeof(VxCan),
-        .sections = "Match\0NetDev\0VXCAN\0",
+        .sections = NETDEV_COMMON_SECTIONS "VXCAN\0",
         .done = vxcan_done,
         .fill_message_create = netdev_vxcan_fill_message_create,
         .create_type = NETDEV_CREATE_INDEPENDENT,
         .config_verify = netdev_vxcan_verify,
+        .attach = netdev_vxcan_attach,
+        .detach = netdev_vxcan_detach,
+        .set_ifindex = netdev_vxcan_set_ifindex,
+        .get_ifindex = netdev_vxcan_get_ifindex,
+        .iftype = ARPHRD_CAN,
+        .keep_existing = true,
 };

@@ -1,51 +1,27 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
+#include "basic-forward.h"
+#include "cgroup-util.h"
+#include "stdio-util.h"         /* IWYU pragma: keep */
 
-  Copyright 2015 Ronny Chevalier
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <inttypes.h>
-
-#if SIZEOF_PID_T == 4
-#  define PID_PRI PRIi32
-#elif SIZEOF_PID_T == 2
-#  define PID_PRI PRIi16
-#else
-#  error Unknown pid_t size
-#endif
+assert_cc(sizeof(pid_t) == sizeof(int32_t));
+#define PID_PRI PRIi32
 #define PID_FMT "%" PID_PRI
 
-#if SIZEOF_UID_T == 4
-#  define UID_FMT "%" PRIu32
-#elif SIZEOF_UID_T == 2
-#  define UID_FMT "%" PRIu16
-#else
-#  error Unknown uid_t size
-#endif
+assert_cc(sizeof(uid_t) == sizeof(uint32_t));
+#define UID_FMT "%" PRIu32
 
-#if SIZEOF_GID_T == 4
-#  define GID_FMT "%" PRIu32
-#elif SIZEOF_GID_T == 2
-#  define GID_FMT "%" PRIu16
-#else
-#  error Unknown gid_t size
-#endif
+assert_cc(sizeof(gid_t) == sizeof(uint32_t));
+#define GID_FMT "%" PRIu32
+
+/* Note: the lifetime of the compound literal is the immediately surrounding block,
+ * see C11 §6.5.2.5, and
+ * https://stackoverflow.com/questions/34880638/compound-literal-lifetime-and-if-blocks */
+#define FORMAT_UID(uid) \
+        snprintf_ok((char[DECIMAL_STR_MAX(uid_t)]){}, DECIMAL_STR_MAX(uid_t), UID_FMT, uid)
+#define FORMAT_GID(gid) \
+        snprintf_ok((char[DECIMAL_STR_MAX(gid_t)]){}, DECIMAL_STR_MAX(gid_t), GID_FMT, gid)
 
 #if SIZEOF_TIME_T == 8
 #  define PRI_TIME PRIi64
@@ -55,18 +31,26 @@
 #  error Unknown time_t size
 #endif
 
-#if defined __x86_64__ && defined __ILP32__
+#if SIZEOF_TIMEX_MEMBER == 8
 #  define PRI_TIMEX PRIi64
-#else
+#elif SIZEOF_TIMEX_MEMBER == 4
 #  define PRI_TIMEX "li"
+#else
+#  error Unknown timex member size
 #endif
 
-#if SIZEOF_RLIM_T == 8
-#  define RLIM_FMT "%" PRIu64
-#elif SIZEOF_RLIM_T == 4
-#  define RLIM_FMT "%" PRIu32
+#ifdef __GLIBC__
+#  if SIZEOF_RLIM_T == 8
+#    define RLIM_FMT "%" PRIu64
+#  elif SIZEOF_RLIM_T == 4
+#    define RLIM_FMT "%" PRIu32
+#  else
+#    error Unknown rlim_t size
+#  endif
 #else
-#  error Unknown rlim_t size
+/* Assume musl, and it unconditionally uses unsigned long long. */
+assert_cc(SIZEOF_RLIM_T == 8);
+#  define RLIM_FMT "%llu"
 #endif
 
 #if SIZEOF_DEV_T == 8
@@ -84,3 +68,28 @@
 #else
 #  error Unknown ino_t size
 #endif
+
+typedef enum {
+        FORMAT_BYTES_USE_IEC      = 1 << 0, /* use base 1024 rather than 1000 */
+        FORMAT_BYTES_BELOW_POINT  = 1 << 1, /* show one digit after the point, if non-zero */
+        FORMAT_BYTES_ALWAYS_POINT = 1 << 2, /* show one digit after the point, always */
+        FORMAT_BYTES_TRAILING_B   = 1 << 3, /* suffix the expression with a "B" for "bytes" */
+} FormatBytesFlag;
+
+#define FORMAT_BYTES_MAX 16U
+
+char* format_bytes_full(char *buf, size_t l, uint64_t t, FormatBytesFlag flag) _warn_unused_result_;
+
+_warn_unused_result_
+static inline char* format_bytes(char *buf, size_t l, uint64_t t) {
+        return format_bytes_full(buf, l, t, FORMAT_BYTES_USE_IEC | FORMAT_BYTES_BELOW_POINT | FORMAT_BYTES_TRAILING_B);
+}
+
+/* Note: the lifetime of the compound literal is the immediately surrounding block,
+ * see C11 §6.5.2.5, and
+ * https://stackoverflow.com/questions/34880638/compound-literal-lifetime-and-if-blocks */
+#define FORMAT_BYTES(t) format_bytes((char[FORMAT_BYTES_MAX]){}, FORMAT_BYTES_MAX, t)
+#define FORMAT_BYTES_FULL(t, flags) format_bytes_full((char[FORMAT_BYTES_MAX]){}, FORMAT_BYTES_MAX, t, flags)
+#define FORMAT_BYTES_WITH_POINT(t) format_bytes_full((char[FORMAT_BYTES_MAX]){}, FORMAT_BYTES_MAX, t, FORMAT_BYTES_USE_IEC|FORMAT_BYTES_ALWAYS_POINT|FORMAT_BYTES_TRAILING_B)
+
+#define FORMAT_BYTES_CGROUP_PROTECTION(t) (t == CGROUP_LIMIT_MAX ? "infinity" : FORMAT_BYTES(t))

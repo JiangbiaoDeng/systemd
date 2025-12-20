@@ -1,59 +1,28 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-
-#include "time-util.h"
-#include "util.h"
+#include "basic-forward.h"
 
 typedef struct RateLimit {
-        usec_t interval;
-        usec_t begin;
-        unsigned burst;
+        usec_t interval; /* Keep those two fields first so they can be initialized easily: */
+        unsigned burst;  /* RateLimit rl = { INTERVAL, BURST }; */
         unsigned num;
+        usec_t begin;
 } RateLimit;
 
-#define RATELIMIT_DEFINE(_name, _interval, _burst)       \
-        RateLimit _name = {                              \
-                .interval = (_interval),                 \
-                .burst = (_burst),                       \
-                .num = 0,                                \
-                .begin = 0                               \
-        }
+#define RATELIMIT_OFF (const RateLimit) { .interval = USEC_INFINITY, .burst = UINT_MAX }
 
-#define RATELIMIT_INIT(v, _interval, _burst)             \
-        do {                                             \
-                RateLimit *_r = &(v);                    \
-                _r->interval = (_interval);              \
-                _r->burst = (_burst);                    \
-                _r->num = 0;                             \
-                _r->begin = 0;                           \
-        } while (false)
+static inline void ratelimit_reset(RateLimit *rl) {
+        rl->num = rl->begin = 0;
+}
 
-#define RATELIMIT_RESET(v)                               \
-        do {                                             \
-                RateLimit *_r = &(v);                    \
-                _r->num = 0;                             \
-                _r->begin = 0;                           \
-        } while (false)
+static inline bool ratelimit_configured(const RateLimit *rl) {
+        return rl->interval > 0 && rl->burst > 0;
+}
 
-bool ratelimit_test(RateLimit *r);
+bool ratelimit_below(RateLimit *rl);
+
+unsigned ratelimit_num_dropped(const RateLimit *rl);
+
+usec_t ratelimit_end(const RateLimit *rl);
+usec_t ratelimit_left(const RateLimit *rl);

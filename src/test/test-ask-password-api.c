@@ -1,39 +1,29 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2016 Zbigniew Jędrzejewski-Szmek
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include "alloc-util.h"
 #include "ask-password-api.h"
-#include "log.h"
+#include "strv.h"
+#include "tests.h"
 
-static void ask_password(void) {
+TEST(ask_password) {
+        _cleanup_strv_free_ char **ret = NULL;
         int r;
-        _cleanup_free_ char *ret;
 
-        r = ask_password_tty(-1, "hello?", "da key", 0, 0, NULL, &ret);
-        assert(r >= 0);
+        static const AskPasswordRequest req = {
+                .tty_fd = -EBADF,
+                .message = "hello?",
+                .keyring = "da key",
+                .until = USEC_INFINITY,
+                .hup_fd = -EBADF,
+        };
 
-        log_info("Got %s", ret);
+        r = ask_password_tty(&req, /* flags= */ ASK_PASSWORD_CONSOLE_COLOR, &ret);
+        if (r == -ECANCELED)
+                ASSERT_NULL(ret);
+        else {
+                ASSERT_OK(r);
+                assert_se(strv_length(ret) == 1);
+                log_info("Got \"%s\"", *ret);
+        }
 }
 
-int main(int argc, char **argv) {
-        log_parse_environment();
-
-        ask_password();
-}
+DEFINE_TEST_MAIN(LOG_DEBUG);

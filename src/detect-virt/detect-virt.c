@@ -1,29 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <errno.h>
 #include <getopt.h>
-#include <stdbool.h>
-#include <stdlib.h>
 
-#include "util.h"
+#include "alloc-util.h"
+#include "build.h"
+#include "confidential-virt.h"
+#include "log.h"
+#include "main-func.h"
+#include "pretty-print.h"
+#include "string-table.h"
 #include "virt.h"
 
 static bool arg_quiet = false;
@@ -33,9 +18,17 @@ static enum {
         ONLY_CONTAINER,
         ONLY_CHROOT,
         ONLY_PRIVATE_USERS,
+        ONLY_CVM,
 } arg_mode = ANY_VIRTUALIZATION;
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-detect-virt", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]\n\n"
                "Detect execution in a virtualized environment.\n\n"
                "  -h --help             Show this help\n"
@@ -44,8 +37,16 @@ static void help(void) {
                "  -v --vm               Only detect whether we are run in a VM\n"
                "  -r --chroot           Detect whether we are run in a chroot() environment\n"
                "     --private-users    Only detect whether we are running in a user namespace\n"
+               "     --cvm              Only detect whether we are run in a confidential VM\n"
                "  -q --quiet            Don't output anything, just set return value\n"
-               , program_invocation_short_name);
+               "     --list             List all known and detectable types of virtualization\n"
+               "     --list-cvm         List all known and detectable types of confidential \n"
+               "                        virtualization\n"
+               "\nSee the %s for details.\n",
+               program_invocation_short_name,
+               link);
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -53,6 +54,9 @@ static int parse_argv(int argc, char *argv[]) {
         enum {
                 ARG_VERSION = 0x100,
                 ARG_PRIVATE_USERS,
+                ARG_LIST,
+                ARG_CVM,
+                ARG_LIST_CVM,
         };
 
         static const struct option options[] = {
@@ -63,6 +67,9 @@ static int parse_argv(int argc, char *argv[]) {
                 { "chroot",        no_argument, NULL, 'r'               },
                 { "private-users", no_argument, NULL, ARG_PRIVATE_USERS },
                 { "quiet",         no_argument, NULL, 'q'               },
+                { "cvm",           no_argument, NULL, ARG_CVM           },
+                { "list",          no_argument, NULL, ARG_LIST          },
+                { "list-cvm",      no_argument, NULL, ARG_LIST_CVM      },
                 {}
         };
 
@@ -76,8 +83,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -102,86 +108,90 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_mode = ONLY_CHROOT;
                         break;
 
+                case ARG_LIST:
+                        return DUMP_STRING_TABLE(virtualization, Virtualization, _VIRTUALIZATION_MAX);
+
+                case ARG_CVM:
+                        arg_mode = ONLY_CVM;
+                        return 1;
+
+                case ARG_LIST_CVM:
+                        return DUMP_STRING_TABLE(confidential_virtualization, ConfidentialVirtualization, _CONFIDENTIAL_VIRTUALIZATION_MAX);
+
                 case '?':
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
-        if (optind < argc) {
-                log_error("%s takes no arguments.", program_invocation_short_name);
-                return -EINVAL;
-        }
+        if (optind < argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "%s takes no arguments.",
+                                       program_invocation_short_name);
 
         return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
+        Virtualization v;
+        ConfidentialVirtualization c;
         int r;
 
         /* This is mostly intended to be used for scripts which want
          * to detect whether we are being run in a virtualized
          * environment or not */
 
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+                return r;
 
         switch (arg_mode) {
-
         case ONLY_VM:
-                r = detect_vm();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for VM: %m");
-                        return EXIT_FAILURE;
-                }
-
+                v = detect_vm();
+                if (v < 0)
+                        return log_error_errno(v, "Failed to check for VM: %m");
                 break;
 
         case ONLY_CONTAINER:
-                r = detect_container();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for container: %m");
-                        return EXIT_FAILURE;
-                }
-
+                v = detect_container();
+                if (v < 0)
+                        return log_error_errno(v, "Failed to check for container: %m");
                 break;
 
         case ONLY_CHROOT:
                 r = running_in_chroot();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for chroot() environment: %m");
-                        return EXIT_FAILURE;
-                }
-
-                return r ? EXIT_SUCCESS : EXIT_FAILURE;
+                if (r < 0)
+                        return log_error_errno(r, "Failed to check for chroot() environment: %m");
+                return !r;
 
         case ONLY_PRIVATE_USERS:
                 r = running_in_userns();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for user namespace: %m");
-                        return EXIT_FAILURE;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to check for user namespace: %m");
+                return !r;
 
-                return r ? EXIT_SUCCESS : EXIT_FAILURE;
+        case ONLY_CVM:
+                c = detect_confidential_virtualization();
+                if (c < 0)
+                        return log_error_errno(c, "Failed to check for confidential virtualization: %m");
+                if (!arg_quiet)
+                        puts(confidential_virtualization_to_string(c));
+                return c == CONFIDENTIAL_VIRTUALIZATION_NONE;
 
         case ANY_VIRTUALIZATION:
         default:
-                r = detect_virtualization();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for virtualization: %m");
-                        return EXIT_FAILURE;
-                }
-
-                break;
+                v = detect_virtualization();
+                if (v < 0)
+                        return log_error_errno(v, "Failed to check for virtualization: %m");
         }
 
         if (!arg_quiet)
-                puts(virtualization_to_string(r));
+                puts(virtualization_to_string(v));
 
-        return r != VIRTUALIZATION_NONE ? EXIT_SUCCESS : EXIT_FAILURE;
+        return v == VIRTUALIZATION_NONE;
 }
+
+DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE(run);

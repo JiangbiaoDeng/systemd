@@ -1,73 +1,28 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <sys/types.h>
-#include <sys/uio.h>
-
-#include "macro.h"
-#include "time-util.h"
+#include "basic-forward.h"
 
 int flush_fd(int fd);
 
 ssize_t loop_read(int fd, void *buf, size_t nbytes, bool do_poll);
 int loop_read_exact(int fd, void *buf, size_t nbytes, bool do_poll);
-int loop_write(int fd, const void *buf, size_t nbytes, bool do_poll);
+
+int loop_write_full(int fd, const void *buf, size_t nbytes, usec_t timeout) _nonnull_if_nonzero_(2, 3);
+static inline int loop_write(int fd, const void *buf, size_t nbytes) {
+        return loop_write_full(fd, buf, nbytes, 0);
+}
 
 int pipe_eof(int fd);
+
+int ppoll_usec_full(struct pollfd *fds, size_t n_fds, usec_t timeout, const sigset_t *ss) _nonnull_if_nonzero_(1, 2);
+_nonnull_if_nonzero_(1, 2) static inline int ppoll_usec(struct pollfd *fds, size_t n_fds, usec_t timeout) {
+        return ppoll_usec_full(fds, n_fds, timeout, NULL);
+}
 
 int fd_wait_for_event(int fd, int event, usec_t timeout);
 
 ssize_t sparse_write(int fd, const void *p, size_t sz, size_t run_length);
-
-static inline size_t IOVEC_TOTAL_SIZE(const struct iovec *i, unsigned n) {
-        unsigned j;
-        size_t r = 0;
-
-        for (j = 0; j < n; j++)
-                r += i[j].iov_len;
-
-        return r;
-}
-
-static inline size_t IOVEC_INCREMENT(struct iovec *i, unsigned n, size_t k) {
-        unsigned j;
-
-        for (j = 0; j < n; j++) {
-                size_t sub;
-
-                if (_unlikely_(k <= 0))
-                        break;
-
-                sub = MIN(i[j].iov_len, k);
-                i[j].iov_len -= sub;
-                i[j].iov_base = (uint8_t*) i[j].iov_base + sub;
-                k -= sub;
-        }
-
-        return k;
-}
 
 static inline bool FILE_SIZE_VALID(uint64_t l) {
         /* ftruncate() and friends take an unsigned file size, but actually cannot deal with file sizes larger than
@@ -80,14 +35,8 @@ static inline bool FILE_SIZE_VALID_OR_INFINITY(uint64_t l) {
 
         /* Same as above, but allows one extra value: -1 as indication for infinity. */
 
-        if (l == (uint64_t) -1)
+        if (l == UINT64_MAX)
                 return true;
 
         return FILE_SIZE_VALID(l);
-
 }
-
-#define IOVEC_INIT(base, len) { .iov_base = (base), .iov_len = (len) }
-#define IOVEC_MAKE(base, len) (struct iovec) IOVEC_INIT(base, len)
-#define IOVEC_INIT_STRING(string) IOVEC_INIT((char*) string, strlen(string))
-#define IOVEC_MAKE_STRING(string) (struct iovec) IOVEC_INIT_STRING(string)

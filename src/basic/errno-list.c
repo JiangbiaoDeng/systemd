@@ -1,45 +1,15 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
-#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "errno-list.h"
-#include "macro.h"
 
 static const struct errno_name* lookup_errno(register const char *str,
                                              register GPERF_LEN_TYPE len);
 
-#include "errno-from-name.h"
-#include "errno-to-name.h"
-
-const char *errno_to_name(int id) {
-
-        if (id < 0)
-                id = -id;
-
-        if (id >= (int) ELEMENTSOF(errno_names))
-                return NULL;
-
-        return errno_names[id];
-}
+#include "errno-from-name.inc"
 
 int errno_from_name(const char *name) {
         const struct errno_name *sc;
@@ -52,4 +22,33 @@ int errno_from_name(const char *name) {
 
         assert(sc->id > 0);
         return sc->id;
+}
+
+#if HAVE_STRERRORNAME_NP
+const char* errno_name_no_fallback(int id) {
+        if (id == 0) /* To stay in line with our implementation below.  */
+                return NULL;
+
+        return strerrorname_np(ABS(id));
+}
+#else
+#  include "errno-to-name.inc"
+
+const char* errno_name_no_fallback(int id) {
+        if (id < 0)
+                id = -id;
+
+        if ((size_t) id >= ELEMENTSOF(errno_names))
+                return NULL;
+
+        return errno_names[id];
+}
+#endif
+
+const char* errno_name(int id, char buf[static ERRNO_NAME_BUF_LEN]) {
+        const char *a = errno_name_no_fallback(id);
+        if (a)
+                return a;
+        snprintf(buf, ERRNO_NAME_BUF_LEN, "%d", abs(id));
+        return buf;
 }

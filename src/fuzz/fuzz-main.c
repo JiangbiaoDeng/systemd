@@ -1,25 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  Copyright 2018 Jonathan Rudenberg
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+#include <stdlib.h>
 
 #include "alloc-util.h"
-#include "log.h"
 #include "fileio.h"
 #include "fuzz.h"
+#include "log.h"
+#include "parse-util.h"
+#include "string-util.h"
+#include "tests.h"
 
 /* This is a test driver for the systemd fuzzers that provides main function
  * for regression testing outside of oss-fuzz (https://github.com/google/oss-fuzz)
@@ -27,17 +16,29 @@
  * It reads files named on the command line and passes them one by one into the
  * fuzzer that it is compiled into. */
 
+/* This one was borrowed from
+ * https://github.com/google/oss-fuzz/blob/646fca1b506b056db3a60d32c4a1a7398f171c94/infra/base-images/base-runner/bad_build_check#L19
+ */
+#define NUMBER_OF_RUNS 4
+
 int main(int argc, char **argv) {
-        int i, r;
-        size_t size;
-        char *name;
+        int r;
 
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
-        log_open();
+        test_setup_logging(LOG_DEBUG);
 
-        for (i = 1; i < argc; i++) {
+        unsigned number_of_runs = NUMBER_OF_RUNS;
+
+        const char *v = getenv("SYSTEMD_FUZZ_RUNS");
+        if (!isempty(v)) {
+                r = safe_atou(v, &number_of_runs);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse SYSTEMD_FUZZ_RUNS=%s: %m", v);
+        }
+
+        for (int i = 1; i < argc; i++) {
                 _cleanup_free_ char *buf = NULL;
+                size_t size;
+                char *name;
 
                 name = argv[i];
                 r = read_full_file(name, &buf, &size);
@@ -47,7 +48,9 @@ int main(int argc, char **argv) {
                 }
                 printf("%s... ", name);
                 fflush(stdout);
-                (void) LLVMFuzzerTestOneInput((uint8_t*)buf, size);
+                for (unsigned j = 0; j < number_of_runs; j++)
+                        if (LLVMFuzzerTestOneInput((uint8_t*)buf, size) == EXIT_TEST_SKIP)
+                                return EXIT_TEST_SKIP;
                 printf("ok\n");
         }
 
