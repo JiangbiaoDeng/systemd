@@ -20,6 +20,7 @@
 #include "main-func.h"
 #include "pager.h"
 #include "parse-argument.h"
+#include "pidref.h"
 #include "polkit-agent.h"
 #include "pretty-print.h"
 #include "process-util.h"
@@ -151,8 +152,6 @@ static int print_inhibitors(sd_bus *bus) {
                 r = table_set_sort(table, (size_t) 1, (size_t) 0, (size_t) 5, (size_t) 6);
                 if (r < 0)
                         return table_log_sort_error(r);
-
-                table_set_header(table, arg_legend);
 
                 r = table_print_with_pager(table, arg_json_format_flags, arg_pager_flags, arg_legend);
                 if (r < 0)
@@ -330,7 +329,6 @@ static int run(int argc, char *argv[]) {
                 _cleanup_strv_free_ char **arguments = NULL;
                 _cleanup_free_ char *w = NULL;
                 _cleanup_close_ int fd = -EBADF;
-                pid_t pid;
 
                 /* Ignore SIGINT and allow the forked process to receive it */
                 (void) ignore_signals(SIGINT);
@@ -360,18 +358,19 @@ static int run(int argc, char *argv[]) {
                 if (!arguments)
                         return log_oom();
 
-                r = safe_fork("(inhibit)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_CLOSE_ALL_FDS|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pid);
+                _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
+                r = pidref_safe_fork("(inhibit)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_CLOSE_ALL_FDS|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pidref);
                 if (r < 0)
                         return r;
                 if (r == 0) {
                         /* Child */
                         execvp(arguments[0], arguments);
                         log_open();
-                        log_error_errno(errno, "Failed to execute %s: %m", argv[optind]);
+                        log_error_errno(errno, "Failed to execute '%s': %m", arguments[0]);
                         _exit(EXIT_FAILURE);
                 }
 
-                return wait_for_terminate_and_check(argv[optind], pid, WAIT_LOG);
+                return pidref_wait_for_terminate_and_check(argv[optind], &pidref, WAIT_LOG_ABNORMAL);
         }
 }
 

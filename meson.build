@@ -90,12 +90,6 @@ conf.set10('HAVE_SPLIT_BIN', split_bin,
 
 have_standalone_binaries = get_option('standalone-binaries')
 
-sysvinit_path = get_option('sysvinit-path')
-sysvrcnd_path = get_option('sysvrcnd-path')
-conf.set10('HAVE_SYSV_COMPAT', sysvinit_path != '' and sysvrcnd_path != '',
-           description : 'SysV init scripts and rcN.d links are supported')
-sysvrclocal_path = get_option('rc-local')
-conf.set10('HAVE_SYSV_RC_LOCAL', sysvrclocal_path != '')
 conf.set10('CREATE_LOG_DIRS', get_option('create-log-dirs'))
 
 if get_option('hibernate') and not get_option('initrd')
@@ -150,41 +144,42 @@ modprobedir = prefixdir / 'lib/modprobe.d'
 pkgdatadir = datadir / 'systemd'
 environmentdir = prefixdir / 'lib/environment.d'
 pkgsysconfdir = sysconfdir / 'systemd'
-userunitdir = prefixdir / 'lib/systemd/user'
-userpresetdir = prefixdir / 'lib/systemd/user-preset'
+userunitdir = libexecdir / 'user'
+userpresetdir = libexecdir / 'user-preset'
 tmpfilesdir = prefixdir / 'lib/tmpfiles.d'
 usertmpfilesdir = prefixdir / 'share/user-tmpfiles.d'
 sysusersdir = prefixdir / 'lib/sysusers.d'
 sysctldir = prefixdir / 'lib/sysctl.d'
 binfmtdir = prefixdir / 'lib/binfmt.d'
 modulesloaddir = prefixdir / 'lib/modules-load.d'
-networkdir = prefixdir / 'lib/systemd/network'
+networkdir = libexecdir / 'network'
 systemgeneratordir = libexecdir / 'system-generators'
-usergeneratordir = prefixdir / 'lib/systemd/user-generators'
-systemenvgeneratordir = prefixdir / 'lib/systemd/system-environment-generators'
-userenvgeneratordir = prefixdir / 'lib/systemd/user-environment-generators'
+usergeneratordir = libexecdir / 'user-generators'
+systemenvgeneratordir = libexecdir / 'system-environment-generators'
+userenvgeneratordir = libexecdir / 'user-environment-generators'
 systemshutdowndir = libexecdir / 'system-shutdown'
 systemsleepdir = libexecdir / 'system-sleep'
-systemunitdir = prefixdir / 'lib/systemd/system'
-systempresetdir = prefixdir / 'lib/systemd/system-preset'
-initrdpresetdir = prefixdir / 'lib/systemd/initrd-preset'
+systemunitdir = libexecdir / 'system'
+systempresetdir = libexecdir / 'system-preset'
+initrdpresetdir = libexecdir / 'initrd-preset'
 udevlibexecdir = prefixdir / 'lib/udev'
 udevrulesdir = udevlibexecdir / 'rules.d'
 udevhwdbdir = udevlibexecdir / 'hwdb.d'
-catalogdir = prefixdir / 'lib/systemd/catalog'
+catalogdir = libexecdir / 'catalog'
 kerneldir = prefixdir / 'lib/kernel'
 kernelinstalldir = kerneldir / 'install.d'
 factorydir = datadir / 'factory'
-bootlibdir = prefixdir / 'lib/systemd/boot/efi'
-testsdir = prefixdir / 'lib/systemd/tests'
+bootlibdir = libexecdir / 'boot/efi'
+testsdir = libexecdir / 'tests'
 unittestsdir = testsdir / 'unit-tests'
 testdata_dir = testsdir / 'testdata'
 systemdstatedir = localstatedir / 'lib/systemd'
 catalogstatedir = systemdstatedir / 'catalog'
 randomseeddir = localstatedir / 'lib/systemd'
-profiledir = libexecdir / 'portable' / 'profile'
+systemprofiledir = libexecdir / 'portable' / 'profile'
+userprofiledir = libexecdir / 'user' / 'portable' / 'profile'
 repartdefinitionsdir = libexecdir / 'repart/definitions'
-ntpservicelistdir = prefixdir / 'lib/systemd/ntp-units.d'
+ntpservicelistdir = libexecdir / 'ntp-units.d'
 credstoredir = prefixdir / 'lib/credstore'
 pcrlockdir = prefixdir / 'lib/pcrlock.d'
 mimepackagesdir = prefixdir / 'share/mime/packages'
@@ -303,9 +298,6 @@ conf.set_quoted('SYSTEM_GENERATOR_DIR',                       systemgeneratordir
 conf.set_quoted('SYSTEM_PRESET_DIR',                          systempresetdir)
 conf.set_quoted('SYSTEM_SHUTDOWN_PATH',                       systemshutdowndir)
 conf.set_quoted('SYSTEM_SLEEP_PATH',                          systemsleepdir)
-conf.set_quoted('SYSTEM_SYSVINIT_PATH',                       sysvinit_path)
-conf.set_quoted('SYSTEM_SYSVRCND_PATH',                       sysvrcnd_path)
-conf.set_quoted('SYSTEM_SYSVRCLOCAL_PATH',                    sysvrclocal_path)
 conf.set_quoted('SYSUSERS_DIR',                               sysusersdir)
 conf.set_quoted('TMPFILES_DIR',                               tmpfilesdir)
 conf.set_quoted('USER_TMPFILES_DIR',                          usertmpfilesdir)
@@ -573,10 +565,6 @@ foreach ident : [
         ['renameat2',         '''#include <stdio.h>'''],        # since musl-1.2.6
         ['set_mempolicy',     '''#include <sys/syscall.h>'''],  # declared at numaif.h provided by libnuma, which we do not use
         ['get_mempolicy',     '''#include <sys/syscall.h>'''],  # declared at numaif.h provided by libnuma, which we do not use
-        ['strerrorname_np',   '''#include <string.h>'''],       # since glibc-2.32
-        ['mallinfo2',         '''#include <malloc.h>'''],       # since glibc-2.33
-        ['execveat',          '''#include <unistd.h>'''],       # since glibc-2.34
-        ['close_range',       '''#include <unistd.h>'''],       # since glibc-2.34
         ['epoll_pwait2',      '''#include <sys/epoll.h>'''],    # since glibc-2.35
         ['fsconfig',          '''#include <sys/mount.h>'''],    # since glibc-2.36
         ['fsmount',           '''#include <sys/mount.h>'''],    # since glibc-2.36
@@ -684,15 +672,6 @@ conf.set('GPERF_LEN_TYPE', gperf_len_type,
          description : 'The type of gperf "len" parameter')
 
 #####################################################################
-
-foreach header : [
-        'crypt.h',
-]
-
-        if not cc.has_header(header)
-                error(f'Header file @header@ not found')
-        endif
-endforeach
 
 foreach header : [
         'gshadow.h',
@@ -1046,22 +1025,18 @@ else
         libatomic = []
 endif
 
-libcrypt = dependency('libcrypt', 'libxcrypt', required : false)
-if not libcrypt.found()
-        # fallback to use find_library() if libcrypt is provided by glibc, e.g. for LibreELEC.
-        libcrypt = cc.find_library('crypt')
+if get_option('libc') == 'musl'
+        libcrypt = []
+        libcrypt_cflags = []
+        have = get_option('libcrypt').allowed()
+else
+        libcrypt = dependency('libcrypt', 'libxcrypt',
+                              required : get_option('libcrypt'),
+                              version : '>=4.4.0')
+        libcrypt_cflags = libcrypt.partial_dependency(includes: true, compile_args: true)
+        have = libcrypt.found()
 endif
-
-foreach func : [
-        'crypt_ra',               # since libxcrypt-4.0.0
-        'crypt_gensalt_ra',       # since libxcrypt-4.0.0
-        'crypt_preferred_method', # since libxcrypt-4.4.0
-]
-
-        have = cc.has_function(func, prefix : '''#include <crypt.h>''', args : '-D_GNU_SOURCE',
-                               dependencies : libcrypt)
-        conf.set10('HAVE_' + func.to_upper(), have)
-endforeach
+conf.set10('HAVE_LIBCRYPT', have)
 
 bpf_framework = get_option('bpf-framework')
 bpf_compiler = get_option('bpf-compiler')
@@ -1180,7 +1155,7 @@ conf.set10('HAVE_PWQUALITY', have)
 conf.set10('HAVE_PASSWDQC', not have and libpwquality.found())
 
 libseccomp = dependency('libseccomp',
-                        version : '>= 2.3.1',
+                        version : '>= 2.4.0',
                         required : get_option('seccomp'))
 conf.set10('HAVE_SECCOMP', libseccomp.found())
 libseccomp_cflags = libseccomp.partial_dependency(includes: true, compile_args: true)
@@ -1229,10 +1204,9 @@ conf.set10('HAVE_AUDIT', libaudit.found())
 libaudit_cflags = libaudit.partial_dependency(includes: true, compile_args: true)
 
 libblkid = dependency('blkid',
+                      version : '>=2.37.0',
                       required : get_option('blkid'))
 conf.set10('HAVE_BLKID', libblkid.found())
-conf.set10('HAVE_BLKID_PROBE_SET_HINT',
-           libblkid.found() and cc.has_function('blkid_probe_set_hint', dependencies : libblkid))
 libblkid_cflags = libblkid.partial_dependency(includes: true, compile_args: true)
 
 libkmod = dependency('libkmod',
@@ -1277,19 +1251,16 @@ if libcryptsetup_plugins.enabled()
 endif
 
 libcryptsetup = dependency('libcryptsetup',
-                           version : libcryptsetup_plugins.enabled() ? '>= 2.4.0' : '>= 2.0.1',
+                           version : '>= 2.4.0',
                            required : libcryptsetup)
 libcryptsetup_cflags = libcryptsetup.partial_dependency(includes: true, compile_args: true)
 
 have = libcryptsetup.found()
 conf.set10('HAVE_LIBCRYPTSETUP', have)
+conf.set10('HAVE_LIBCRYPTSETUP_PLUGINS',
+           libcryptsetup_plugins.allowed() and have)
 
 foreach ident : [
-                'crypt_activate_by_token_pin',   # 2.4
-                'crypt_logf',                    # 2.4
-                'crypt_reencrypt_run',           # 2.4
-                'crypt_token_external_path',     # 2.4
-                'crypt_token_max',               # 2.4
                 'crypt_set_keyring_to_link',     # 2.7
                 'crypt_token_set_external_path', # 2.7
         ]
@@ -1301,30 +1272,16 @@ foreach ident : [
         conf.set10('HAVE_' + ident.to_upper(), have_ident)
 endforeach
 
-conf.set10('HAVE_LIBCRYPTSETUP_PLUGINS',
-           libcryptsetup_plugins.allowed() and
-           conf.get('HAVE_CRYPT_ACTIVATE_BY_TOKEN_PIN') == 1 and
-           conf.get('HAVE_CRYPT_LOGF') == 1 and
-           conf.get('HAVE_CRYPT_TOKEN_EXTERNAL_PATH') == 1)
-
 libcurl = dependency('libcurl',
                      version : '>= 7.32.0',
                      required : get_option('libcurl'))
 conf.set10('HAVE_LIBCURL', libcurl.found())
 conf.set10('CURL_NO_OLDIES', conf.get('BUILD_MODE_DEVELOPER') == 1)
 
-feature = get_option('libidn2').disable_auto_if(get_option('libidn').enabled())
-libidn = dependency('libidn2',
-                    required : feature)
-have = libidn.found()
-if not have
-        # libidn is used for both libidn and libidn2 objects
-        libidn = dependency('libidn',
-                            required : get_option('libidn'))
-endif
-libidn_cflags = libidn.partial_dependency(includes: true, compile_args: true)
-conf.set10('HAVE_LIBIDN', not have and libidn.found())
-conf.set10('HAVE_LIBIDN2', have)
+libidn2 = dependency('libidn2',
+                     required : get_option('libidn2'))
+libidn2_cflags = libidn2.partial_dependency(includes: true, compile_args: true)
+conf.set10('HAVE_LIBIDN2', libidn2.found())
 
 libqrencode = dependency('libqrencode',
                          version : '>= 3',
@@ -1355,7 +1312,7 @@ libgnutls = dependency('gnutls',
 conf.set10('HAVE_GNUTLS', libgnutls.found())
 
 libopenssl = dependency('openssl',
-                        version : '>= 1.1.0',
+                        version : '>= 3.0.0',
                         required : get_option('openssl'))
 conf.set10('HAVE_OPENSSL', libopenssl.found())
 
@@ -1381,16 +1338,13 @@ conf.set10('HAVE_TSS2_ESYS3', tpm2.found() and tpm2.version().version_compare('>
 conf.set('TPM2_NVPCR_BASE', get_option('tpm2-nvpcr-base'))
 
 libdw = dependency('libdw',
+                   version : '>=0.177',
                    required : get_option('elfutils'))
 libdw_cflags = libdw.partial_dependency(includes: true, compile_args: true)
 libelf = dependency('libelf',
                     required : get_option('elfutils'))
 libelf_cflags = libelf.partial_dependency(includes: true, compile_args: true)
 conf.set10('HAVE_ELFUTILS', libdw.found() and libelf.found())
-
-# New in elfutils 0.177
-conf.set10('HAVE_DWELF_ELF_E_MACHINE_STRING',
-           libdw.found() and cc.has_function('dwelf_elf_e_machine_string', dependencies : libdw))
 
 # New in elfutils 0.192
 conf.set10('HAVE_DWFL_SET_SYSROOT',
@@ -1607,10 +1561,11 @@ conf.set10('ENABLE_SYSUPDATED', have2)
 conf.set10('ENABLE_STORAGETM', get_option('storagetm'))
 
 have = get_option('homed').require(
+        conf.get('HAVE_LIBCRYPT') == 1 and
         conf.get('HAVE_OPENSSL') == 1 and
         conf.get('HAVE_LIBFDISK') == 1 and
         conf.get('HAVE_LIBCRYPTSETUP') == 1,
-        error_message : 'openssl, fdisk and libcryptsetup required').allowed()
+        error_message : 'libcrypt, openssl, fdisk, and libcryptsetup required').allowed()
 conf.set10('ENABLE_HOMED', have)
 
 have = have and conf.get('HAVE_PAM') == 1
@@ -1642,6 +1597,7 @@ foreach tuple : [
                 ['backlight'],
                 ['binfmt'],
                 ['compat-mutable-uid-boundaries'],
+                ['compat-sysv-interfaces'],
                 ['coredump'],
                 ['efi'],
                 ['environment-d'],
@@ -2440,9 +2396,9 @@ subdir('src/pstore')
 subdir('src/ptyfwd')
 subdir('src/quotacheck')
 subdir('src/random-seed')
-subdir('src/rc-local-generator')
 subdir('src/remount-fs')
 subdir('src/repart')
+subdir('src/report')
 subdir('src/reply-password')
 subdir('src/resolve')
 subdir('src/rfkill')
@@ -2464,7 +2420,6 @@ subdir('src/system-update-generator')
 subdir('src/systemctl')
 subdir('src/sysupdate')
 subdir('src/sysusers')
-subdir('src/sysv-generator')
 subdir('src/timedate')
 subdir('src/timesync')
 subdir('src/tmpfiles')
@@ -2536,7 +2491,7 @@ foreach dict : executables
         foreach key, val : dict
                 if key in ['name', 'dbus', 'public', 'conditions', 'type', 'suite',
                            'timeout', 'parallel', 'objects', 'sources', 'extract',
-                           'include_directories', 'build_by_default']
+                           'include_directories', 'build_by_default', 'install']
                         continue
                 endif
 
@@ -2579,6 +2534,12 @@ foreach dict : executables
         build_by_default = dict.get('build_by_default',
                                     have_standalone_binaries or not is_standalone)
 
+        if not is_standalone
+                install = dict.get('install', true)
+        else
+                install = have_standalone_binaries
+        endif
+
         exe = executable(
                 name,
                 sources : exe_sources,
@@ -2586,6 +2547,7 @@ foreach dict : executables
                 implicit_include_directories : false,
                 include_directories : include_directories,
                 build_by_default: build_by_default,
+                install: install,
         )
 
         executables_by_name += { name : exe }
@@ -2825,7 +2787,6 @@ subdir('test')
 
 #####################################################################
 
-subdir('docs/sysvinit')
 subdir('docs/var-log')
 subdir('hwdb.d')
 subdir('man')
@@ -2859,8 +2820,6 @@ install_data('LICENSE.GPL2',
 
 install_subdir('LICENSES',
                install_dir : docdir)
-
-install_emptydir(systemdstatedir)
 
 #####################################################################
 
@@ -2949,6 +2908,21 @@ alias_target('gensources', generated_sources)
 
 clang_tidy = find_program('clang-tidy', required : false)
 if meson.version().version_compare('>=1.4.0')
+        uniq = {}
+
+        foreach source : sources
+                if uniq.has_key(source.full_path())
+                        continue
+                endif
+                uniq += {source.full_path(): source}
+        endforeach
+
+        # TODO: Use uniq.values() when we can rely on meson 1.10.0.
+        sources = []
+        foreach path, file : uniq
+                sources += [file]
+        endforeach
+
         foreach source : sources
                 if systemd_headers.contains(source)
                         continue
@@ -3045,9 +3019,6 @@ summary({
         'sysconf directory'                         : sysconfdir,
         'include directory'                         : includedir,
         'lib directory'                             : libdir,
-        'SysV init scripts'                         : sysvinit_path,
-        'SysV rc?.d directories'                    : sysvrcnd_path,
-        'SysV rc.local script'                      : sysvrclocal_path,
         'PAM modules directory'                     : pamlibdir,
         'PAM configuration directory'               : pamconfdir,
         'ssh server configuration directory'        : sshdconfdir,
@@ -3126,12 +3097,12 @@ foreach tuple : [
         ['gnutls'],
         ['libarchive'],
         ['libbpf'],
+        ['libcrypt'],
         ['libcryptsetup'],
         ['libcryptsetup-plugins'],
         ['libcurl'],
         ['libfdisk'],
         ['libfido2'],
-        ['libidn'],
         ['libidn2'],
         ['microhttpd'],
         ['openssl'],
@@ -3213,8 +3184,8 @@ foreach tuple : [
         ['man pages',              want_man],
         ['html pages',             want_html],
         ['man page indices',       want_man and have_lxml],
-        ['SysV compat'],
         ['compat-mutable-uid-boundaries'],
+        ['compat-sysv-interfaces'],
         ['utmp'],
         ['ldconfig'],
         ['adm group',              get_option('adm-group')],

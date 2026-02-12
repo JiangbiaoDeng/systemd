@@ -1785,7 +1785,7 @@ static int action_with(DissectedImage *m, LoopDevice *d) {
                         return log_error_errno(r, "Failed to unlock loopback block device: %m");
         }
 
-        rcode = safe_fork("(with)", FORK_CLOSE_ALL_FDS|FORK_LOG|FORK_WAIT, NULL);
+        rcode = pidref_safe_fork("(with)", FORK_CLOSE_ALL_FDS|FORK_LOG|FORK_WAIT, /* ret= */ NULL);
         if (rcode == 0) {
                 /* Child */
 
@@ -2041,7 +2041,8 @@ static int run(int argc, char *argv[]) {
         if (arg_image) {
                 r = path_pick_update_warn(
                                 &arg_image,
-                                &pick_filter_image_raw,
+                                pick_filter_image_raw,
+                                ELEMENTSOF(pick_filter_image_raw),
                                 PICK_ARCHITECTURE|PICK_TRIES,
                                 /* ret_result= */ NULL);
                 if (r < 0)
@@ -2051,7 +2052,8 @@ static int run(int argc, char *argv[]) {
         if (arg_root) {
                 r = path_pick_update_warn(
                                 &arg_root,
-                                &pick_filter_image_dir,
+                                pick_filter_image_dir,
+                                ELEMENTSOF(pick_filter_image_dir),
                                 PICK_ARCHITECTURE|PICK_TRIES,
                                 /* ret_result= */ NULL);
                 if (r < 0)
@@ -2188,6 +2190,7 @@ static int run(int argc, char *argv[]) {
                         r = mountfsd_mount_image(
                                         arg_image,
                                         userns_fd,
+                                        /* options= */ NULL,
                                         arg_image_policy,
                                         &arg_verity_settings,
                                         arg_flags,

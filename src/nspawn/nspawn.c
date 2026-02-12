@@ -107,6 +107,7 @@
 #include "shift-uid.h"
 #include "signal-util.h"
 #include "siphash24.h"
+#include "snapshot-util.h"
 #include "socket-util.h"
 #include "stat-util.h"
 #include "stdio-util.h"
@@ -2767,16 +2768,8 @@ static int reset_audit_loginuid(void) {
                 return 0;
 
         r = write_string_file("/proc/self/loginuid", "4294967295", WRITE_STRING_FILE_DISABLE_BUFFER);
-        if (r < 0) {
-                log_error_errno(r,
-                                "Failed to reset audit login UID. This probably means that your kernel is too\n"
-                                "old and you have audit enabled. Note that the auditing subsystem is known to\n"
-                                "be incompatible with containers on old kernels. Please make sure to upgrade\n"
-                                "your kernel or to off auditing with 'audit=0' on the kernel command line before\n"
-                                "using systemd-nspawn. Sleeping for 5s... (%m)");
-
-                sleep(5);
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to reset audit login UID: %m");
 
         return 0;
 }
@@ -2884,7 +2877,7 @@ static int recursive_chown(const char *directory, uid_t shift, uid_t range) {
 
 /*
  * Return values:
- * < 0 : wait_for_terminate() failed to get the state of the
+ * < 0 : pidref_wait_for_terminate() failed to get the state of the
  *       container, the container was terminated by a signal, or
  *       failed for an unknown reason.  No change is made to the
  *       container argument.
@@ -3013,13 +3006,14 @@ static int pick_paths(void) {
 
         if (arg_directory) {
                 _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
-                PickFilter filter = pick_filter_image_dir;
+                PickFilter filter = *pick_filter_image_dir;
 
                 filter.architecture = arg_architecture;
 
                 r = path_pick_update_warn(
                                 &arg_directory,
                                 &filter,
+                                /* n_filters= */ 1,
                                 PICK_ARCHITECTURE|PICK_TRIES,
                                 &result);
                 if (r < 0) {
@@ -3032,13 +3026,14 @@ static int pick_paths(void) {
 
         if (arg_image) {
                 _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
-                PickFilter filter = pick_filter_image_raw;
+                PickFilter filter = *pick_filter_image_raw;
 
                 filter.architecture = arg_architecture;
 
                 r = path_pick_update_warn(
                                 &arg_image,
                                 &filter,
+                                /* n_filters= */ 1,
                                 PICK_ARCHITECTURE|PICK_TRIES,
                                 &result);
                 if (r < 0)
@@ -3049,13 +3044,14 @@ static int pick_paths(void) {
 
         if (arg_template) {
                 _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
-                PickFilter filter = pick_filter_image_dir;
+                PickFilter filter = *pick_filter_image_dir;
 
                 filter.architecture = arg_architecture;
 
                 r = path_pick_update_warn(
                                 &arg_template,
                                 &filter,
+                                /* n_filters= */ 1,
                                 PICK_ARCHITECTURE,
                                 &result);
                 if (r < 0)
@@ -3772,7 +3768,7 @@ static int setup_unix_export_dir_outside(char **ret) {
                         "tmpfs",
                         q,
                         "tmpfs",
-                        MS_NODEV|MS_NOEXEC|MS_NOSUID|ms_nosymfollow_supported(),
+                        MS_NODEV|MS_NOEXEC|MS_NOSUID|MS_NOSYMFOLLOW,
                         "size=4M,nr_inodes=64,mode=0755");
         if (r < 0)
                 return r;
@@ -3786,7 +3782,7 @@ static int setup_unix_export_dir_outside(char **ret) {
                         /* what= */ NULL,
                         w,
                         /* fstype= */ NULL,
-                        MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOEXEC|MS_NOSUID|ms_nosymfollow_supported(),
+                        MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOEXEC|MS_NOSUID|MS_NOSYMFOLLOW,
                         /* options= */ NULL);
         if (r < 0)
                 return r;
@@ -3831,7 +3827,7 @@ static int setup_unix_export_host_inside(const char *directory, const char *unix
                         /* what= */ NULL,
                         p,
                         /* fstype= */ NULL,
-                        MS_BIND|MS_REMOUNT|MS_NODEV|MS_NOEXEC|MS_NOSUID|ms_nosymfollow_supported(),
+                        MS_BIND|MS_REMOUNT|MS_NODEV|MS_NOEXEC|MS_NOSUID|MS_NOSYMFOLLOW,
                         /* options= */ NULL);
         if (r < 0)
                 return r;
@@ -5920,7 +5916,7 @@ static int do_cleanup(void) {
 }
 
 static int run(int argc, char *argv[]) {
-        bool remove_directory = false, remove_image = false, veth_created = false;
+        bool remove_image = false, veth_created = false;
         _cleanup_close_ int master = -EBADF, userns_fd = -EBADF, mount_fd = -EBADF;
         _cleanup_fdset_free_ FDSet *fds = NULL;
         int r, ret = EXIT_SUCCESS;
@@ -5928,6 +5924,7 @@ static int run(int argc, char *argv[]) {
         struct ExposeArgs expose_args = {};
         _cleanup_(release_lock_file) LockFile tree_global_lock = LOCK_FILE_INIT, tree_local_lock = LOCK_FILE_INIT;
         _cleanup_(rmdir_and_freep) char *rootdir = NULL;
+        _cleanup_(rm_rf_subvolume_and_freep) char *snapshot_dir = NULL;
         _cleanup_(loop_device_unrefp) LoopDevice *loop = NULL;
         _cleanup_(dissected_image_unrefp) DissectedImage *dissected_image = NULL;
         _cleanup_(sd_netlink_unrefp) sd_netlink *nfnl = NULL;
@@ -6069,63 +6066,27 @@ static int run(int argc, char *argv[]) {
                 }
 
                 if (arg_ephemeral) {
-                        _cleanup_free_ char *np = NULL;
-
                         r = chase_and_update(&arg_directory, 0);
                         if (r < 0)
                                 goto finish;
 
-                        /* If the specified path is a mount point we generate the new snapshot immediately
-                         * inside it under a random name. However if the specified is not a mount point we
-                         * create the new snapshot in the parent directory, just next to it. */
-                        r = path_is_mount_point(arg_directory);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to determine whether directory %s is mount point: %m", arg_directory);
-                                goto finish;
-                        }
-                        if (r > 0)
-                                r = tempfn_random_child(arg_directory, "machine.", &np);
-                        else
-                                r = tempfn_random(arg_directory, "machine.", &np);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to generate name for directory snapshot: %m");
-                                goto finish;
-                        }
-
-                        /* We take an exclusive lock on this image, since it's our private, ephemeral copy
-                         * only owned by us and no one else. */
-                        r = image_path_lock(
+                        r = create_ephemeral_snapshot(
+                                        arg_directory,
                                         arg_privileged ? RUNTIME_SCOPE_SYSTEM : RUNTIME_SCOPE_USER,
-                                        np,
-                                        LOCK_EX|LOCK_NB,
-                                        arg_privileged ? &tree_global_lock : NULL,
-                                        &tree_local_lock);
+                                        arg_read_only,
+                                        &tree_global_lock,
+                                        &tree_local_lock,
+                                        &snapshot_dir);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to lock %s: %m", np);
+                                log_error_errno(r, "Failed to create ephemeral snapshot: %m");
                                 goto finish;
                         }
 
-                        {
-                                BLOCK_SIGNALS(SIGINT);
-                                r = btrfs_subvol_snapshot_at(AT_FDCWD, arg_directory, AT_FDCWD, np,
-                                                             (arg_read_only ? BTRFS_SNAPSHOT_READ_ONLY : 0) |
-                                                             BTRFS_SNAPSHOT_FALLBACK_COPY |
-                                                             BTRFS_SNAPSHOT_FALLBACK_DIRECTORY |
-                                                             BTRFS_SNAPSHOT_RECURSIVE |
-                                                             BTRFS_SNAPSHOT_QUOTA |
-                                                             BTRFS_SNAPSHOT_SIGINT);
-                        }
-                        if (r == -EINTR) {
-                                log_error_errno(r, "Interrupted while copying file system tree to %s, removed again.", np);
-                                goto finish;
-                        }
+                        r = free_and_strdup(&arg_directory, snapshot_dir);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to create snapshot %s from %s: %m", np, arg_directory);
+                                log_oom();
                                 goto finish;
                         }
-
-                        free_and_replace(arg_directory, np);
-                        remove_directory = true;
                 } else {
                         r = chase_and_update(&arg_directory, arg_template ? CHASE_NONEXISTENT : 0);
                         if (r < 0)
@@ -6381,6 +6342,7 @@ static int run(int argc, char *argv[]) {
                         r = mountfsd_mount_image(
                                         arg_image,
                                         userns_fd,
+                                        /* options= */ NULL,
                                         arg_image_policy,
                                         &arg_verity_settings,
                                         dissect_image_flags,
@@ -6474,14 +6436,6 @@ finish:
         }
 
         pager_close();
-
-        if (remove_directory && arg_directory) {
-                int k;
-
-                k = rm_rf(arg_directory, REMOVE_ROOT|REMOVE_PHYSICAL|REMOVE_SUBVOLUME);
-                if (k < 0)
-                        log_warning_errno(k, "Cannot remove '%s', ignoring: %m", arg_directory);
-        }
 
         if (remove_image && arg_image) {
                 if (unlink(arg_image) < 0)

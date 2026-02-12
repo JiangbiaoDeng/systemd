@@ -12,6 +12,7 @@
 #include "oomd-util.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pidref.h"
 #include "process-util.h"
 #include "set.h"
 #include "tests.h"
@@ -39,11 +40,10 @@ static int enter_cgroup_root_cached(void) {
         return saved_result;
 }
 
-static int fork_and_sleep(unsigned sleep_min) {
-        pid_t pid;
+static int fork_and_sleep(unsigned sleep_min, PidRef *ret) {
         int r;
 
-        ASSERT_OK(r = safe_fork("(test-oom-child)", /* flags= */ 0, &pid));
+        r = pidref_safe_fork("(test-oom-child)", FORK_LOG|FORK_DEATHSIG_SIGKILL, ret);
         if (r == 0) {
                 usec_t timeout = usec_add(now(CLOCK_MONOTONIC), sleep_min * USEC_PER_MINUTE);
                 for (;;) {
@@ -56,7 +56,7 @@ static int fork_and_sleep(unsigned sleep_min) {
                 }
         }
 
-        return pid;
+        return r;
 }
 
 TEST(oomd_cgroup_kill) {
@@ -81,14 +81,14 @@ TEST(oomd_cgroup_kill) {
         /* Do this twice to also check the increment behavior on the xattrs */
         for (size_t i = 0; i < 2; i++) {
                 _cleanup_free_ char *v = NULL;
-                pid_t pid[2];
+                _cleanup_(pidref_done) PidRef one = PIDREF_NULL, two = PIDREF_NULL;
 
-                for (size_t j = 0; j < 2; j++) {
-                        pid[j] = fork_and_sleep(5);
-                        ASSERT_OK(cg_attach(subcgroup, pid[j]));
-                }
+                ASSERT_OK(fork_and_sleep(5, &one));
+                ASSERT_OK(cg_attach(subcgroup, one.pid));
+                ASSERT_OK(fork_and_sleep(5, &two));
+                ASSERT_OK(cg_attach(subcgroup, two.pid));
 
-                ASSERT_OK_POSITIVE(oomd_cgroup_kill(subcgroup, false /* recurse */, false /* dry run */));
+                ASSERT_OK_POSITIVE(oomd_cgroup_kill(NULL /* manager */, &(OomdCGroupContext){ .path = subcgroup }, false /* recurse */));
 
                 ASSERT_OK(cg_get_xattr(subcgroup, "user.oomd_ooms", &v, /* ret_size= */ NULL));
                 ASSERT_STREQ(v, i == 0 ? "1" : "2");
@@ -115,7 +115,7 @@ TEST(oomd_cgroup_kill) {
 
 TEST(oomd_cgroup_context_acquire_and_insert) {
         _cleanup_hashmap_free_ Hashmap *h1 = NULL, *h2 = NULL;
-        _cleanup_(oomd_cgroup_context_freep) OomdCGroupContext *ctx = NULL;
+        _cleanup_(oomd_cgroup_context_unrefp) OomdCGroupContext *ctx = NULL;
         OomdCGroupContext *c1, *c2;
         CGroupMask mask;
 
@@ -138,7 +138,7 @@ TEST(oomd_cgroup_context_acquire_and_insert) {
         ASSERT_EQ(ctx->swap_usage, 0u);
         ASSERT_EQ(ctx->last_pgscan, 0u);
         ASSERT_EQ(ctx->pgscan, 0u);
-        ASSERT_NULL(ctx = oomd_cgroup_context_free(ctx));
+        ASSERT_NULL(ctx = oomd_cgroup_context_unref(ctx));
 
         ASSERT_OK(oomd_cgroup_context_acquire("", &ctx));
         ASSERT_STREQ(ctx->path, "/");
@@ -429,7 +429,7 @@ TEST(oomd_sort_cgroups) {
 }
 
 TEST(oomd_fetch_cgroup_oom_preference) {
-        _cleanup_(oomd_cgroup_context_freep) OomdCGroupContext *ctx = NULL;
+        _cleanup_(oomd_cgroup_context_unrefp) OomdCGroupContext *ctx = NULL;
         ManagedOOMPreference root_pref;
         CGroupMask mask;
         bool test_xattrs;
@@ -464,7 +464,7 @@ TEST(oomd_fetch_cgroup_oom_preference) {
                 ASSERT_FAIL(oomd_fetch_cgroup_oom_preference(ctx, NULL));
                 ASSERT_EQ(ctx->preference, MANAGED_OOM_PREFERENCE_NONE);
         }
-        ctx = oomd_cgroup_context_free(ctx);
+        ctx = oomd_cgroup_context_unref(ctx);
 
         /* also check when only avoid is set to true */
         if (test_xattrs) {
@@ -473,7 +473,7 @@ TEST(oomd_fetch_cgroup_oom_preference) {
                 ASSERT_OK(oomd_cgroup_context_acquire(cgroup, &ctx));
                 ASSERT_OK(oomd_fetch_cgroup_oom_preference(ctx, NULL));
                 ASSERT_EQ(ctx->preference, geteuid() == 0 ? MANAGED_OOM_PREFERENCE_AVOID : MANAGED_OOM_PREFERENCE_NONE);
-                ctx = oomd_cgroup_context_free(ctx);
+                ctx = oomd_cgroup_context_unref(ctx);
         }
 
         /* Test the root cgroup */
@@ -493,7 +493,7 @@ TEST(oomd_fetch_cgroup_oom_preference) {
         /* Assert that avoid/omit are not set if the cgroup and prefix are not
          * owned by the same user. */
         if (test_xattrs && !empty_or_root(cgroup) && geteuid() == 0) {
-                ctx = oomd_cgroup_context_free(ctx);
+                ctx = oomd_cgroup_context_unref(ctx);
                 ASSERT_OK(cg_set_access(cgroup, 61183, 0));
                 ASSERT_OK(oomd_cgroup_context_acquire(cgroup, &ctx));
 

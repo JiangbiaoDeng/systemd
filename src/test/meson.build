@@ -345,7 +345,7 @@ executables += [
         },
         test_template + {
                 'sources' : files('test-libcrypt-util.c'),
-                'dependencies' : libcrypt,
+                'conditions' : ['HAVE_LIBCRYPT'],
                 'timeout' : 120,
         },
         test_template + {
@@ -529,14 +529,16 @@ executables += [
                 'type' : 'manual',
         },
         core_test_template + {
+                'sources' : files('test-thp.c'),
+                'dependencies' : common_test_dependencies,
+                'type' : 'manual',
+        },
+        core_test_template + {
                 'sources' : files('test-cgroup-cpu.c'),
         },
         core_test_template + {
                 'sources' : files('test-cgroup-mask.c'),
                 'dependencies' : common_test_dependencies,
-        },
-        core_test_template + {
-                'sources' : files('test-cgroup-unit-default.c'),
         },
         core_test_template + {
                 'sources' : files('test-chown-rec.c'),

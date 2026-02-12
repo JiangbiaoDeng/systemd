@@ -37,6 +37,10 @@ varlinkctl introspect -j /run/systemd/journal/io.systemd.journal | jq --seq .
 varlinkctl introspect /run/systemd/journal/io.systemd.journal io.systemd.Journal
 varlinkctl introspect -j /run/systemd/journal/io.systemd.journal io.systemd.Journal | jq .
 
+varlinkctl list-registry
+varlinkctl list-registry -j | jq .
+varlinkctl list-registry | grep io.systemd.Manager
+
 if command -v userdbctl >/dev/null; then
     systemctl start systemd-userdbd
     varlinkctl call /run/systemd/userdb/io.systemd.Multiplexer io.systemd.UserDatabase.GetUserRecord '{ "userName" : "testuser", "service" : "io.systemd.Multiplexer" }'
@@ -210,6 +214,18 @@ varlinkctl call /run/systemd/io.systemd.Manager io.systemd.Unit.List '{"cgroup":
 invocation_id="$(systemctl show -P InvocationID systemd-journald.service)"
 varlinkctl call /run/systemd/io.systemd.Manager io.systemd.Unit.List "{\"invocationID\": \"$invocation_id\"}"
 
+# test io.systemd.Metrics
+varlinkctl info /run/systemd/report/io.systemd.Manager
+
+varlinkctl list-methods /run/systemd/report/io.systemd.Manager
+varlinkctl list-methods -j /run/systemd/report/io.systemd.Manager io.systemd.Metrics | jq .
+
+varlinkctl introspect /run/systemd/report/io.systemd.Manager
+varlinkctl introspect -j /run/systemd/report/io.systemd.Manager io.systemd.Metrics | jq .
+
+varlinkctl --more call /run/systemd/report/io.systemd.Manager io.systemd.Metrics.List {}
+varlinkctl --more call /run/systemd/report/io.systemd.Manager io.systemd.Metrics.Describe {}
+
 # test io.systemd.Manager in user manager
 testuser_uid=$(id -u testuser)
 systemd-run --wait --pipe --user --machine testuser@ \
@@ -222,3 +238,6 @@ systemd-run --wait --pipe --user --machine testuser@ \
 # test io.systemd.Unit in user manager
 systemd-run --wait --pipe --user --machine testuser@ \
         varlinkctl --more call "/run/user/$testuser_uid/systemd/io.systemd.Manager" io.systemd.Unit.List '{}'
+
+# test report
+systemd-report

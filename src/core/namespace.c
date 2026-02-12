@@ -27,7 +27,6 @@
 #include "glyph-util.h"
 #include "iovec-util.h"
 #include "label-util.h"
-#include "list.h"
 #include "lock-util.h"
 #include "log.h"
 #include "loop-util.h"
@@ -117,7 +116,7 @@ typedef struct MountEntry {
         char *options_malloc;
         unsigned long flags;      /* Mount flags used by EMPTY_DIR and TMPFS. Do not include MS_RDONLY here, but please use read_only. */
         unsigned n_followed;
-        LIST_HEAD(MountOptions, image_options_const);
+        MountOptions *image_options_const;
         char **overlay_layers;
         VeritySettings verity;
         ImageClass filter_class; /* Used for live updates to skip inapplicable images */
@@ -567,7 +566,8 @@ static int append_extensions(
                 r = path_pick(/* toplevel_path= */ NULL,
                               /* toplevel_fd= */ AT_FDCWD,
                               m->source,
-                              &pick_filter_image_raw,
+                              pick_filter_image_raw,
+                              ELEMENTSOF(pick_filter_image_raw),
                               PICK_ARCHITECTURE|PICK_TRIES,
                               &result);
                 if (r == -ENOENT && m->ignore_enoent)
@@ -638,7 +638,8 @@ static int append_extensions(
                 r = path_pick(/* toplevel_path= */ NULL,
                               /* toplevel_fd= */ AT_FDCWD,
                               e,
-                              &pick_filter_image_dir,
+                              pick_filter_image_dir,
+                              ELEMENTSOF(pick_filter_image_dir),
                               PICK_ARCHITECTURE|PICK_TRIES,
                               &result);
                 if (r == -ENOENT && ignore_enoent)
@@ -1514,6 +1515,7 @@ static int mount_private_cgroup2fs(const MountEntry *m, const NamespaceParameter
 
 static int mount_procfs(const MountEntry *m, const NamespaceParameters *p) {
         _cleanup_free_ char *opts = NULL;
+        int r;
 
         assert(m);
         assert(p);
@@ -1521,32 +1523,16 @@ static int mount_procfs(const MountEntry *m, const NamespaceParameters *p) {
         if (p->protect_proc != PROTECT_PROC_DEFAULT ||
             p->proc_subset != PROC_SUBSET_ALL) {
 
-                /* Starting with kernel 5.8 procfs' hidepid= logic is truly per-instance (previously it
-                 * pretended to be per-instance but actually was per-namespace), hence let's make use of it
-                 * if requested. To make sure this logic succeeds only on kernels where hidepid= is
-                 * per-instance, we'll exclusively use the textual value for hidepid=, since support was
-                 * added in the same commit: if it's supported it is thus also per-instance. */
+                opts = strjoin("hidepid=",
+                               p->protect_proc == PROTECT_PROC_DEFAULT ? "off" : protect_proc_to_string(p->protect_proc));
+                if (!opts)
+                        return -ENOMEM;
 
-                const char *hpv = p->protect_proc == PROTECT_PROC_DEFAULT ?
-                                  "off" :
-                                  protect_proc_to_string(p->protect_proc);
-
-                /* hidepid= support was added in 5.8, so we can use fsconfig()/fsopen() (which were added in
-                 * 5.2) to check if hidepid= is supported. This avoids a noisy dmesg log by the kernel when
-                 * trying to use hidepid= on systems where it isn't supported. The same applies for subset=.
-                 * fsopen()/fsconfig() was also backported on some distros which allows us to detect
-                 * hidepid=/subset= support in even more scenarios. */
-
-                if (mount_option_supported("proc", "hidepid", hpv) > 0) {
-                        opts = strjoin("hidepid=", hpv);
-                        if (!opts)
-                                return -ENOMEM;
+                if (p->proc_subset != PROC_SUBSET_ALL) {
+                        r = strextendf_with_separator(&opts, ",", "subset=%s", proc_subset_to_string(p->proc_subset));
+                        if (r < 0)
+                                return r;
                 }
-
-                if (p->proc_subset == PROC_SUBSET_PID &&
-                    mount_option_supported("proc", "subset", "pid") > 0)
-                        if (!strextend_with_separator(&opts, ",", "subset=pid"))
-                                return -ENOMEM;
         }
 
         /* Mount a new instance, so that we get the one that matches our user namespace, if we are running in
@@ -2064,15 +2050,20 @@ static int apply_one_mount(
                         /* Hmm, either the source or the destination are missing. Let's see if we can create
                            the destination, then try again. */
 
-                        (void) mkdir_parents(mount_entry_path(m), 0755);
-
-                        q = make_mount_point_inode_from_path(what, mount_entry_path(m), 0755);
+                        q = mkdir_parents(mount_entry_path(m), 0755);
                         if (q < 0 && q != -EEXIST)
                                 // FIXME: this shouldn't be logged at LOG_WARNING, but be bubbled up, and logged there to avoid duplicate logging
-                                log_warning_errno(q, "Failed to create destination mount point node '%s', ignoring: %m",
+                                log_warning_errno(q, "Failed to create parent directories of destination mount point node '%s', ignoring: %m",
                                                   mount_entry_path(m));
-                        else
-                                try_again = true;
+                        else {
+                                q = make_mount_point_inode_from_path(what, mount_entry_path(m), 0755);
+                                if (q < 0 && q != -EEXIST)
+                                        // FIXME: this shouldn't be logged at LOG_WARNING, but be bubbled up, and logged there to avoid duplicate logging
+                                        log_warning_errno(q, "Failed to create destination mount point node '%s', ignoring: %m",
+                                                          mount_entry_path(m));
+                                else
+                                        try_again = true;
+                        }
                 }
 
                 if (try_again)
@@ -2605,6 +2596,7 @@ int setup_namespace(const NamespaceParameters *p, char **reterr_path) {
 
                                 r = dissected_image_decrypt(
                                                 dissected_image,
+                                                /* root= */ NULL,
                                                 /* passphrase= */ NULL,
                                                 p->verity,
                                                 p->root_image_policy,
@@ -2619,6 +2611,7 @@ int setup_namespace(const NamespaceParameters *p, char **reterr_path) {
                                 r = mountfsd_mount_image(
                                                 p->root_image,
                                                 userns_fd,
+                                                p->root_image_options,
                                                 p->root_image_policy,
                                                 p->verity,
                                                 dissect_image_flags,
@@ -3110,24 +3103,22 @@ int bind_mount_add(BindMount **b, size_t *n, const BindMount *item) {
         return 0;
 }
 
-MountImage* mount_image_free_many(MountImage *m, size_t *n) {
-        assert(n);
-        assert(m || *n == 0);
+void mount_image_free_many(MountImage *m, size_t n) {
+        assert(m || n == 0);
 
-        for (size_t i = 0; i < *n; i++) {
-                free(m[i].source);
-                free(m[i].destination);
-                mount_options_free_all(m[i].mount_options);
+        FOREACH_ARRAY(i, m, n) {
+                free(i->source);
+                free(i->destination);
+                mount_options_free_all(i->mount_options);
         }
 
         free(m);
-        *n = 0;
-        return NULL;
 }
 
 int mount_image_add(MountImage **m, size_t *n, const MountImage *item) {
         _cleanup_free_ char *s = NULL, *d = NULL;
-        _cleanup_(mount_options_free_allp) MountOptions *options = NULL;
+        _cleanup_(mount_options_free_allp) MountOptions *o = NULL;
+        int r;
 
         assert(m);
         assert(n);
@@ -3143,21 +3134,10 @@ int mount_image_add(MountImage **m, size_t *n, const MountImage *item) {
                         return -ENOMEM;
         }
 
-        LIST_FOREACH(mount_options, i, item->mount_options) {
-                _cleanup_(mount_options_free_allp) MountOptions *o = NULL;
-
-                o = new(MountOptions, 1);
-                if (!o)
-                        return -ENOMEM;
-
-                *o = (MountOptions) {
-                        .partition_designator = i->partition_designator,
-                        .options = strdup(i->options),
-                };
-                if (!o->options)
-                        return -ENOMEM;
-
-                LIST_APPEND(mount_options, options, TAKE_PTR(o));
+        if (item->mount_options) {
+                r = mount_options_dup(item->mount_options, &o);
+                if (r < 0)
+                        return r;
         }
 
         if (!GREEDY_REALLOC(*m, *n + 1))
@@ -3166,7 +3146,7 @@ int mount_image_add(MountImage **m, size_t *n, const MountImage *item) {
         (*m)[(*n)++] = (MountImage) {
                 .source = TAKE_PTR(s),
                 .destination = TAKE_PTR(d),
-                .mount_options = TAKE_PTR(options),
+                .mount_options = TAKE_PTR(o),
                 .ignore_enoent = item->ignore_enoent,
                 .type = item->type,
         };
@@ -3477,7 +3457,7 @@ static int is_extension_overlay(const char *path, int fd) {
                 fd = dfd;
         }
 
-        r = is_mount_point_at(fd, /* filename= */ NULL, /* flags= */ 0);
+        r = is_mount_point_at(fd, /* path= */ NULL, /* flags= */ 0);
         if (r < 0)
                 return log_debug_errno(r, "Unable to determine whether '%s' is a mount point: %m", path);
         if (r == 0)
@@ -3502,7 +3482,6 @@ static int is_extension_overlay(const char *path, int fd) {
 static int unpeel_get_fd(const char *mount_path, int *ret_fd) {
         _cleanup_close_pair_ int pipe_fds[2] = EBADF_PAIR;
         _cleanup_close_ int fs_fd = -EBADF;
-        pid_t pid;
         int r;
 
         assert(mount_path);
@@ -3513,7 +3492,7 @@ static int unpeel_get_fd(const char *mount_path, int *ret_fd) {
                 return log_debug_errno(errno, "Failed to create socket pair: %m");
 
         /* Clone mount namespace here to unpeel without affecting live process */
-        r = safe_fork("(sd-ns-unpeel)", FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, &pid);
+        r = pidref_safe_fork("(sd-ns-unpeel)", FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, /* ret= */ NULL);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -3903,15 +3882,16 @@ int refresh_extensions_in_namespace(
          *    overlays to obtain FDs the underlying directories, over which we will reapply the overlays
          * 3. In the child again, receive the FDs and reapply the overlays
          */
-        r = safe_fork("(sd-ns-refresh-exts)",
-                      FORK_DEATHSIG_SIGTERM|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE,
-                      NULL);
+        r = pidref_safe_fork(
+                        "(sd-ns-refresh-exts)",
+                        FORK_DEATHSIG_SIGTERM|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE,
+                        /* ret= */ NULL);
         if (r < 0)
                 return r;
         if (r == 0) {
                 /* Child (host namespace) */
                 _cleanup_close_pair_ int pair[2] = EBADF_PAIR;
-                _cleanup_(sigkill_waitp) pid_t grandchild_pid = 0;
+                _cleanup_(pidref_done_sigkill_wait) PidRef grandchild = PIDREF_NULL;
 
                  (void) mkdir_p_label(overlay_prefix, 0555);
 
@@ -3928,9 +3908,7 @@ int refresh_extensions_in_namespace(
                         _exit(EXIT_FAILURE);
                 }
 
-                r = safe_fork("(sd-ns-refresh-exts-grandchild)",
-                                FORK_LOG|FORK_DEATHSIG_SIGKILL,
-                                &grandchild_pid);
+                r = pidref_safe_fork("(sd-ns-refresh-exts-grandchild)", FORK_LOG|FORK_DEATHSIG_SIGKILL, &grandchild);
                 if (r < 0)
                         _exit(EXIT_FAILURE);
                 if (r == 0) {
@@ -3964,11 +3942,14 @@ int refresh_extensions_in_namespace(
                                 _exit(EXIT_FAILURE);
                 }
 
-                r = wait_for_terminate_and_check("(sd-ns-refresh-exts-grandchild)", TAKE_PID(grandchild_pid), 0);
+                r = pidref_wait_for_terminate_and_check("(sd-ns-refresh-exts-grandchild)", &grandchild, 0);
                 if (r < 0) {
                         log_debug_errno(r, "Failed to wait for target namespace process to finish: %m");
                         _exit(EXIT_FAILURE);
                 }
+
+                pidref_done(&grandchild);
+
                 if (r != EXIT_SUCCESS) {
                         log_debug("Target namespace fork did not succeed");
                         _exit(EXIT_FAILURE);

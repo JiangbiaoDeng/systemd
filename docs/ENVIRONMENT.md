@@ -138,8 +138,6 @@ All tools:
 * `$SYSTEMCTL_INSTALL_CLIENT_SIDE=1` — if set, enable or disable unit files on
   the client side, instead of asking PID 1 to do this.
 
-* `$SYSTEMCTL_SKIP_SYSV=1` — if set, do not call SysV compatibility hooks.
-
 * `$SYSTEMCTL_SKIP_AUTO_KEXEC=1` — if set, do not automatically kexec instead of
   reboot when a new kernel has been loaded.
 
@@ -290,6 +288,9 @@ All tools:
 * `$SYSTEMD_NSS_DYNAMIC_BYPASS=1` — if set, `nss-systemd` won't return
   user/group records for dynamically registered service users (i.e. users
   registered through `DynamicUser=1`).
+
+* `$SYSTEMD_NSS_LOG_LEVEL=<level>` — If set, sets the log level for `nss-systemd`
+  and other NSS plugins specifically. Takes priority over `$SYSTEMD_LOG_LEVEL`.
 
 `systemd-timedated`:
 
@@ -448,14 +449,6 @@ All tools:
   skipped. This can be useful if `systemd-sysusers` is invoked unconditionally
   as a child process by another tool, such as package managers running it in a
   postinstall script.
-
-`systemd-sysv-generator`:
-
-* `$SYSTEMD_SYSVINIT_PATH` — Controls where `systemd-sysv-generator` looks for
-  SysV init scripts.
-
-* `$SYSTEMD_SYSVRCND_PATH` — Controls where `systemd-sysv-generator` looks for
-  SysV init script runlevel link farms.
 
 systemd tests:
 
@@ -678,6 +671,10 @@ SYSTEMD_HOME_DEBUG_SUFFIX=foo \
   specified algorithm takes an effect immediately, you need to explicitly run
   `journalctl --rotate`.
 
+* `$SYSTEMD_JOURNAL_FD_SIZE_MAX` – Takes a size with the usual suffixes (K, M, ...) in
+  string format. Overrides the default maximum allowed size for a file-descriptor
+  based input record to be stored in the journal.
+
 * `$SYSTEMD_CATALOG` – path to the compiled catalog database file to use for
   `journalctl -x`, `journalctl --update-catalog`, `journalctl --list-catalog`
   and related calls.
@@ -846,3 +843,10 @@ Tools using the Varlink protocol (such as `varlinkctl`) or sd-bus (such as
   overall number of threads used to load modules by `systemd-modules-load`.
   If unset, the default number of threads is equal to the number of online CPUs,
   with a maximum of 16. If set to `0`, multi-threaded loading is disabled.
+
+`systemd-sysupdate`:
+
+* `$SYSTEMD_SYSUPDATE_VERIFY_FRESHNESS` – takes a boolean. If false the
+  'freshness' check via `BEST-BEFORE-YYYY-MM-DD` files in `SHA256SUMS` manifest
+  files is disabled, and updating from outdated manifests will not result in an
+  error.

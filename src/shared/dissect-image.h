@@ -6,7 +6,6 @@
 #include "architecture.h"
 #include "gpt.h"
 #include "iovec-util.h"
-#include "list.h"
 #include "shared-forward.h"
 
 typedef struct DecryptedImage DecryptedImage;
@@ -114,9 +113,7 @@ typedef struct DissectedImage {
 } DissectedImage;
 
 typedef struct MountOptions {
-        PartitionDesignator partition_designator;
-        char *options;
-        LIST_FIELDS(MountOptions, mount_options);
+        char *options[_PARTITION_DESIGNATOR_MAX];
 } MountOptions;
 
 typedef struct VeritySettings {
@@ -154,6 +151,9 @@ typedef struct ExtensionReleaseData {
 MountOptions* mount_options_free_all(MountOptions *options);
 DEFINE_TRIVIAL_CLEANUP_FUNC(MountOptions*, mount_options_free_all);
 const char* mount_options_from_designator(const MountOptions *options, PartitionDesignator designator);
+int mount_options_set_and_consume(MountOptions **options, PartitionDesignator d, char *s);
+int mount_options_dup(const MountOptions *source, MountOptions **ret);
+int mount_options_to_string(const MountOptions *mount_options, char **ret);
 
 int probe_filesystem_full(int fd, const char *path, uint64_t offset, uint64_t size, bool restrict_fstypes, char **ret_fstype);
 static inline int probe_filesystem(const char *path, char **ret_fstype) {
@@ -171,12 +171,13 @@ void dissected_image_close(DissectedImage *m);
 DissectedImage* dissected_image_unref(DissectedImage *m);
 DEFINE_TRIVIAL_CLEANUP_FUNC(DissectedImage*, dissected_image_unref);
 
-int dissected_image_decrypt(DissectedImage *m, const char *passphrase, const VeritySettings *verity, const ImagePolicy *image_policy, DissectImageFlags flags);
+int dissected_image_decrypt(DissectedImage *m, const char *root, const char *passphrase, const VeritySettings *verity, const ImagePolicy *image_policy, DissectImageFlags flags);
 int dissected_image_decrypt_interactively(DissectedImage *m, const char *passphrase, const VeritySettings *verity, const ImagePolicy *image_policy, DissectImageFlags flags);
 int dissected_image_mount(DissectedImage *m, const char *where, uid_t uid_shift, uid_t uid_range, int userns_fd, DissectImageFlags flags);
 int dissected_image_mount_and_warn(DissectedImage *m, const char *where, uid_t uid_shift, uid_t uid_range, int userns_fd, DissectImageFlags flags);
 
 int dissected_image_acquire_metadata(DissectedImage *m, int userns_fd, DissectImageFlags extra_flags);
+int dissected_image_name_from_path(const char *path, char **ret);
 
 Architecture dissected_image_architecture(DissectedImage *m);
 
@@ -268,9 +269,13 @@ static inline const char* dissected_partition_fstype(const DissectedPartition *m
 
 int get_common_dissect_directory(char **ret);
 
-int mountfsd_mount_image(const char *path, int userns_fd, const ImagePolicy *image_policy, const VeritySettings *verity, DissectImageFlags flags, DissectedImage **ret);
+int mountfsd_mount_image_fd(int image_fd, int userns_fd, const MountOptions *options, const ImagePolicy *image_policy, const VeritySettings *verity, DissectImageFlags flags, DissectedImage **ret);
+int mountfsd_mount_image(const char *path, int userns_fd, const MountOptions *options, const ImagePolicy *image_policy, const VeritySettings *verity, DissectImageFlags flags, DissectedImage **ret);
 int mountfsd_mount_directory_fd(int directory_fd, int userns_fd, DissectImageFlags flags, int *ret_mount_fd);
 int mountfsd_mount_directory(const char *path, int userns_fd, DissectImageFlags flags, int *ret_mount_fd);
 
-int mountfsd_make_directory_fd(int parent_fd, const char *name, DissectImageFlags flags, int *ret_directory_fd);
-int mountfsd_make_directory(const char *path, DissectImageFlags flags, int *ret_directory_fd);
+int mountfsd_make_directory_fd(int parent_fd, const char *name, mode_t mode, DissectImageFlags flags, int *ret_directory_fd);
+int mountfsd_make_directory(const char *path, mode_t mode, DissectImageFlags flags, int *ret_directory_fd);
+
+int copy_tree_at_foreign(int source_fd, int target_fd, int userns_fd);
+int remove_tree_foreign(const char *path, int userns_fd);

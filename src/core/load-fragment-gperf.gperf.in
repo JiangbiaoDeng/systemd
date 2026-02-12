@@ -195,6 +195,7 @@
 {% endif %}
 {{type}}.ProtectHostname,                     config_parse_protect_hostname,                      0,                                  offsetof({{type}}, exec_context)
 {{type}}.MemoryKSM,                           config_parse_tristate,                              0,                                  offsetof({{type}}, exec_context.memory_ksm)
+{{type}}.MemoryTHP,                           config_parse_memory_thp,                            0,                                  offsetof({{type}}, exec_context.memory_thp)
 {%- endmacro -%}
 
 {%- macro KILL_CONTEXT_CONFIG_ITEMS(type) -%}
@@ -222,11 +223,11 @@
 {{type}}.CPUQuotaPeriodSec,                   config_parse_sec_def_infinity,                      0,                                  offsetof({{type}}, cgroup_context.cpu_quota_period_usec)
 {{type}}.MemoryAccounting,                    config_parse_bool,                                  0,                                  offsetof({{type}}, cgroup_context.memory_accounting)
 {{type}}.MemoryMin,                           config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
-{{type}}.DefaultMemoryMin,                    config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
-{{type}}.DefaultMemoryLow,                    config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
-{{type}}.DefaultStartupMemoryLow,             config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
 {{type}}.MemoryLow,                           config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
 {{type}}.StartupMemoryLow,                    config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
+{{type}}.DefaultMemoryMin,                    config_parse_warn_compat,                           DISABLED_LEGACY,                    0
+{{type}}.DefaultMemoryLow,                    config_parse_warn_compat,                           DISABLED_LEGACY,                    0
+{{type}}.DefaultStartupMemoryLow,             config_parse_warn_compat,                           DISABLED_LEGACY,                    0
 {{type}}.MemoryHigh,                          config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
 {{type}}.StartupMemoryHigh,                   config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
 {{type}}.MemoryMax,                           config_parse_memory_limit,                          0,                                  offsetof({{type}}, cgroup_context)
@@ -278,6 +279,7 @@
 {{type}}.MemoryPressureWatch,                 config_parse_memory_pressure_watch,                 0,                                  offsetof({{type}}, cgroup_context.memory_pressure_watch)
 {{type}}.NFTSet,                              config_parse_cgroup_nft_set,                        NFT_SET_PARSE_CGROUP,               offsetof({{type}}, cgroup_context)
 {{type}}.CoredumpReceive,                     config_parse_bool,                                  0,                                  offsetof({{type}}, cgroup_context.coredump_receive)
+{{type}}.BindNetworkInterface,                config_parse_bind_network_interface,                0,                                  offsetof({{type}}, cgroup_context)
 {%- endmacro -%}
 
 %{

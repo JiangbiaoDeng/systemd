@@ -65,16 +65,6 @@ endif
 
 ############################################################
 
-if want_tests != 'false' and conf.get('HAVE_SYSV_COMPAT') == 1
-        exe = executables_by_name.get('systemd-sysv-generator')
-        test('sysv-generator-test',
-             files('sysv-generator-test.py'),
-             depends : exe,
-             suite : 'sysv')
-endif
-
-############################################################
-
 if want_tests != 'false' and conf.get('HAVE_BLKID') == 1
         exe = executables_by_name.get('bootctl')
         test('test-bootctl-json',
@@ -342,7 +332,6 @@ if install_tests
                 'journal-data',
                 'knot-data',
                 'test-cgroup-mask',
-                'test-cgroup-unit-default',
                 'test-engine',
                 'test-execute',
                 'test-fstab-generator',

@@ -1192,18 +1192,18 @@ static int ask_password_conv(
         return PAM_SUCCESS;
 }
 
-static int pam_close_session_and_delete_credentials(pam_handle_t *handle, int flags) {
+static int pam_close_session_and_delete_credentials(pam_handle_t *pamh, int flags) {
         int r, s;
 
-        assert(handle);
+        assert(pamh);
 
-        r = sym_pam_close_session(handle, flags);
+        r = sym_pam_close_session(pamh, flags);
         if (r != PAM_SUCCESS)
-                pam_syslog_pam_error(handle, LOG_DEBUG, r, "pam_close_session() failed: @PAMERR@");
+                pam_syslog_pam_error(pamh, LOG_DEBUG, r, "pam_close_session() failed: @PAMERR@");
 
-        s = sym_pam_setcred(handle, PAM_DELETE_CRED | flags);
+        s = sym_pam_setcred(pamh, PAM_DELETE_CRED | flags);
         if (s != PAM_SUCCESS)
-                pam_syslog_pam_error(handle, LOG_DEBUG, r, "pam_setcred(PAM_DELETE_CRED) failed: @PAMERR@");
+                pam_syslog_pam_error(pamh, LOG_DEBUG, r, "pam_setcred(PAM_DELETE_CRED) failed: @PAMERR@");
 
         return r != PAM_SUCCESS ? r : s;
 }
@@ -1339,7 +1339,7 @@ static int setup_pam(
         _cleanup_(barrier_destroy) Barrier barrier = BARRIER_NULL;
         _cleanup_strv_free_ char **e = NULL;
         _cleanup_free_ char *tty = NULL;
-        pam_handle_t *handle = NULL;
+        pam_handle_t *pamh = NULL;
         sigset_t old_ss;
         int pam_code = PAM_SUCCESS, r;
         bool close_session = false;
@@ -1369,9 +1369,9 @@ static int setup_pam(
         if (log_get_max_level() < LOG_DEBUG)
                 flags |= PAM_SILENT;
 
-        pam_code = sym_pam_start(context->pam_name, user, &conv, &handle);
+        pam_code = sym_pam_start(context->pam_name, user, &conv, &pamh);
         if (pam_code != PAM_SUCCESS) {
-                handle = NULL;
+                pamh = NULL;
                 goto fail;
         }
 
@@ -1379,32 +1379,32 @@ static int setup_pam(
         if (r < 0)
                 goto fail;
         if (r > 0) {
-                pam_code = sym_pam_set_item(handle, PAM_TTY, tty);
+                pam_code = sym_pam_set_item(pamh, PAM_TTY, tty);
                 if (pam_code != PAM_SUCCESS)
                         goto fail;
         }
 
         STRV_FOREACH(nv, *env) {
-                pam_code = sym_pam_putenv(handle, *nv);
+                pam_code = sym_pam_putenv(pamh, *nv);
                 if (pam_code != PAM_SUCCESS)
                         goto fail;
         }
 
-        pam_code = sym_pam_acct_mgmt(handle, flags);
+        pam_code = sym_pam_acct_mgmt(pamh, flags);
         if (pam_code != PAM_SUCCESS)
                 goto fail;
 
-        pam_code = sym_pam_setcred(handle, PAM_ESTABLISH_CRED | flags);
+        pam_code = sym_pam_setcred(pamh, PAM_ESTABLISH_CRED | flags);
         if (pam_code != PAM_SUCCESS)
-                pam_syslog_pam_error(handle, LOG_DEBUG, pam_code, "pam_setcred(PAM_ESTABLISH_CRED) failed, ignoring: @PAMERR@");
+                pam_syslog_pam_error(pamh, LOG_DEBUG, pam_code, "pam_setcred(PAM_ESTABLISH_CRED) failed, ignoring: @PAMERR@");
 
-        pam_code = sym_pam_open_session(handle, flags);
+        pam_code = sym_pam_open_session(pamh, flags);
         if (pam_code != PAM_SUCCESS)
                 goto fail;
 
         close_session = true;
 
-        e = sym_pam_getenvlist(handle);
+        e = sym_pam_getenvlist(pamh);
         if (!e) {
                 pam_code = PAM_BUF_ERR;
                 goto fail;
@@ -1416,7 +1416,7 @@ static int setup_pam(
 
         parent_pid = getpid_cached();
 
-        r = safe_fork("(sd-pam)", 0, NULL);
+        r = pidref_safe_fork("(sd-pam)", /* flags= */ 0, /* ret= */ NULL);
         if (r < 0)
                 goto fail;
         if (r == 0) {
@@ -1479,7 +1479,7 @@ static int setup_pam(
 
                 /* If our parent died we'll end the session */
                 if (getppid() != parent_pid) {
-                        pam_code = pam_close_session_and_delete_credentials(handle, flags);
+                        pam_code = pam_close_session_and_delete_credentials(pamh, flags);
                         if (pam_code != PAM_SUCCESS)
                                 goto child_finish;
                 }
@@ -1489,7 +1489,7 @@ static int setup_pam(
         child_finish:
                 /* NB: pam_end() when called in child processes should set PAM_DATA_SILENT to let the module
                  * know about this. See pam_end(3) */
-                (void) sym_pam_end(handle, pam_code | flags | PAM_DATA_SILENT);
+                (void) sym_pam_end(pamh, pam_code | flags | PAM_DATA_SILENT);
                 _exit(ret);
         }
 
@@ -1497,7 +1497,7 @@ static int setup_pam(
 
         /* If the child was forked off successfully it will do all the cleanups, so forget about the handle
          * here. */
-        handle = NULL;
+        pamh = NULL;
 
         /* Unblock SIGTERM again in the parent */
         assert_se(sigprocmask(SIG_SETMASK, &old_ss, NULL) >= 0);
@@ -1515,16 +1515,16 @@ static int setup_pam(
 
 fail:
         if (pam_code != PAM_SUCCESS) {
-                pam_syslog_pam_error(handle, LOG_ERR, pam_code, "PAM failed: @PAMERR@");
+                pam_syslog_pam_error(pamh, LOG_ERR, pam_code, "PAM failed: @PAMERR@");
                 r = -EPERM;  /* PAM errors do not map to errno */
         } else
                 log_error_errno(r, "PAM failed: %m");
 
-        if (handle) {
+        if (pamh) {
                 if (close_session)
-                        pam_code = pam_close_session_and_delete_credentials(handle, flags);
+                        pam_code = pam_close_session_and_delete_credentials(pamh, flags);
 
-                (void) sym_pam_end(handle, pam_code | flags);
+                (void) sym_pam_end(pamh, pam_code | flags);
         }
 
         closelog();
@@ -1673,7 +1673,7 @@ static int apply_syscall_filter(const ExecContext *c, const ExecParameters *p) {
         if (skip_seccomp_unavailable("SystemCallFilter="))
                 return 0;
 
-        negative_action = c->syscall_errno == SECCOMP_ERROR_NUMBER_KILL ? scmp_act_kill_process() : SCMP_ACT_ERRNO(c->syscall_errno);
+        negative_action = c->syscall_errno == SECCOMP_ERROR_NUMBER_KILL ? SCMP_ACT_KILL_PROCESS : SCMP_ACT_ERRNO(c->syscall_errno);
 
         if (c->syscall_allow_list) {
                 default_action = negative_action;
@@ -1694,9 +1694,7 @@ static int apply_syscall_filter(const ExecContext *c, const ExecParameters *p) {
 }
 
 static int apply_syscall_log(const ExecContext *c, const ExecParameters *p) {
-#ifdef SCMP_ACT_LOG
         uint32_t default_action, action;
-#endif
 
         assert(c);
         assert(p);
@@ -1704,7 +1702,6 @@ static int apply_syscall_log(const ExecContext *c, const ExecParameters *p) {
         if (!context_has_syscall_logs(c))
                 return 0;
 
-#ifdef SCMP_ACT_LOG
         if (skip_seccomp_unavailable("SystemCallLog="))
                 return 0;
 
@@ -1719,11 +1716,6 @@ static int apply_syscall_log(const ExecContext *c, const ExecParameters *p) {
         }
 
         return seccomp_load_syscall_filter_set_raw(default_action, c->syscall_log, action, false);
-#else
-        /* old libseccomp */
-        log_debug( "SECCOMP feature SCMP_ACT_LOG not available, skipping SystemCallLog=");
-        return 0;
-#endif
 }
 
 static int apply_syscall_archs(const ExecContext *c, const ExecParameters *p) {
@@ -2297,45 +2289,6 @@ static int build_pass_environment(const ExecContext *c, char ***ret) {
         return 0;
 }
 
-static int setup_private_users_child(int unshare_ready_fd, const char *uid_map, const char *gid_map, bool allow_setgroups) {
-        int r;
-
-        /* Child process, running in the original user namespace. Let's update the parent's UID/GID map from
-         * here, after the parent opened its own user namespace. */
-
-        pid_t ppid = getppid();
-
-        /* Wait until the parent unshared the user namespace */
-        uint64_t c;
-        ssize_t n = read(unshare_ready_fd, &c, sizeof(c));
-        if (n < 0)
-                return log_debug_errno(errno, "Failed to read from signaling eventfd: %m");
-        if (n != sizeof(c))
-                return log_debug_errno(SYNTHETIC_ERRNO(EIO), "Short read from signaling eventfd.");
-
-        /* Disable the setgroups() system call in the child user namespace, for good, unless PrivateUsers=full
-         * and using the system service manager. */
-        const char *a = procfs_file_alloca(ppid, "setgroups");
-        const char *setgroups = allow_setgroups ? "allow" : "deny";
-        r = write_string_file(a, setgroups, WRITE_STRING_FILE_DISABLE_BUFFER);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to write '%s' to %s: %m", setgroups, a);
-
-        /* First write the GID map */
-        a = procfs_file_alloca(ppid, "gid_map");
-        r = write_string_file(a, gid_map, WRITE_STRING_FILE_DISABLE_BUFFER);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to write GID map to %s: %m", a);
-
-        /* Then write the UID map */
-        a = procfs_file_alloca(ppid, "uid_map");
-        r = write_string_file(a, uid_map, WRITE_STRING_FILE_DISABLE_BUFFER);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to write UID map to %s: %m", a);
-
-        return 0;
-}
-
 static int bpffs_helper(const ExecContext *c, int socket_fd) {
         assert(c);
         assert(socket_fd >= 0);
@@ -2402,11 +2355,57 @@ static int bpffs_prepare(
         return 0;
 }
 
-static int setup_private_users(PrivateUsers private_users, uid_t ouid, gid_t ogid, uid_t uid, gid_t gid, bool allow_setgroups) {
+static int setup_private_users_child(int unshare_ready_fd, const char *uid_map, const char *gid_map, bool allow_setgroups) {
+        int r;
+
+        /* Child process, running in the original user namespace. Let's update the parent's UID/GID map from
+         * here, after the parent opened its own user namespace. */
+
+        pid_t ppid = getppid();
+
+        /* Wait until the parent unshared the user namespace */
+        uint64_t c;
+        ssize_t n = read(unshare_ready_fd, &c, sizeof(c));
+        if (n < 0)
+                return log_debug_errno(errno, "Failed to read from signaling eventfd: %m");
+        if (n != sizeof(c))
+                return log_debug_errno(SYNTHETIC_ERRNO(EIO), "Short read from signaling eventfd.");
+
+        /* Disable the setgroups() system call in the child user namespace, for good, unless PrivateUsers=full
+         * and using the system service manager. */
+        const char *a = procfs_file_alloca(ppid, "setgroups");
+        const char *setgroups = allow_setgroups ? "allow" : "deny";
+        r = write_string_file(a, setgroups, WRITE_STRING_FILE_DISABLE_BUFFER);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to write '%s' to %s: %m", setgroups, a);
+
+        /* First write the GID map */
+        a = procfs_file_alloca(ppid, "gid_map");
+        r = write_string_file(a, gid_map, WRITE_STRING_FILE_DISABLE_BUFFER);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to write GID map to %s: %m", a);
+
+        /* Then write the UID map */
+        a = procfs_file_alloca(ppid, "uid_map");
+        r = write_string_file(a, uid_map, WRITE_STRING_FILE_DISABLE_BUFFER);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to write UID map to %s: %m", a);
+
+        return 0;
+}
+
+static int setup_private_users(
+                PrivateUsers private_users,
+                uid_t ouid,
+                gid_t ogid,
+                uid_t uid,
+                gid_t gid,
+                bool allow_setgroups) {
+
         _cleanup_free_ char *uid_map = NULL, *gid_map = NULL;
         _cleanup_close_pair_ int errno_pipe[2] = EBADF_PAIR;
         _cleanup_close_ int unshare_ready_fd = -EBADF;
-        _cleanup_(sigkill_waitp) pid_t pid = 0;
+        _cleanup_(pidref_done_sigkill_wait) PidRef pidref = PIDREF_NULL;
         uint64_t c = 1;
         ssize_t n;
         int r;
@@ -2421,75 +2420,80 @@ static int setup_private_users(PrivateUsers private_users, uid_t ouid, gid_t ogi
          * For unprivileged users (i.e. without capabilities), the root to root mapping is excluded. As such, it
          * does not need CAP_SETUID to write the single line mapping to itself. */
 
-        if (private_users == PRIVATE_USERS_NO)
-                return 0;
+        switch (private_users) { /* Prepare the UID mappings */
 
-        if (private_users == PRIVATE_USERS_IDENTITY) {
+        case PRIVATE_USERS_NO:
+                return 0; /* Early exit */
+
+        case PRIVATE_USERS_IDENTITY:
                 uid_map = strdup("0 0 65536\n");
                 if (!uid_map)
                         return -ENOMEM;
-        } else if (private_users == PRIVATE_USERS_FULL) {
-                /* Map all UID/GID from original to new user namespace. We can't use `0 0 UINT32_MAX` because
-                 * this is the same UID/GID map as the init user namespace and systemd's running_in_userns()
-                 * checks whether its in a user namespace by comparing uid_map/gid_map to `0 0 UINT32_MAX`.
-                 * Thus, we still map all UIDs/GIDs but do it using two extents to differentiate the new user
-                 * namespace from the init namespace:
-                 *   0 0 1
-                 *   1 1 UINT32_MAX - 1
-                 *
-                 * systemd will remove the heuristic in running_in_userns() and use namespace inodes in version 258
-                 * (PR #35382). But some users may be running a container image with older systemd < 258 so we keep
-                 * this uid_map/gid_map hack until version 259 for version N-1 compatibility.
-                 *
-                 * TODO: Switch to `0 0 UINT32_MAX` in systemd v259.
+                break;
+
+        case PRIVATE_USERS_FULL:
+                /* Map all UID/GID from original to new user namespace.
                  *
                  * Note the kernel defines the UID range between 0 and UINT32_MAX so we map all UIDs even though
                  * the UID range beyond INT32_MAX (e.g. i.e. the range above the signed 32-bit range) is
                  * icky. For example, setfsuid() returns the old UID as signed integer. But units can decide to
                  * use these UIDs/GIDs so we need to map them. */
-                r = asprintf(&uid_map, "0 0 1\n"
-                                       "1 1 " UID_FMT "\n", (uid_t) (UINT32_MAX - 1));
+                if (asprintf(&uid_map, "0 0 " UID_FMT "\n", (uid_t) UINT32_MAX) < 0)
+                        return -ENOMEM;
+
+                break;
+
+        case PRIVATE_USERS_SELF:
+                /* Can only set up multiple mappings with CAP_SETUID. */
+                if (uid_is_valid(uid) && uid != ouid && have_effective_cap(CAP_SETUID) > 0)
+                        r = asprintf(&uid_map,
+                                     UID_FMT " " UID_FMT " 1\n"     /* Map $OUID → $OUID */
+                                     UID_FMT " " UID_FMT " 1\n",    /* Map $UID → $UID */
+                                     ouid, ouid, uid, uid);
+                else
+                        r = asprintf(&uid_map,
+                                     UID_FMT " " UID_FMT " 1\n",    /* Map $OUID → $OUID */
+                                     ouid, ouid);
                 if (r < 0)
                         return -ENOMEM;
-        /* Can only set up multiple mappings with CAP_SETUID. */
-        } else if (have_effective_cap(CAP_SETUID) > 0 && uid != ouid && uid_is_valid(uid)) {
-                r = asprintf(&uid_map,
-                             UID_FMT " " UID_FMT " 1\n"     /* Map $OUID → $OUID */
-                             UID_FMT " " UID_FMT " 1\n",    /* Map $UID → $UID */
-                             ouid, ouid, uid, uid);
-                if (r < 0)
-                        return -ENOMEM;
-        } else {
-                r = asprintf(&uid_map,
-                             UID_FMT " " UID_FMT " 1\n",    /* Map $OUID → $OUID */
-                             ouid, ouid);
-                if (r < 0)
-                        return -ENOMEM;
+
+                break;
+
+        default:
+                assert_not_reached();
         }
 
-        if (private_users == PRIVATE_USERS_IDENTITY) {
+        switch (private_users) { /* Prepare the GID mappings */
+
+        case PRIVATE_USERS_IDENTITY:
                 gid_map = strdup("0 0 65536\n");
                 if (!gid_map)
                         return -ENOMEM;
-        } else if (private_users == PRIVATE_USERS_FULL) {
-                r = asprintf(&gid_map, "0 0 1\n"
-                                       "1 1 " GID_FMT "\n", (gid_t) (UINT32_MAX - 1));
+                break;
+
+        case PRIVATE_USERS_FULL:
+                if (asprintf(&gid_map, "0 0 " GID_FMT "\n", (gid_t) UINT32_MAX) < 0)
+                        return -ENOMEM;
+
+                break;
+
+        case PRIVATE_USERS_SELF:
+                /* Can only set up multiple mappings with CAP_SETGID. */
+                if (gid_is_valid(gid) && gid != ogid && have_effective_cap(CAP_SETGID) > 0)
+                        r = asprintf(&gid_map,
+                                     GID_FMT " " GID_FMT " 1\n"     /* Map $OGID → $OGID */
+                                     GID_FMT " " GID_FMT " 1\n",    /* Map $GID → $GID */
+                                     ogid, ogid, gid, gid);
+                else
+                        r = asprintf(&gid_map,
+                                     GID_FMT " " GID_FMT " 1\n",    /* Map $OGID -> $OGID */
+                                     ogid, ogid);
                 if (r < 0)
                         return -ENOMEM;
-        /* Can only set up multiple mappings with CAP_SETGID. */
-        } else if (have_effective_cap(CAP_SETGID) > 0 && gid != ogid && gid_is_valid(gid)) {
-                r = asprintf(&gid_map,
-                             GID_FMT " " GID_FMT " 1\n"     /* Map $OGID → $OGID */
-                             GID_FMT " " GID_FMT " 1\n",    /* Map $GID → $GID */
-                             ogid, ogid, gid, gid);
-                if (r < 0)
-                        return -ENOMEM;
-        } else {
-                r = asprintf(&gid_map,
-                             GID_FMT " " GID_FMT " 1\n",    /* Map $OGID -> $OGID */
-                             ogid, ogid);
-                if (r < 0)
-                        return -ENOMEM;
+                break;
+
+        default:
+                assert_not_reached();
         }
 
         /* Create a communication channel so that the parent can tell the child when it finished creating the user
@@ -2503,7 +2507,7 @@ static int setup_private_users(PrivateUsers private_users, uid_t ouid, gid_t ogi
         if (pipe2(errno_pipe, O_CLOEXEC) < 0)
                 return -errno;
 
-        r = safe_fork("(sd-userns)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGKILL, &pid);
+        r = pidref_safe_fork("(sd-userns)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGKILL, &pidref);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -2535,9 +2539,10 @@ static int setup_private_users(PrivateUsers private_users, uid_t ouid, gid_t ogi
         if (n != 0) /* on success we should have read 0 bytes */
                 return -EIO;
 
-        r = wait_for_terminate_and_check("(sd-userns)", TAKE_PID(pid), 0);
+        r = pidref_wait_for_terminate_and_check("(sd-userns)", &pidref, 0);
         if (r < 0)
                 return r;
+        pidref_done(&pidref);
         if (r != EXIT_SUCCESS) /* If something strange happened with the child, let's consider this fatal, too */
                 return -EIO;
 
@@ -2546,7 +2551,7 @@ static int setup_private_users(PrivateUsers private_users, uid_t ouid, gid_t ogi
 
 static int can_mount_proc(void) {
         _cleanup_close_pair_ int errno_pipe[2] = EBADF_PAIR;
-        _cleanup_(sigkill_waitp) pid_t pid = 0;
+        _cleanup_(pidref_done_sigkill_wait) PidRef pidref = PIDREF_NULL;
         ssize_t n;
         int r;
 
@@ -2561,8 +2566,10 @@ static int can_mount_proc(void) {
 
         /* Fork a child process into its own mount and PID namespace. Note safe_fork() already remounts / as SLAVE
          * with FORK_MOUNTNS_SLAVE. */
-        r = safe_fork("(sd-proc-check)",
-                      FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGKILL|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE|FORK_NEW_PIDNS, &pid);
+        r = pidref_safe_fork(
+                        "(sd-proc-check)",
+                        FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGKILL|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE|FORK_NEW_PIDNS,
+                        &pidref);
         if (r < 0)
                 return log_debug_errno(r, "Failed to fork child process (sd-proc-check): %m");
         if (r == 0) {
@@ -2597,9 +2604,10 @@ static int can_mount_proc(void) {
         if (n != 0) /* on success we should have read 0 bytes */
                 return -EIO;
 
-        r = wait_for_terminate_and_check("(sd-proc-check)", TAKE_PID(pid), /* flags= */ 0);
+        r = pidref_wait_for_terminate_and_check("(sd-proc-check)", &pidref, /* flags= */ 0);
         if (r < 0)
                 return log_debug_errno(r, "Failed to wait for (sd-proc-check) child process to terminate: %m");
+        pidref_done(&pidref);
         if (r != EXIT_SUCCESS) /* If something strange happened with the child, let's consider this fatal, too */
                 return log_debug_errno(SYNTHETIC_ERRNO(EIO), "Child process (sd-proc-check) exited with unexpected exit status '%d'.", r);
 
@@ -3673,7 +3681,8 @@ static int pick_versions(
                 r = path_pick(/* toplevel_path= */ NULL,
                               /* toplevel_fd= */ AT_FDCWD,
                               context->root_image,
-                              &pick_filter_image_raw,
+                              pick_filter_image_raw,
+                              ELEMENTSOF(pick_filter_image_raw),
                               PICK_ARCHITECTURE|PICK_TRIES|PICK_RESOLVE,
                               &result);
                 if (r < 0) {
@@ -3697,7 +3706,8 @@ static int pick_versions(
                 r = path_pick(/* toplevel_path= */ NULL,
                               /* toplevel_fd= */ AT_FDCWD,
                               context->root_directory,
-                              &pick_filter_image_dir,
+                              pick_filter_image_dir,
+                              ELEMENTSOF(pick_filter_image_dir),
                               PICK_ARCHITECTURE|PICK_TRIES|PICK_RESOLVE,
                               &result);
                 if (r < 0) {
@@ -3849,12 +3859,11 @@ static int apply_mount_namespace(
                 if (asprintf(&private_namespace_dir, "/run/user/" UID_FMT "/systemd", geteuid()) < 0)
                         return -ENOMEM;
 
-                if (setup_os_release_symlink) {
-                        if (asprintf(&host_os_release_stage,
-                                     "/run/user/" UID_FMT "/systemd/propagate/.os-release-stage",
-                                     geteuid()) < 0)
-                                return -ENOMEM;
-                }
+                if (setup_os_release_symlink &&
+                    asprintf(&host_os_release_stage,
+                             "/run/user/" UID_FMT "/systemd/propagate/.os-release-stage",
+                             geteuid()) < 0)
+                        return -ENOMEM;
         }
 
         if (root_image) {
@@ -4754,6 +4763,33 @@ static int setup_delegated_namespaces(
         return 0;
 }
 
+static int set_memory_thp(MemoryTHP thp) {
+        int r;
+
+        switch (thp) {
+
+        case MEMORY_THP_INHERIT:
+                return 0;
+
+        case MEMORY_THP_DISABLE:
+                r = RET_NERRNO(prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0));
+                break;
+
+        case MEMORY_THP_MADVISE:
+                r = RET_NERRNO(prctl(PR_SET_THP_DISABLE, 1, PR_THP_DISABLE_EXCEPT_ADVISED, 0, 0));
+                break;
+
+        case MEMORY_THP_SYSTEM:
+                r = RET_NERRNO(prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0));
+                break;
+
+        default:
+                assert_not_reached();
+        }
+
+        return r == -EINVAL ? -EOPNOTSUPP : r;
+}
+
 static bool exec_context_shall_confirm_spawn(const ExecContext *context) {
         assert(context);
 
@@ -5467,10 +5503,14 @@ int exec_invoke(
                         .sched_flags = context->cpu_sched_reset_on_fork ? SCHED_FLAG_RESET_ON_FORK : 0,
                 };
 
-                r = sched_setattr(/* pid= */ 0, &attr, /* flags= */ 0);
-                if (r < 0) {
+                r = RET_NERRNO(sched_setattr(/* pid= */ 0, &attr, /* flags= */ 0));
+                if (r == -EINVAL && !sched_policy_supported(context->cpu_sched_policy)) {
+                        _cleanup_free_ char *s = NULL;
+                        (void) sched_policy_to_string_alloc(context->cpu_sched_policy, &s);
+                        log_warning_errno(r, "CPU scheduling policy %s is not supported, proceeding without.", strna(s));
+                } else if (r < 0) {
                         *exit_status = EXIT_SETSCHEDULER;
-                        return log_error_errno(errno, "Failed to set up CPU scheduling: %m");
+                        return log_error_errno(r, "Failed to set up CPU scheduling: %m");
                 }
         }
 
@@ -5549,6 +5589,16 @@ int exec_invoke(
                                 return log_error_errno(errno, "Failed to set KSM: %m");
                         }
                 }
+
+        r = set_memory_thp(context->memory_thp);
+        if (r == -EOPNOTSUPP)
+                log_debug_errno(r, "Setting MemoryTHP=%s is not supported, ignoring.",
+                                memory_thp_to_string(context->memory_thp));
+        else if (r < 0) {
+                *exit_status = EXIT_MEMORY_THP;
+                return log_error_errno(r, "Failed to set MemoryTHP=%s: %m",
+                                       memory_thp_to_string(context->memory_thp));
+        }
 
 #if ENABLE_UTMP
         if (context->utmp_id) {

@@ -288,16 +288,19 @@ static int tar_pull_make_local_copy(TarPull *p) {
                                 if (fstat(directory_fd, &st) < 0)
                                         return log_error_errno(errno, "Failed to stat '%s': %m", p->final_path);
 
-                                if (uid_is_foreign(st.st_uid)) {
-                                        r = mountfsd_mount_directory_fd(directory_fd, p->userns_fd, DISSECT_IMAGE_FOREIGN_UID, &p->tree_fd);
-                                        if (r < 0)
-                                                return r;
-                                } else
-                                        p->tree_fd = TAKE_FD(directory_fd);
+                                if (!uid_is_foreign(st.st_uid))
+                                        return log_error_errno(
+                                                        SYNTHETIC_ERRNO(EINVAL),
+                                                        "Image tree '%s' is not owned by the foreign UID range, refusing.",
+                                                        p->final_path);
+
+                                r = mountfsd_mount_directory_fd(directory_fd, p->userns_fd, DISSECT_IMAGE_FOREIGN_UID, &p->tree_fd);
+                                if (r < 0)
+                                        return r;
                         }
 
                         _cleanup_close_ int directory_fd = -EBADF;
-                        r = mountfsd_make_directory(t, /* flags= */ 0, &directory_fd);
+                        r = mountfsd_make_directory(t, MODE_INVALID, /* flags= */ 0, &directory_fd);
                         if (r < 0)
                                 return r;
 
@@ -306,7 +309,7 @@ static int tar_pull_make_local_copy(TarPull *p) {
                         if (r < 0)
                                 return r;
 
-                        r = import_copy_foreign(p->tree_fd, copy_fd, &p->userns_fd);
+                        r = copy_tree_at_foreign(p->tree_fd, copy_fd, p->userns_fd);
                         if (r < 0)
                                 return r;
                 } else {
@@ -609,7 +612,7 @@ static int tar_pull_job_on_open_disk_tar(PullJob *j) {
                         return r;
 
                 _cleanup_close_ int directory_fd = -EBADF;
-                r = mountfsd_make_directory(where, /* flags= */ 0, &directory_fd);
+                r = mountfsd_make_directory(where, MODE_INVALID, /* flags= */ 0, &directory_fd);
                 if (r < 0)
                         return r;
 

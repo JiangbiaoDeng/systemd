@@ -35,6 +35,7 @@
 #include "lock-util.h"
 #include "log.h"
 #include "loop-util.h"
+#include "mountpoint-util.h"
 #include "namespace-util.h"
 #include "nsresource.h"
 #include "nulstr-util.h"
@@ -131,6 +132,15 @@ static const char *const image_dirname_table[_IMAGE_CLASS_MAX] = {
         [IMAGE_CONFEXT]  = "confexts",
 };
 
+static const char auxiliary_suffixes_nulstr[] =
+        ".nspawn\0"
+        ".oci-config\0"
+        ".roothash\0"
+        ".roothash.p7s\0"
+        ".usrhash\0"
+        ".usrhash.p7s\0"
+        ".verity\0";
+
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(image_dirname, ImageClass);
 
 static Image* image_free(Image *i) {
@@ -138,6 +148,8 @@ static Image* image_free(Image *i) {
 
         free(i->name);
         free(i->path);
+
+        free(i->fh);
 
         free(i->hostname);
         strv_free(i->machine_info);
@@ -221,12 +233,11 @@ static char** image_settings_path(Image *image, RuntimeScope scope) {
         return TAKE_PTR(l);
 }
 
-static int image_roothash_path(Image *image, char **ret) {
-        _cleanup_free_ char *fn = NULL;
-
+static int image_auxiliary_path(Image *image, const char *suffix, char **ret) {
         assert(image);
+        assert(suffix);
 
-        fn = strjoin(image->name, ".roothash");
+        _cleanup_free_ char *fn = strjoin(image->name, suffix);
         if (!fn)
                 return -ENOMEM;
 
@@ -241,6 +252,9 @@ static int image_new(
                 bool read_only,
                 usec_t crtime,
                 usec_t mtime,
+                struct file_handle *fh,
+                uint64_t on_mount_id,
+                uint64_t inode,
                 Image **ret) {
 
         _cleanup_(image_unrefp) Image *i = NULL;
@@ -262,11 +276,19 @@ static int image_new(
                 .read_only = read_only,
                 .crtime = crtime,
                 .mtime = mtime,
+                .on_mount_id = on_mount_id,
+                .inode = inode,
                 .usage = UINT64_MAX,
                 .usage_exclusive = UINT64_MAX,
                 .limit = UINT64_MAX,
                 .limit_exclusive = UINT64_MAX,
         };
+
+        if (fh) {
+                i->fh = file_handle_dup(fh);
+                if (!i->fh)
+                        return -ENOMEM;
+        }
 
         i->name = strdup(pretty);
         if (!i->name)
@@ -400,6 +422,8 @@ static int image_make(
 
         /* We explicitly *do* follow symlinks here, since we want to allow symlinking trees, raw files and block
          * devices into /var/lib/machines/, and treat them normally.
+         * Note that if the caller does not want to follow symlinks (and does not care about symlink races)
+         * then the caller should pass in a resolved path and an fd.
          *
          * This function returns -ENOENT if we can't find the image after all, and -EMEDIUMTYPE if it's not a file we
          * recognize. */
@@ -426,6 +450,32 @@ static int image_make(
         read_only =
                 path_startswith(path, "/usr") ||
                 (faccessat(fd, "", W_OK, AT_EACCESS|AT_EMPTY_PATH) < 0 && errno == EROFS);
+
+        _cleanup_free_ struct file_handle *fh = NULL;
+        uint64_t on_mount_id;
+        int _mnt_id;
+
+        /* The fallback is required for CentOS 9 compatibility when working on a directory located on an
+         * overlayfs. */
+        r = name_to_handle_at_try_fid(fd, /* path= */ NULL, &fh, &_mnt_id, &on_mount_id, AT_EMPTY_PATH);
+        if (r < 0) {
+                if (is_name_to_handle_at_fatal_error(r))
+                        return r;
+
+                r = path_get_unique_mnt_id_at(fd, /* path= */ NULL, &on_mount_id);
+                if (r < 0) {
+                        if (!ERRNO_IS_NEG_NOT_SUPPORTED(r) && r != -EUNATCH)
+                                return r;
+
+                        int on_mount_id_fallback = -1;
+                        r = path_get_mnt_id_at(fd, /* path= */ NULL, &on_mount_id_fallback);
+                        if (r < 0)
+                                return r;
+
+                        on_mount_id = on_mount_id_fallback;
+                }
+        } else if (r == 0)
+                on_mount_id = _mnt_id;
 
         if (S_ISDIR(st->st_mode)) {
                 unsigned file_attr = 0;
@@ -468,6 +518,9 @@ static int image_make(
                                               info.read_only || read_only,
                                               info.otime,
                                               info.ctime,
+                                              fh,
+                                              on_mount_id,
+                                              (uint64_t) st->st_ino,
                                               ret);
                                 if (r < 0)
                                         return r;
@@ -493,6 +546,9 @@ static int image_make(
                               read_only || (file_attr & FS_IMMUTABLE_FL),
                               crtime,
                               0, /* we don't use mtime of stat() here, since it's not the time of last change of the tree, but only of the top-level dir */
+                              fh,
+                              on_mount_id,
+                              (uint64_t) st->st_ino,
                               ret);
                 if (r < 0)
                         return r;
@@ -530,6 +586,9 @@ static int image_make(
                               !(st->st_mode & 0222) || read_only,
                               crtime,
                               timespec_load(&st->st_mtim),
+                              fh,
+                              on_mount_id,
+                              (uint64_t) st->st_ino,
                               ret);
                 if (r < 0)
                         return r;
@@ -587,6 +646,9 @@ static int image_make(
                               !(st->st_mode & 0222) || read_only,
                               0,
                               0,
+                              fh,
+                              on_mount_id,
+                              (uint64_t) st->st_ino,
                               ret);
                 if (r < 0)
                         return r;
@@ -663,7 +725,7 @@ static int pick_image_search_path(
         }
 
         case RUNTIME_SCOPE_USER: {
-                if (class != IMAGE_MACHINE)
+                if (!IN_SET(class, IMAGE_MACHINE, IMAGE_PORTABLE))
                         break;
 
                 static const uint64_t dirs[] = {
@@ -676,7 +738,7 @@ static int pick_image_search_path(
                 FOREACH_ELEMENT(d, dirs) {
                         _cleanup_free_ char *p = NULL;
 
-                        r = sd_path_lookup(*d, "machines", &p);
+                        r = sd_path_lookup(*d, image_dirname_to_string(class), &p);
                         if (r == -ENXIO) /* No XDG_RUNTIME_DIR set */
                                 continue;
                         if (r < 0)
@@ -736,10 +798,7 @@ int image_find(RuntimeScope scope,
                const char *root,
                Image **ret) {
 
-        /* As mentioned above, we follow symlinks on this fstatat(), because we want to permit people to
-         * symlink block devices into the search path. (For now, we disable that when operating relative to
-         * some root directory.) */
-        int open_flags = root ? O_NOFOLLOW : 0, r;
+        int r;
 
         assert(scope < _RUNTIME_SCOPE_MAX && scope != RUNTIME_SCOPE_GLOBAL);
         assert(class >= 0);
@@ -754,32 +813,47 @@ int image_find(RuntimeScope scope,
         if (!names)
                 return -ENOMEM;
 
+        _cleanup_close_ int rfd = XAT_FDROOT; /* We only expect absolute paths */
+        if (root) {
+                rfd = open(root, O_CLOEXEC|O_DIRECTORY|O_PATH);
+                if (rfd < 0)
+                        return log_debug_errno(errno, "Failed to open root directory '%s': %m", root);
+        }
+
         _cleanup_strv_free_ char **search = NULL;
         r = pick_image_search_path(scope, class, root, &search);
         if (r < 0)
                 return r;
 
         STRV_FOREACH(s, search) {
-                _cleanup_free_ char *resolved = NULL;
                 _cleanup_closedir_ DIR *d = NULL;
+                _cleanup_free_ char *search_path = NULL;
 
-                r = chase_and_opendir(*s, root, CHASE_PREFIX_ROOT, &resolved, &d);
+                r = chase_and_opendirat(rfd, *s, CHASE_AT_RESOLVE_IN_ROOT, &search_path, &d);
                 if (r == -ENOENT)
                         continue;
                 if (r < 0)
                         return r;
 
                 STRV_FOREACH(n, names) {
-                        _cleanup_free_ char *fname_buf = NULL;
                         const char *fname = *n;
+                        _cleanup_free_ char *fname_path = NULL, *chased_path = NULL, *resolved_file = NULL;
+                        _cleanup_close_ int fd = -EBADF;
 
-                        _cleanup_close_ int fd = openat(dirfd(d), fname, O_PATH|O_CLOEXEC|open_flags);
-                        if (fd < 0) {
-                                if (errno != ENOENT)
-                                        return -errno;
+                        fname_path = path_join(search_path, fname);
+                        if (!fname_path)
+                                return -ENOMEM;
 
+                        /* Follow symlinks only inside given root */
+                        r = chaseat(rfd, fname_path, CHASE_AT_RESOLVE_IN_ROOT, &chased_path, &fd);
+                        if (r == -ENOENT)
                                 continue;
-                        }
+                        if (r < 0)
+                                return r;
+
+                        r = chaseat_prefix_root(chased_path, root, &resolved_file);
+                        if (r < 0)
+                                return r;
 
                         struct stat st;
                         if (fstat(fd, &st) < 0)
@@ -805,10 +879,6 @@ int image_find(RuntimeScope scope,
 
                                 *ASSERT_PTR(endswith(suffix, ".v")) = 0;
 
-                                _cleanup_free_ char *vp = path_join(resolved, fname);
-                                if (!vp)
-                                        return -ENOMEM;
-
                                 PickFilter filter = {
                                         .type_mask = endswith(suffix, ".raw") ? (UINT32_C(1) << DT_REG) | (UINT32_C(1) << DT_BLK) : (UINT32_C(1) << DT_DIR),
                                         .basename = name,
@@ -818,47 +888,44 @@ int image_find(RuntimeScope scope,
 
                                 _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
                                 r = path_pick(root,
-                                              /* toplevel_fd= */ AT_FDCWD,
-                                              vp,
+                                              rfd,
+                                              fname_path, /* This has to be the unresolved entry with the .v suffix */
                                               &filter,
-                                              PICK_ARCHITECTURE|PICK_TRIES,
+                                              /* n_filters= */ 1,
+                                              PICK_ARCHITECTURE|PICK_TRIES|PICK_RESOLVE,
                                               &result);
                                 if (r < 0) {
-                                        log_debug_errno(r, "Failed to pick versioned image on '%s', skipping: %m", vp);
+                                        log_debug_errno(r, "Failed to pick versioned image on '%s%s', skipping: %m", empty_to_root(root), skip_leading_slash(fname_path));
                                         continue;
                                 }
                                 if (!result.path) {
-                                        log_debug("Found versioned directory '%s', without matching entry, skipping.", vp);
+                                        log_debug("Found versioned directory '%s%s', without matching entry, skipping.", empty_to_root(root), skip_leading_slash(fname_path));
                                         continue;
                                 }
 
                                 /* Refresh the stat data for the discovered target */
                                 st = result.st;
                                 close_and_replace(fd, result.fd);
+                                free(resolved_file);
+                                resolved_file = path_join(root, result.path);
+                                if (!resolved_file)
+                                        return -ENOMEM;
 
-                                _cleanup_free_ char *bn = NULL;
-                                r = path_extract_filename(result.path, &bn);
-                                if (r < 0) {
-                                        log_debug_errno(r, "Failed to extract basename of image path '%s', skipping: %m", result.path);
-                                        continue;
-                                }
-
-                                fname_buf = path_join(fname, bn);
-                                if (!fname_buf)
-                                        return log_oom();
-
-                                fname = fname_buf;
-
+                                /* fname and fname_path are invalid now because they would need to be set
+                                 * from result.path by extracting the filename to set
+                                 * fname = path_join(fname, filename) and then
+                                 * fname_path = path_join(*s, fname) but since they are unused we don't do it */
+                                fname = NULL;
+                                fname_path = mfree(fname_path);
                         } else if (!S_ISDIR(st.st_mode) && !S_ISBLK(st.st_mode)) {
                                 log_debug("Ignoring non-directory and non-block device file '%s' without suffix.", fname);
                                 continue;
                         }
 
-                        _cleanup_free_ char *path = path_join(resolved, fname);
-                        if (!path)
-                                return -ENOMEM;
-
-                        r = image_make(class, name, fd, path, &st, ret);
+                        /* Only put resolved paths into the image entry (incl. --root=).
+                         * Defending against symlink races is not done
+                         * and would be a TODO. */
+                        r = image_make(class, name, fd, resolved_file, &st, ret);
                         if (IN_SET(r, -ENOENT, -EMEDIUMTYPE))
                                 continue;
                         if (r < 0)
@@ -939,15 +1006,19 @@ int image_discover(
                 const char *root,
                 Hashmap **images) {
 
-        /* As mentioned above, we follow symlinks on this fstatat(), because we want to permit people to
-         * symlink block devices into the search path. (For now, we disable that when operating relative to
-         * some root directory.) */
-        int open_flags = root ? O_NOFOLLOW : 0, r;
+        int r;
 
         assert(scope < _RUNTIME_SCOPE_MAX && scope != RUNTIME_SCOPE_GLOBAL);
         assert(class >= 0);
         assert(class < _IMAGE_CLASS_MAX);
         assert(images);
+
+        _cleanup_close_ int rfd = XAT_FDROOT;  /* We only expect absolute paths */
+        if (root) {
+                rfd = open(root, O_CLOEXEC|O_DIRECTORY|O_PATH);
+                if (rfd < 0)
+                        return log_debug_errno(errno, "Failed to open root directory '%s': %m", root);
+        }
 
         _cleanup_strv_free_ char **search = NULL;
         r = pick_image_search_path(scope, class, root, &search);
@@ -955,30 +1026,38 @@ int image_discover(
                 return r;
 
         STRV_FOREACH(s, search) {
-                _cleanup_free_ char *resolved = NULL;
                 _cleanup_closedir_ DIR *d = NULL;
+                _cleanup_free_ char *search_path = NULL;
 
-                r = chase_and_opendir(*s, root, CHASE_PREFIX_ROOT, &resolved, &d);
+                r = chase_and_opendirat(rfd, *s, CHASE_AT_RESOLVE_IN_ROOT, &search_path, &d);
                 if (r == -ENOENT)
                         continue;
                 if (r < 0)
                         return r;
 
                 FOREACH_DIRENT_ALL(de, d, return -errno) {
-                        _cleanup_free_ char *pretty = NULL, *fname_buf = NULL;
+                        _cleanup_free_ char *pretty = NULL, *fname_path = NULL, *chased_path = NULL, *resolved_file = NULL;
                         _cleanup_(image_unrefp) Image *image = NULL;
                         const char *fname = de->d_name;
+                        _cleanup_close_ int fd = -EBADF;
 
                         if (dot_or_dot_dot(fname))
                                 continue;
 
-                        _cleanup_close_ int fd = openat(dirfd(d), fname, O_PATH|O_CLOEXEC|open_flags);
-                        if (fd < 0) {
-                                if (errno != ENOENT)
-                                        return -errno;
+                        fname_path = path_join(search_path, fname);
+                        if (!fname_path)
+                                return -ENOMEM;
 
-                                continue; /* Vanished while we were looking at it */
-                        }
+                        /* Follow symlinks only inside given root */
+                        r = chaseat(rfd, fname_path, CHASE_AT_RESOLVE_IN_ROOT, &chased_path, &fd);
+                        if (r == -ENOENT)
+                                continue;
+                        if (r < 0)
+                                return r;
+
+                        r = chaseat_prefix_root(chased_path, root, &resolved_file);
+                        if (r < 0)
+                                return r;
 
                         struct stat st;
                         if (fstat(fd, &st) < 0)
@@ -1017,10 +1096,6 @@ int image_discover(
                                                 continue;
                                         }
 
-                                        _cleanup_free_ char *vp = path_join(resolved, fname);
-                                        if (!vp)
-                                                return -ENOMEM;
-
                                         PickFilter filter = {
                                                 .type_mask = endswith(suffix, ".raw") ? (UINT32_C(1) << DT_REG) | (UINT32_C(1) << DT_BLK) : (UINT32_C(1) << DT_DIR),
                                                 .basename = pretty,
@@ -1030,37 +1105,36 @@ int image_discover(
 
                                         _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
                                         r = path_pick(root,
-                                                      /* toplevel_fd= */ AT_FDCWD,
-                                                      vp,
+                                                      rfd,
+                                                      fname_path, /* This has to be the unresolved entry with the .v suffix */
                                                       &filter,
-                                                      PICK_ARCHITECTURE|PICK_TRIES,
+                                                      /* n_filters= */ 1,
+                                                      PICK_ARCHITECTURE|PICK_TRIES|PICK_RESOLVE,
                                                       &result);
                                         if (r < 0) {
-                                                log_debug_errno(r, "Failed to pick versioned image on '%s', skipping: %m", vp);
+                                                log_debug_errno(r, "Failed to pick versioned image on '%s%s', skipping: %m", empty_to_root(root), skip_leading_slash(fname_path));
                                                 continue;
                                         }
                                         if (!result.path) {
-                                                log_debug("Found versioned directory '%s', without matching entry, skipping.", vp);
+                                                log_debug("Found versioned directory '%s%s', without matching entry, skipping.", empty_to_root(root), skip_leading_slash(fname_path));
                                                 continue;
                                         }
 
                                         /* Refresh the stat data for the discovered target */
                                         st = result.st;
                                         close_and_replace(fd, result.fd);
+                                        free(resolved_file);
+                                        resolved_file = path_join(root, result.path);
+                                        if (!resolved_file)
+                                                return -ENOMEM;
 
-                                        _cleanup_free_ char *bn = NULL;
-                                        r = path_extract_filename(result.path, &bn);
-                                        if (r < 0) {
-                                                log_debug_errno(r, "Failed to extract basename of image path '%s', skipping: %m", result.path);
-                                                continue;
-                                        }
-
-                                        fname_buf = path_join(fname, bn);
-                                        if (!fname_buf)
-                                                return log_oom();
-
-                                        fname = fname_buf;
-
+                                        /* fname and fname_path are invalid now because they would need to
+                                         * be set from result.path by extracting the filename to set
+                                         * fname = path_join(fname, filename) and then
+                                         * fname_path = path_join(*s, fname) but since they are unused we
+                                         * don't do it */
+                                         fname = NULL;
+                                         fname_path = mfree(fname_path);
                                 } else {
                                         r = extract_image_basename(
                                                         fname,
@@ -1093,11 +1167,10 @@ int image_discover(
                         if (hashmap_contains(*images, pretty))
                                 continue;
 
-                        _cleanup_free_ char *path = path_join(resolved, fname);
-                        if (!path)
-                                return -ENOMEM;
-
-                        r = image_make(class, pretty, fd, path, &st, &image);
+                        /* Only put resolved paths into the image entry.
+                         * Defending against symlink races is not done
+                         * and would be a TODO. */
+                        r = image_make(class, pretty, fd, resolved_file, &st, &image);
                         if (IN_SET(r, -ENOENT, -EMEDIUMTYPE))
                                 continue;
                         if (r < 0)
@@ -1155,12 +1228,12 @@ static int unprivileged_remove(Image *i) {
         if (r < 0)
                 return r;
         /* Fork off child that moves into userns and does the copying */
-        r = safe_fork_full(
+        r = pidref_safe_fork_full(
                         "rm-tree",
                         /* stdio_fds= */ NULL,
                         (int[]) { userns_fd, tree_fd, }, 2,
                         FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_WAIT|FORK_REOPEN_LOG,
-                        /* ret_pid= */ NULL);
+                        /* ret= */ NULL);
         if (r < 0)
                 return log_debug_errno(r, "Process that was supposed to remove tree failed: %m");
         if (r == 0) {
@@ -1198,7 +1271,6 @@ static int unprivileged_remove(Image *i) {
 int image_remove(Image *i, RuntimeScope scope) {
         _cleanup_(release_lock_file) LockFile global_lock = LOCK_FILE_INIT, local_lock = LOCK_FILE_INIT;
         _cleanup_strv_free_ char **settings = NULL;
-        _cleanup_free_ char *roothash = NULL;
         int r;
 
         assert(i);
@@ -1209,10 +1281,6 @@ int image_remove(Image *i, RuntimeScope scope) {
         settings = image_settings_path(i, scope);
         if (!settings)
                 return -ENOMEM;
-
-        r = image_roothash_path(i, &roothash);
-        if (r < 0)
-                return r;
 
         /* Make sure we don't interfere with a running nspawn */
         r = image_path_lock(scope, i->path, LOCK_EX|LOCK_NB, &global_lock, &local_lock);
@@ -1270,20 +1338,31 @@ int image_remove(Image *i, RuntimeScope scope) {
                 if (unlink(*j) < 0 && errno != ENOENT)
                         log_debug_errno(errno, "Failed to unlink %s, ignoring: %m", *j);
 
-        if (unlink(roothash) < 0 && errno != ENOENT)
-                log_debug_errno(errno, "Failed to unlink %s, ignoring: %m", roothash);
+        NULSTR_FOREACH(suffix, auxiliary_suffixes_nulstr) {
+                _cleanup_free_ char *aux = NULL;
+                r = image_auxiliary_path(i, suffix, &aux);
+                if (r < 0)
+                        return r;
+
+                if (unlink(aux) < 0 && errno != ENOENT)
+                        log_debug_errno(errno, "Failed to unlink %s, ignoring: %m", aux);
+        }
 
         return 0;
 }
 
 static int rename_auxiliary_file(const char *path, const char *new_name, const char *suffix) {
-        _cleanup_free_ char *fn = NULL, *rs = NULL;
         int r;
 
-        fn = strjoin(new_name, suffix);
+        assert(path);
+        assert(new_name);
+        assert(suffix);
+
+        _cleanup_free_ char *fn = strjoin(new_name, suffix);
         if (!fn)
                 return -ENOMEM;
 
+        _cleanup_free_ char *rs = NULL;
         r = file_in_same_dir(path, fn, &rs);
         if (r < 0)
                 return r;
@@ -1293,7 +1372,7 @@ static int rename_auxiliary_file(const char *path, const char *new_name, const c
 
 int image_rename(Image *i, const char *new_name, RuntimeScope scope) {
         _cleanup_(release_lock_file) LockFile global_lock = LOCK_FILE_INIT, local_lock = LOCK_FILE_INIT, name_lock = LOCK_FILE_INIT;
-        _cleanup_free_ char *new_path = NULL, *nn = NULL, *roothash = NULL;
+        _cleanup_free_ char *new_path = NULL, *nn = NULL;
         _cleanup_strv_free_ char **settings = NULL;
         unsigned file_attr = 0;
         int r;
@@ -1309,10 +1388,6 @@ int image_rename(Image *i, const char *new_name, RuntimeScope scope) {
         settings = image_settings_path(i, scope);
         if (!settings)
                 return -ENOMEM;
-
-        r = image_roothash_path(i, &roothash);
-        if (r < 0)
-                return r;
 
         /* Make sure we don't interfere with a running nspawn */
         r = image_path_lock(scope, i->path, LOCK_EX|LOCK_NB, &global_lock, &local_lock);
@@ -1391,21 +1466,32 @@ int image_rename(Image *i, const char *new_name, RuntimeScope scope) {
                         log_debug_errno(r, "Failed to rename settings file %s, ignoring: %m", *j);
         }
 
-        r = rename_auxiliary_file(roothash, new_name, ".roothash");
-        if (r < 0 && r != -ENOENT)
-                log_debug_errno(r, "Failed to rename roothash file %s, ignoring: %m", roothash);
+        NULSTR_FOREACH(suffix, auxiliary_suffixes_nulstr) {
+                _cleanup_free_ char *aux = NULL;
+                r = image_auxiliary_path(i, suffix, &aux);
+                if (r < 0)
+                        return r;
+
+                r = rename_auxiliary_file(aux, new_name, suffix);
+                if (r < 0 && r != -ENOENT)
+                        log_debug_errno(r, "Failed to rename roothash file %s, ignoring: %m", aux);
+        }
 
         return 0;
 }
 
 static int clone_auxiliary_file(const char *path, const char *new_name, const char *suffix) {
-        _cleanup_free_ char *fn = NULL, *rs = NULL;
         int r;
 
-        fn = strjoin(new_name, suffix);
+        assert(path);
+        assert(new_name);
+        assert(suffix);
+
+        _cleanup_free_ char *fn = strjoin(new_name, suffix);
         if (!fn)
                 return -ENOMEM;
 
+        _cleanup_free_ char *rs = NULL;
         r = file_in_same_dir(path, fn, &rs);
         if (r < 0)
                 return r;
@@ -1467,7 +1553,7 @@ static int get_pool_directory(
         return 0;
 }
 
-static int unpriviled_clone(Image *i, const char *new_path) {
+static int unprivileged_clone(Image *i, const char *new_path) {
         int r;
 
         assert(i);
@@ -1491,6 +1577,7 @@ static int unpriviled_clone(Image *i, const char *new_path) {
         _cleanup_close_ int new_fd = -EBADF;
         r = mountfsd_make_directory(
                         new_path,
+                        MODE_INVALID,
                         /* flags= */ 0,
                         &new_fd);
         if (r < 0)
@@ -1507,51 +1594,12 @@ static int unpriviled_clone(Image *i, const char *new_path) {
                 return r;
 
         /* Fork off child that moves into userns and does the copying */
-        r = safe_fork_full(
-                        "clone-tree",
-                        /* stdio_fds= */ NULL,
-                        (int[]) { userns_fd, tree_fd, target_fd }, 3,
-                        FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_WAIT|FORK_REOPEN_LOG,
-                        /* ret_pid= */ NULL);
-        if (r < 0)
-                return log_debug_errno(r, "Process that was supposed to clone tree failed: %m");
-        if (r == 0) {
-                /* child */
-
-                r = namespace_enter(
-                                /* pidns_fd= */ -EBADF,
-                                /* mntns_fd= */ -EBADF,
-                                /* netns_fd= */ -EBADF,
-                                userns_fd,
-                                /* root_fd= */ -EBADF);
-                if (r < 0) {
-                        log_debug_errno(r, "Failed to join user namespace: %m");
-                        _exit(EXIT_FAILURE);
-                }
-
-                r = copy_tree_at(
-                                tree_fd, /* from= */ NULL,
-                                target_fd, /* to= */ NULL,
-                                /* override_uid= */ UID_INVALID,
-                                /* override_gid= */ GID_INVALID,
-                                COPY_REFLINK|COPY_HARDLINKS|COPY_MERGE_EMPTY|COPY_MERGE_APPLY_STAT|COPY_SAME_MOUNT|COPY_ALL_XATTRS,
-                                /* denylist= */ NULL,
-                                /* subvolumes= */ NULL);
-                if (r < 0) {
-                        log_debug_errno(r, "Failed to copy clone tree: %m");
-                        _exit(EXIT_FAILURE);
-                }
-
-                _exit(EXIT_SUCCESS);
-        }
-
-        return 0;
+        return copy_tree_at_foreign(tree_fd, target_fd, userns_fd);
 }
 
 int image_clone(Image *i, const char *new_name, bool read_only, RuntimeScope scope) {
         _cleanup_(release_lock_file) LockFile name_lock = LOCK_FILE_INIT;
         _cleanup_strv_free_ char **settings = NULL;
-        _cleanup_free_ char *roothash = NULL;
         int r;
 
         assert(i);
@@ -1562,10 +1610,6 @@ int image_clone(Image *i, const char *new_name, bool read_only, RuntimeScope sco
         settings = image_settings_path(i, scope);
         if (!settings)
                 return -ENOMEM;
-
-        r = image_roothash_path(i, &roothash);
-        if (r < 0)
-                return r;
 
         /* Make sure nobody takes the new name, between the time we
          * checked it is currently unused in all search paths, and the
@@ -1593,7 +1637,7 @@ int image_clone(Image *i, const char *new_name, bool read_only, RuntimeScope sco
                         return r;
 
                 if (i->foreign_uid_owned)
-                        r = unpriviled_clone(i, new_path);
+                        r = unprivileged_clone(i, new_path);
                 else {
                         r = btrfs_subvol_snapshot_at(
                                         AT_FDCWD, i->path,
@@ -1636,9 +1680,16 @@ int image_clone(Image *i, const char *new_name, bool read_only, RuntimeScope sco
                         log_debug_errno(r, "Failed to clone settings %s, ignoring: %m", *j);
         }
 
-        r = clone_auxiliary_file(roothash, new_name, ".roothash");
-        if (r < 0 && r != -ENOENT)
-                log_debug_errno(r, "Failed to clone root hash file %s, ignoring: %m", roothash);
+        NULSTR_FOREACH(suffix, auxiliary_suffixes_nulstr) {
+                _cleanup_free_ char *aux = NULL;
+                r = image_auxiliary_path(i, suffix, &aux);
+                if (r < 0)
+                        return r;
+
+                r = clone_auxiliary_file(aux, new_name, suffix);
+                if (r < 0 && r != -ENOENT)
+                        log_debug_errno(r, "Failed to clone root hash file %s, ignoring: %m", aux);
+        }
 
         return 0;
 }
@@ -2026,7 +2077,7 @@ int image_setup_pool(RuntimeScope scope, ImageClass class, bool use_btrfs_subvol
         return 0;
 }
 
-int image_read_metadata(Image *i, const ImagePolicy *image_policy, RuntimeScope scope) {
+int image_read_metadata(Image *i, const char *root, const ImagePolicy *image_policy, RuntimeScope scope) {
         _cleanup_(release_lock_file) LockFile global_lock = LOCK_FILE_INIT, local_lock = LOCK_FILE_INIT;
         int r;
 
@@ -2152,6 +2203,7 @@ int image_read_metadata(Image *i, const ImagePolicy *image_policy, RuntimeScope 
 
                 r = dissected_image_decrypt(
                                 m,
+                                root,
                                 /* passphrase= */ NULL,
                                 &verity,
                                 image_policy,
@@ -2159,12 +2211,17 @@ int image_read_metadata(Image *i, const ImagePolicy *image_policy, RuntimeScope 
                 if (r < 0)
                         return log_debug_errno(r, "Failed to decrypt image '%s': %m", i->path);
 
+                /* Do not use the image name derived from the backing file of the loop device */
+                r = free_and_strdup(&m->image_name, i->name);
+                if (r < 0)
+                        return r;
+
                 r = dissected_image_acquire_metadata(
                                 m,
                                 /* userns_fd= */ -EBADF,
                                 flags);
                 if (r < 0)
-                        return log_debug_errno(r, "Failed to acquire medata from image '%s': %m", i->path);
+                        return log_debug_errno(r, "Failed to acquire metadata from image '%s': %m", i->path);
 
                 free_and_replace(i->hostname, m->hostname);
                 i->machine_id = m->machine_id;

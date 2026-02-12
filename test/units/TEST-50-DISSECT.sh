@@ -25,6 +25,7 @@ at_exit() {
     done < <(find "${IMAGE_DIR}" -mindepth 1 -maxdepth 1 -type d)
 
     rm -rf "$IMAGE_DIR"
+    rm -rf /etc/polkit-1/rules.d/mountoptions.rules
 
     rm -f /etc/polkit-1/rules.d/sysext-unpriv.rules
 
@@ -118,8 +119,6 @@ else
     exit 1
 fi
 
-udevadm control --log-level=debug
-
 IMAGE_DIR="$(mktemp -d --tmpdir="" TEST-50-IMAGES.XXX)"
 chmod go+rx "$IMAGE_DIR"
 cp -v /usr/share/minimal* "$IMAGE_DIR/"
@@ -154,7 +153,7 @@ root_size="$(du --apparent-size -k "$MINIMAL_IMAGE.raw" | cut -f1)"
 verity_size="$(du --apparent-size -k "$MINIMAL_IMAGE.verity" | cut -f1)"
 signature_size=4
 # 4MB seems to be the minimum size blkid will accept, below that probing fails
-dd if=/dev/zero of="$MINIMAL_IMAGE.gpt" bs=512 count=$((8192+root_size*2+verity_size*2+signature_size*2))
+truncate -s $(((8192+root_size*2+verity_size*2+signature_size*2)*512)) "$MINIMAL_IMAGE.gpt"
 # sfdisk seems unhappy if the size overflows into the next unit, eg: 1580KiB will be interpreted as 1MiB
 # so do some basic rounding up if the minimal image is more than 1 MB
 if [[ "$root_size" -ge 1024 ]]; then

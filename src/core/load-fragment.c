@@ -163,6 +163,7 @@ DEFINE_CONFIG_PARSE_PTR(config_parse_bpf_delegate_commands, bpf_delegate_command
 DEFINE_CONFIG_PARSE_PTR(config_parse_bpf_delegate_maps, bpf_delegate_maps_from_string, uint64_t);
 DEFINE_CONFIG_PARSE_PTR(config_parse_bpf_delegate_programs, bpf_delegate_programs_from_string, uint64_t);
 DEFINE_CONFIG_PARSE_PTR(config_parse_bpf_delegate_attachments, bpf_delegate_attachments_from_string, uint64_t);
+DEFINE_CONFIG_PARSE_ENUM(config_parse_memory_thp, memory_thp, MemoryTHP);
 
 bool contains_instance_specifier_superset(const char *s) {
         const char *p, *q;
@@ -1539,9 +1540,12 @@ int config_parse_exec_cpu_sched_policy(
                 return 0;
         }
 
+        if (!sched_policy_supported(x))
+                log_syntax(unit, LOG_WARNING, filename, line, x, "Unsupported CPU scheduling policy: %s", rvalue);
+
         c->cpu_sched_policy = x;
         /* Moving to or from real-time policy? We need to adjust the priority */
-        c->cpu_sched_priority = CLAMP(c->cpu_sched_priority, sched_get_priority_min(x), sched_get_priority_max(x));
+        c->cpu_sched_priority = CLAMP(c->cpu_sched_priority, sched_get_priority_min_safe(x), sched_get_priority_max_safe(x));
         c->cpu_sched_set = true;
 
         return 0;
@@ -1659,7 +1663,6 @@ int config_parse_root_image_options(
         }
 
         STRV_FOREACH_PAIR(first, second, l) {
-                MountOptions *o = NULL;
                 _cleanup_free_ char *mount_options_resolved = NULL;
                 const char *mount_options = NULL, *partition = "root";
                 PartitionDesignator partition_designator;
@@ -1683,23 +1686,12 @@ int config_parse_root_image_options(
                         continue;
                 }
 
-                o = new(MountOptions, 1);
-                if (!o)
-                        return log_oom();
-                *o = (MountOptions) {
-                        .partition_designator = partition_designator,
-                        .options = TAKE_PTR(mount_options_resolved),
-                };
-                LIST_APPEND(mount_options, options, TAKE_PTR(o));
+                r = mount_options_set_and_consume(&options, partition_designator, TAKE_PTR(mount_options_resolved));
+                if (r < 0)
+                        return r;
         }
 
-        if (options)
-                LIST_JOIN(mount_options, c->root_image_options, options);
-        else
-                /* empty spaces/separators only */
-                c->root_image_options = mount_options_free_all(c->root_image_options);
-
-        return 0;
+        return free_and_replace_full(c->root_image_options, options, mount_options_free_all);
 }
 
 int config_parse_exec_root_hash(
@@ -3798,9 +3790,7 @@ int config_parse_memory_limit(
         uint64_t bytes = CGROUP_LIMIT_MAX;
         int r;
 
-        if (isempty(rvalue) && STR_IN_SET(lvalue, "DefaultMemoryLow",
-                                                  "DefaultMemoryMin",
-                                                  "MemoryLow",
+        if (isempty(rvalue) && STR_IN_SET(lvalue, "MemoryLow",
                                                   "StartupMemoryLow",
                                                   "MemoryMin"))
                 bytes = CGROUP_LIMIT_MIN;
@@ -3824,31 +3814,17 @@ int config_parse_memory_limit(
                                                "StartupMemoryZSwapMax",
                                                "MemoryLow",
                                                "StartupMemoryLow",
-                                               "MemoryMin",
-                                               "DefaultMemoryLow",
-                                               "DefaultstartupMemoryLow",
-                                               "DefaultMemoryMin"))) {
+                                               "MemoryMin"))) {
                         log_syntax(unit, LOG_WARNING, filename, line, 0, "Memory limit '%s' out of range, ignoring.", rvalue);
                         return 0;
                 }
         }
 
-        if (streq(lvalue, "DefaultMemoryLow")) {
-                c->default_memory_low = bytes;
-                c->default_memory_low_set = true;
-        } else if (streq(lvalue, "DefaultStartupMemoryLow")) {
-                c->default_startup_memory_low = bytes;
-                c->default_startup_memory_low_set = true;
-        } else if (streq(lvalue, "DefaultMemoryMin")) {
-                c->default_memory_min = bytes;
-                c->default_memory_min_set = true;
-        } else if (streq(lvalue, "MemoryMin")) {
+        if (streq(lvalue, "MemoryMin"))
                 c->memory_min = bytes;
-                c->memory_min_set = true;
-        } else if (streq(lvalue, "MemoryLow")) {
+        else if (streq(lvalue, "MemoryLow"))
                 c->memory_low = bytes;
-                c->memory_low_set = true;
-        } else if (streq(lvalue, "StartupMemoryLow")) {
+        else if (streq(lvalue, "StartupMemoryLow")) {
                 c->startup_memory_low = bytes;
                 c->startup_memory_low_set = true;
         } else if (streq(lvalue, "MemoryHigh"))
@@ -5199,7 +5175,9 @@ int config_parse_mount_images(
 
         if (isempty(rvalue)) {
                 /* Empty assignment resets the list */
-                c->mount_images = mount_image_free_many(c->mount_images, &c->n_mount_images);
+                mount_image_free_many(c->mount_images, c->n_mount_images);
+                c->mount_images = NULL;
+                c->n_mount_images = 0;
                 return 0;
         }
 
@@ -5269,7 +5247,6 @@ int config_parse_mount_images(
 
                 for (;;) {
                         _cleanup_free_ char *partition = NULL, *mount_options = NULL, *mount_options_resolved = NULL;
-                        MountOptions *o = NULL;
                         PartitionDesignator partition_designator;
 
                         r = extract_many_words(&q, ":", EXTRACT_CUNESCAPE|EXTRACT_UNESCAPE_SEPARATORS, &partition, &mount_options);
@@ -5289,14 +5266,9 @@ int config_parse_mount_images(
                                         continue;
                                 }
 
-                                o = new(MountOptions, 1);
-                                if (!o)
-                                        return log_oom();
-                                *o = (MountOptions) {
-                                        .partition_designator = PARTITION_ROOT,
-                                        .options = TAKE_PTR(mount_options_resolved),
-                                };
-                                LIST_APPEND(mount_options, options, o);
+                                r = mount_options_set_and_consume(&options, PARTITION_ROOT, TAKE_PTR(mount_options_resolved));
+                                if (r < 0)
+                                        return r;
 
                                 break;
                         }
@@ -5313,14 +5285,9 @@ int config_parse_mount_images(
                                 continue;
                         }
 
-                        o = new(MountOptions, 1);
-                        if (!o)
-                                return log_oom();
-                        *o = (MountOptions) {
-                                .partition_designator = partition_designator,
-                                .options = TAKE_PTR(mount_options_resolved),
-                        };
-                        LIST_APPEND(mount_options, options, o);
+                        r = mount_options_set_and_consume(&options, partition_designator, TAKE_PTR(mount_options_resolved));
+                        if (r < 0)
+                                return r;
                 }
 
                 r = mount_image_add(&c->mount_images, &c->n_mount_images,
@@ -5358,7 +5325,9 @@ int config_parse_extension_images(
 
         if (isempty(rvalue)) {
                 /* Empty assignment resets the list */
-                c->extension_images = mount_image_free_many(c->extension_images, &c->n_extension_images);
+                mount_image_free_many(c->extension_images, c->n_extension_images);
+                c->extension_images = NULL;
+                c->n_extension_images = 0;
                 return 0;
         }
 
@@ -5411,7 +5380,6 @@ int config_parse_extension_images(
 
                 for (;;) {
                         _cleanup_free_ char *partition = NULL, *mount_options = NULL, *mount_options_resolved = NULL;
-                        MountOptions *o = NULL;
                         PartitionDesignator partition_designator;
 
                         r = extract_many_words(&q, ":", EXTRACT_CUNESCAPE|EXTRACT_UNESCAPE_SEPARATORS, &partition, &mount_options);
@@ -5431,14 +5399,12 @@ int config_parse_extension_images(
                                         continue;
                                 }
 
-                                o = new(MountOptions, 1);
-                                if (!o)
-                                        return log_oom();
-                                *o = (MountOptions) {
-                                        .partition_designator = PARTITION_ROOT,
-                                        .options = TAKE_PTR(mount_options_resolved),
-                                };
-                                LIST_APPEND(mount_options, options, o);
+                                if (!options) {
+                                        options = new0(MountOptions, 1);
+                                        if (!options)
+                                                return log_oom();
+                                }
+                                free_and_replace(options->options[PARTITION_ROOT], mount_options_resolved);
 
                                 break;
                         }
@@ -5454,14 +5420,12 @@ int config_parse_extension_images(
                                 continue;
                         }
 
-                        o = new(MountOptions, 1);
-                        if (!o)
-                                return log_oom();
-                        *o = (MountOptions) {
-                                .partition_designator = partition_designator,
-                                .options = TAKE_PTR(mount_options_resolved),
-                        };
-                        LIST_APPEND(mount_options, options, o);
+                        if (!options) {
+                                options = new0(MountOptions, 1);
+                                if (!options)
+                                        return log_oom();
+                        }
+                        free_and_replace(options->options[partition_designator], mount_options_resolved);
                 }
 
                 r = mount_image_add(&c->extension_images, &c->n_extension_images,
@@ -5994,6 +5958,47 @@ int config_parse_concurrency_max(
         }
 
         return config_parse_unsigned(unit, filename, line, section, section_line, lvalue, ltype, rvalue, data, userdata);
+}
+
+int config_parse_bind_network_interface(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        CGroupContext *c = ASSERT_PTR(data);
+
+        _cleanup_free_ char *k = NULL;
+        const Unit *u = ASSERT_PTR(userdata);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                c->bind_network_interface = mfree(c->bind_network_interface);
+                return 0;
+        }
+
+        r = unit_full_printf(u, rvalue, &k);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to resolve unit specifiers in %s, ignoring: %m", rvalue);
+                return 0;
+        }
+
+        if (!ifname_valid_full(k, IFNAME_VALID_ALTERNATIVE)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0, "Invalid interface name, ignoring: %s", k);
+                return 0;
+        }
+
+        return free_and_strdup_warn(&c->bind_network_interface, k);
 }
 
 static int merge_by_names(Unit *u, Set *names, const char *id) {

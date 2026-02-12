@@ -132,18 +132,6 @@ static int exec_cgroup_context_serialize(const CGroupContext *c, FILE *f) {
                         return r;
         }
 
-        if (c->default_memory_min > 0) {
-                r = serialize_item_format(f, "exec-cgroup-context-default-memory-min", "%" PRIu64, c->default_memory_min);
-                if (r < 0)
-                        return r;
-        }
-
-        if (c->default_memory_low > 0) {
-                r = serialize_item_format(f, "exec-cgroup-context-default-memory-low", "%" PRIu64, c->default_memory_low);
-                if (r < 0)
-                        return r;
-        }
-
         if (c->memory_min > 0) {
                 r = serialize_item_format(f, "exec-cgroup-context-memory-min", "%" PRIu64, c->memory_min);
                 if (r < 0)
@@ -225,26 +213,6 @@ static int exec_cgroup_context_serialize(const CGroupContext *c, FILE *f) {
                 if (r < 0)
                         return r;
         }
-
-        r = serialize_bool_elide(f, "exec-cgroup-context-default-memory-min-set", c->default_memory_min_set);
-        if (r < 0)
-                return r;
-
-        r = serialize_bool_elide(f, "exec-cgroup-context-default-memory-low-set", c->default_memory_low_set);
-        if (r < 0)
-                return r;
-
-        r = serialize_bool_elide(f, "exec-cgroup-context-default-startup-memory-low-set", c->default_startup_memory_low_set);
-        if (r < 0)
-                return r;
-
-        r = serialize_bool_elide(f, "exec-cgroup-context-memory-min-set", c->memory_min_set);
-        if (r < 0)
-                return r;
-
-        r = serialize_bool_elide(f, "exec-cgroup-context-memory-low-set", c->memory_low_set);
-        if (r < 0)
-                return r;
 
         r = serialize_bool_elide(f, "exec-cgroup-context-startup-memory-low-set", c->startup_memory_low_set);
         if (r < 0)
@@ -428,6 +396,10 @@ static int exec_cgroup_context_serialize(const CGroupContext *c, FILE *f) {
         if (r < 0)
                 return r;
 
+        r = serialize_item(f, "exec-cgroup-context-bind-iface", c->bind_network_interface);
+        if (r < 0)
+                return r;
+
         fputc('\n', f); /* End marker */
 
         return 0;
@@ -528,14 +500,6 @@ static int exec_cgroup_context_deserialize(CGroupContext *c, FILE *f) {
                         r = safe_atou64(val, &c->startup_io_weight);
                         if (r < 0)
                                 return r;
-                } else if ((val = startswith(l, "exec-cgroup-context-default-memory-min="))) {
-                        r = safe_atou64(val, &c->default_memory_min);
-                        if (r < 0)
-                                return r;
-                } else if ((val = startswith(l, "exec-cgroup-context-default-memory-low="))) {
-                        r = safe_atou64(val, &c->default_memory_low);
-                        if (r < 0)
-                                return r;
                 } else if ((val = startswith(l, "exec-cgroup-context-memory-min="))) {
                         r = safe_atou64(val, &c->memory_min);
                         if (r < 0)
@@ -593,31 +557,6 @@ static int exec_cgroup_context_deserialize(CGroupContext *c, FILE *f) {
                         r = safe_atou64(val, &c->tasks_max.scale);
                         if (r < 0)
                                 return r;
-                } else if ((val = startswith(l, "exec-cgroup-context-default-memory-min-set="))) {
-                        r = parse_boolean(val);
-                        if (r < 0)
-                                return r;
-                        c->default_memory_min_set = r;
-                } else if ((val = startswith(l, "exec-cgroup-context-default-memory-low-set="))) {
-                        r = parse_boolean(val);
-                        if (r < 0)
-                                return r;
-                        c->default_memory_low_set = r;
-                } else if ((val = startswith(l, "exec-cgroup-context-default-startup-memory-low-set="))) {
-                        r = parse_boolean(val);
-                        if (r < 0)
-                                return r;
-                        c->default_startup_memory_low_set = r;
-                } else if ((val = startswith(l, "exec-cgroup-context-memory-min-set="))) {
-                        r = parse_boolean(val);
-                        if (r < 0)
-                                return r;
-                        c->memory_min_set = r;
-                } else if ((val = startswith(l, "exec-cgroup-context-memory-low-set="))) {
-                        r = parse_boolean(val);
-                        if (r < 0)
-                                return r;
-                        c->memory_low_set = r;
                 } else if ((val = startswith(l, "exec-cgroup-context-startup-memory-low-set="))) {
                         r = parse_boolean(val);
                         if (r < 0)
@@ -907,6 +846,10 @@ static int exec_cgroup_context_deserialize(CGroupContext *c, FILE *f) {
                         if (r < 0)
                                 return r;
                         c->restrict_network_interfaces_is_allow_list = r;
+                } else if ((val = startswith(l, "exec-cgroup-context-bind-iface="))) {
+                        r = free_and_strdup(&c->bind_network_interface, val);
+                        if (r < 0)
+                                return r;
                 } else
                         log_warning("Failed to parse serialized line, ignoring: %s", l);
         }
@@ -1539,6 +1482,77 @@ static int exec_parameters_deserialize(ExecParameters *p, FILE *f, FDSet *fds) {
         return 0;
 }
 
+static int serialize_mount_options(const MountOptions *mount_options, char **s) {
+        assert(s);
+
+        if (!mount_options)
+                return 0;
+
+        for (PartitionDesignator i = 0; i < _PARTITION_DESIGNATOR_MAX; i++) {
+                _cleanup_free_ char *escaped = NULL;
+
+                if (isempty(mount_options->options[i]))
+                        continue;
+
+                escaped = shell_escape(mount_options->options[i], ":");
+                if (!escaped)
+                        return log_oom_debug();
+
+                if (!strextend(s,
+                               " ",
+                               partition_designator_to_string(i),
+                               ":",
+                               escaped))
+                        return log_oom_debug();
+        }
+
+        return 0;
+}
+
+static int deserialize_mount_options(const char *s, MountOptions **ret_mount_options) {
+        _cleanup_(mount_options_free_allp) MountOptions *options = NULL;
+        int r;
+
+        assert(ret_mount_options);
+
+        for (;;) {
+                _cleanup_free_ char *word = NULL, *mount_options = NULL, *partition = NULL;
+                PartitionDesignator partition_designator;
+                const char *p;
+
+                r = extract_first_word(&s, &word, NULL, 0);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        break;
+
+                p = word;
+                r = extract_many_words(&p, ":", EXTRACT_CUNESCAPE|EXTRACT_UNESCAPE_SEPARATORS, &partition, &mount_options);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        continue;
+                if (r != 2) {
+                        log_warning("Failed to parse mount options entry '%s', ignoring.", word);
+                        continue;
+                }
+
+                partition_designator = partition_designator_from_string(partition);
+                if (partition_designator < 0) {
+                        log_warning_errno(partition_designator, "Unknown partition designator '%s' in exec-context-root-image-options= entry, ignoring.", partition);
+                        continue;
+                }
+
+                r = mount_options_set_and_consume(&options, partition_designator, TAKE_PTR(mount_options));
+                if (r < 0)
+                        return r;
+        }
+
+        *ret_mount_options = TAKE_PTR(options);
+
+        return 0;
+}
+
 static int exec_context_serialize(const ExecContext *c, FILE *f) {
         int r;
 
@@ -1586,22 +1600,9 @@ static int exec_context_serialize(const ExecContext *c, FILE *f) {
         if (c->root_image_options) {
                 _cleanup_free_ char *options = NULL;
 
-                LIST_FOREACH(mount_options, o, c->root_image_options) {
-                        if (isempty(o->options))
-                                continue;
-
-                        _cleanup_free_ char *escaped = NULL;
-                        escaped = shell_escape(o->options, ":");
-                        if (!escaped)
-                                return log_oom_debug();
-
-                        if (!strextend(&options,
-                                        " ",
-                                        partition_designator_to_string(o->partition_designator),
-                                               ":",
-                                               escaped))
-                                        return log_oom_debug();
-                }
+                r = serialize_mount_options(c->root_image_options, &options);
+                if (r < 0)
+                        return r;
 
                 r = serialize_item(f, "exec-context-root-image-options", options);
                 if (r < 0)
@@ -1653,6 +1654,10 @@ static int exec_context_serialize(const ExecContext *c, FILE *f) {
                 return r;
 
         r = serialize_item_tristate(f, "exec-context-memory-ksm", c->memory_ksm);
+        if (r < 0)
+                return r;
+
+        r = serialize_item(f, "exec-context-memory-thp", memory_thp_to_string(c->memory_thp));
         if (r < 0)
                 return r;
 
@@ -2390,23 +2395,9 @@ static int exec_context_serialize(const ExecContext *c, FILE *f) {
                 if (!s)
                         return log_oom_debug();
 
-                LIST_FOREACH(mount_options, o, mount->mount_options) {
-                        _cleanup_free_ char *escaped = NULL;
-
-                        if (isempty(o->options))
-                                continue;
-
-                        escaped = shell_escape(o->options, ":");
-                        if (!escaped)
-                                return log_oom_debug();
-
-                        if (!strextend(&s,
-                                       " ",
-                                       partition_designator_to_string(o->partition_designator),
-                                       ":",
-                                       escaped))
-                                return log_oom_debug();
-                }
+                r = serialize_mount_options(mount->mount_options, &s);
+                if (r < 0)
+                        return r;
 
                 r = serialize_item(f, "exec-context-mount-image", s);
                 if (r < 0)
@@ -2425,23 +2416,9 @@ static int exec_context_serialize(const ExecContext *c, FILE *f) {
                 if (!s)
                         return log_oom_debug();
 
-                LIST_FOREACH(mount_options, o, mount->mount_options) {
-                        _cleanup_free_ char *escaped = NULL;
-
-                        if (isempty(o->options))
-                                continue;
-
-                        escaped = shell_escape(o->options, ":");
-                        if (!escaped)
-                                return log_oom_debug();
-
-                        if (!strextend(&s,
-                                       " ",
-                                       partition_designator_to_string(o->partition_designator),
-                                       ":",
-                                       escaped))
-                                return log_oom_debug();
-                }
+                r = serialize_mount_options(mount->mount_options, &s);
+                if (r < 0)
+                        return r;
 
                 r = serialize_item(f, "exec-context-extension-image", s);
                 if (r < 0)
@@ -2557,38 +2534,13 @@ static int exec_context_deserialize(ExecContext *c, FILE *f) {
                                 return k;
                         free_and_replace(c->root_image, p);
                 } else if ((val = startswith(l, "exec-context-root-image-options="))) {
-                        for (;;) {
-                                _cleanup_free_ char *word = NULL, *mount_options = NULL, *partition = NULL;
-                                PartitionDesignator partition_designator;
-                                MountOptions *o = NULL;
-                                const char *p;
+                        _cleanup_(mount_options_free_allp) MountOptions *options = NULL;
 
-                                r = extract_first_word(&val, &word, NULL, 0);
-                                if (r < 0)
-                                        return r;
-                                if (r == 0)
-                                        break;
+                        r = deserialize_mount_options(val, &options);
+                        if (r < 0)
+                                return r;
 
-                                p = word;
-                                r = extract_many_words(&p, ":", EXTRACT_CUNESCAPE|EXTRACT_UNESCAPE_SEPARATORS, &partition, &mount_options);
-                                if (r < 0)
-                                        return r;
-                                if (r == 0)
-                                        continue;
-
-                                partition_designator = partition_designator_from_string(partition);
-                                if (partition_designator < 0)
-                                        return -EINVAL;
-
-                                o = new(MountOptions, 1);
-                                if (!o)
-                                        return log_oom_debug();
-                                *o = (MountOptions) {
-                                        .partition_designator = partition_designator,
-                                        .options = TAKE_PTR(mount_options),
-                                };
-                                LIST_APPEND(mount_options, c->root_image_options, o);
-                        }
+                        free_and_replace_full(c->root_image_options, options, mount_options_free_all);
                 } else if ((val = startswith(l, "exec-context-root-verity="))) {
                         r = free_and_strdup(&c->root_verity, val);
                         if (r < 0)
@@ -2641,6 +2593,10 @@ static int exec_context_deserialize(ExecContext *c, FILE *f) {
                         r = safe_atoi(val, &c->memory_ksm);
                         if (r < 0)
                                 return r;
+                } else if ((val = startswith(l, "exec-context-memory-thp="))) {
+                        c->memory_thp = memory_thp_from_string(val);
+                        if (c->memory_thp < 0)
+                                return c->memory_thp;
                 } else if ((val = startswith(l, "exec-context-private-tmp="))) {
                         c->private_tmp = private_tmp_from_string(val);
                         if (c->private_tmp < 0)
@@ -3530,54 +3486,9 @@ static int exec_context_deserialize(ExecContext *c, FILE *f) {
                         if (isempty(destination))
                                 continue;
 
-                        for (;;) {
-                                _cleanup_free_ char *tuple = NULL, *partition = NULL, *opts = NULL;
-                                PartitionDesignator partition_designator;
-                                MountOptions *o = NULL;
-                                const char *p;
-
-                                r = extract_first_word(&val, &tuple, NULL, EXTRACT_UNQUOTE|EXTRACT_RETAIN_ESCAPE);
-                                if (r < 0)
-                                        return r;
-                                if (r == 0)
-                                        break;
-
-                                p = tuple;
-                                r = extract_many_words(&p,
-                                                       ":",
-                                                       EXTRACT_CUNESCAPE|EXTRACT_UNESCAPE_SEPARATORS,
-                                                       &partition,
-                                                       &opts);
-                                if (r < 0)
-                                        return r;
-                                if (r == 0)
-                                        continue;
-                                if (r == 1) {
-                                        o = new(MountOptions, 1);
-                                        if (!o)
-                                                return log_oom_debug();
-                                        *o = (MountOptions) {
-                                                .partition_designator = PARTITION_ROOT,
-                                                .options = TAKE_PTR(partition),
-                                        };
-                                        LIST_APPEND(mount_options, options, o);
-
-                                        continue;
-                                }
-
-                                partition_designator = partition_designator_from_string(partition);
-                                if (partition_designator < 0)
-                                        continue;
-
-                                o = new(MountOptions, 1);
-                                if (!o)
-                                        return log_oom_debug();
-                                *o = (MountOptions) {
-                                        .partition_designator = partition_designator,
-                                        .options = TAKE_PTR(opts),
-                                };
-                                LIST_APPEND(mount_options, options, o);
-                        }
+                        r = deserialize_mount_options(val, &options);
+                        if (r < 0)
+                                return r;
 
                         r = mount_image_add(&c->mount_images, &c->n_mount_images,
                                         &(MountImage) {
@@ -3610,54 +3521,9 @@ static int exec_context_deserialize(ExecContext *c, FILE *f) {
                                 s++;
                         }
 
-                        for (;;) {
-                                _cleanup_free_ char *tuple = NULL, *partition = NULL, *opts = NULL;
-                                PartitionDesignator partition_designator;
-                                MountOptions *o = NULL;
-                                const char *p;
-
-                                r = extract_first_word(&val, &tuple, NULL, EXTRACT_UNQUOTE|EXTRACT_RETAIN_ESCAPE);
-                                if (r < 0)
-                                        return r;
-                                if (r == 0)
-                                        break;
-
-                                p = tuple;
-                                r = extract_many_words(&p,
-                                                       ":",
-                                                       EXTRACT_CUNESCAPE|EXTRACT_UNESCAPE_SEPARATORS,
-                                                       &partition,
-                                                       &opts);
-                                if (r < 0)
-                                        return r;
-                                if (r == 0)
-                                        continue;
-                                if (r == 1) {
-                                        o = new(MountOptions, 1);
-                                        if (!o)
-                                                return log_oom_debug();
-                                        *o = (MountOptions) {
-                                                .partition_designator = PARTITION_ROOT,
-                                                .options = TAKE_PTR(partition),
-                                        };
-                                        LIST_APPEND(mount_options, options, o);
-
-                                        continue;
-                                }
-
-                                partition_designator = partition_designator_from_string(partition);
-                                if (partition_designator < 0)
-                                        continue;
-
-                                o = new(MountOptions, 1);
-                                if (!o)
-                                        return log_oom_debug();
-                                *o = (MountOptions) {
-                                        .partition_designator = partition_designator,
-                                        .options = TAKE_PTR(opts),
-                                };
-                                LIST_APPEND(mount_options, options, o);
-                        }
+                        r = deserialize_mount_options(val, &options);
+                        if (r < 0)
+                                return r;
 
                         r = mount_image_add(&c->extension_images, &c->n_extension_images,
                                         &(MountImage) {

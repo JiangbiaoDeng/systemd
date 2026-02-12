@@ -111,15 +111,9 @@ static SD_VARLINK_DEFINE_STRUCT_TYPE(
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemoryMin=bytes,%20MemoryLow=bytes"),
                 SD_VARLINK_DEFINE_FIELD(MemoryMin, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemoryMin=bytes,%20MemoryLow=bytes"),
-                SD_VARLINK_DEFINE_FIELD(DefaultMemoryMin, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
-                SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemoryMin=bytes,%20MemoryLow=bytes"),
                 SD_VARLINK_DEFINE_FIELD(MemoryLow, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemoryMin=bytes,%20MemoryLow=bytes"),
-                SD_VARLINK_DEFINE_FIELD(DefaultMemoryLow, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
-                SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemorySwapMax=bytes"),
                 SD_VARLINK_DEFINE_FIELD(StartupMemoryLow, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
-                SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemoryMin=bytes,%20MemoryLow=bytes"),
-                SD_VARLINK_DEFINE_FIELD(DefaultStartupMemoryLow, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemoryHigh=bytes"),
                 SD_VARLINK_DEFINE_FIELD(MemoryHigh, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man/"PROJECT_VERSION_STR"/systemd.resource-control.html#MemoryHigh=bytes"),
@@ -530,6 +524,11 @@ static SD_VARLINK_DEFINE_STRUCT_TYPE(
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#IOSchedulingPriority="),
                 SD_VARLINK_DEFINE_FIELD(IOSchedulingPriority, SD_VARLINK_INT, 0),
 
+                SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#MemoryKSM="),
+                SD_VARLINK_DEFINE_FIELD(MemoryKSM, SD_VARLINK_BOOL, SD_VARLINK_NULLABLE),
+                SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#MemoryTHP="),
+                SD_VARLINK_DEFINE_FIELD(MemoryTHP, SD_VARLINK_STRING, 0),
+
                 /* Sandboxing
                  * https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Sandboxing */
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#ProtectSystem="),
@@ -574,8 +573,6 @@ static SD_VARLINK_DEFINE_STRUCT_TYPE(
                 SD_VARLINK_DEFINE_FIELD(PrivateIPC, SD_VARLINK_STRING, 0),
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#IPCNamespacePath="),
                 SD_VARLINK_DEFINE_FIELD(IPCNamespacePath, SD_VARLINK_STRING, SD_VARLINK_NULLABLE),
-                SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#MemoryKSM="),
-                SD_VARLINK_DEFINE_FIELD(MemoryKSM, SD_VARLINK_BOOL, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#PrivatePIDs="),
                 SD_VARLINK_DEFINE_FIELD(PrivatePIDs, SD_VARLINK_STRING, 0),
                 SD_VARLINK_FIELD_COMMENT("https://www.freedesktop.org/software/systemd/man"PROJECT_VERSION_STR"systemd.exec.html#PrivateUsers="),
@@ -1006,10 +1003,6 @@ static SD_VARLINK_DEFINE_STRUCT_TYPE(
                 SD_VARLINK_FIELD_COMMENT("The cgroup runtime of the unit"),
                 SD_VARLINK_DEFINE_FIELD_BY_TYPE(CGroup, CGroupRuntime, SD_VARLINK_NULLABLE));
 
-static SD_VARLINK_DEFINE_ERROR(
-                NoSuchUnit,
-                SD_VARLINK_DEFINE_FIELD(parameter, SD_VARLINK_STRING, SD_VARLINK_NULLABLE));
-
 static SD_VARLINK_DEFINE_METHOD_FULL(
                 List,
                 SD_VARLINK_SUPPORTS_MORE,
@@ -1025,6 +1018,13 @@ static SD_VARLINK_DEFINE_METHOD_FULL(
                 SD_VARLINK_DEFINE_OUTPUT_BY_TYPE(context, UnitContext, 0),
                 SD_VARLINK_FIELD_COMMENT("Runtime information of the unit"),
                 SD_VARLINK_DEFINE_OUTPUT_BY_TYPE(runtime, UnitRuntime, 0));
+
+static SD_VARLINK_DEFINE_ERROR(
+                NoSuchUnit,
+                SD_VARLINK_DEFINE_FIELD(parameter, SD_VARLINK_STRING, SD_VARLINK_NULLABLE));
+
+static SD_VARLINK_DEFINE_ERROR(OnlyByDependency);
+static SD_VARLINK_DEFINE_ERROR(DBusShuttingDown);
 
 SD_VARLINK_DEFINE_INTERFACE(
                 io_systemd_Unit,
@@ -1090,4 +1090,8 @@ SD_VARLINK_DEFINE_INTERFACE(
 
                 /* Errors */
                 SD_VARLINK_SYMBOL_COMMENT("No matching unit found"),
-                &vl_error_NoSuchUnit);
+                &vl_error_NoSuchUnit,
+                SD_VARLINK_SYMBOL_COMMENT("Job for the unit may only be enqueued by dependencies"),
+                &vl_error_OnlyByDependency,
+                SD_VARLINK_SYMBOL_COMMENT("A unit that requires D-Bus cannot be started as D-Bus is shutting down"),
+                &vl_error_DBusShuttingDown);

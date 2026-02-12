@@ -31,7 +31,6 @@
 #include "dirent-util.h"
 #include "dissect-image.h"
 #include "efivars.h"
-#include "env-util.h"
 #include "errno-util.h"
 #include "extract-word.h"
 #include "factory-reset.h"
@@ -48,6 +47,7 @@
 #include "id128-util.h"
 #include "image-policy.h"
 #include "initrd-util.h"
+#include "install-file.h"
 #include "io-util.h"
 #include "json-util.h"
 #include "libmount-util.h"
@@ -318,6 +318,7 @@ typedef struct PartitionEncryptedVolume {
         char *name;
         char *keyfile;
         char *options;
+        bool fixate_volume_key;
 } PartitionEncryptedVolume;
 
 static PartitionEncryptedVolume* partition_encrypted_volume_free(PartitionEncryptedVolume *c) {
@@ -421,6 +422,7 @@ typedef struct Partition {
 
         bool dropped;
         bool factory_reset;
+        bool discarded;
         int32_t priority;
 
         uint32_t weight, padding_weight;
@@ -538,6 +540,7 @@ struct Context {
 
 #if HAVE_OPENSSL
         X509 *certificate;
+        OpenSSLAskPasswordUI *ui;
         EVP_PKEY *private_key;
 #endif
 
@@ -948,6 +951,7 @@ static Context* context_free(Context *context) {
 
 #if HAVE_OPENSSL
         X509_free(context->certificate);
+        openssl_ask_password_ui_free(context->ui);
         EVP_PKEY_free(context->private_key);
 #endif
 
@@ -2545,7 +2549,8 @@ static int config_parse_encrypted_volume(
                 void *data,
                 void *userdata) {
 
-        _cleanup_free_ char *volume = NULL, *keyfile = NULL, *options = NULL;
+        _cleanup_free_ char *volume = NULL, *keyfile = NULL, *options = NULL, *extra = NULL;
+        bool fixate_volume_key = false;
         Partition *p = ASSERT_PTR(data);
         int r;
 
@@ -2556,7 +2561,7 @@ static int config_parse_encrypted_volume(
 
         const char *q = rvalue;
         r = extract_many_words(&q, ":", EXTRACT_CUNESCAPE|EXTRACT_DONT_COALESCE_SEPARATORS|EXTRACT_UNQUOTE,
-                               &volume, &keyfile, &options);
+                               &volume, &keyfile, &options, &extra);
         if (r == -ENOMEM)
                 return log_oom();
         if (r < 0) {
@@ -2587,10 +2592,29 @@ static int config_parse_encrypted_volume(
         if (!p->encrypted_volume)
                 return log_oom();
 
+        for (const char *e = extra;;) {
+                _cleanup_free_ char *word = NULL;
+
+                r = extract_first_word(&e, &word, ",", EXTRACT_DONT_COALESCE_SEPARATORS | EXTRACT_UNESCAPE_SEPARATORS);
+                if (r < 0) {
+                        log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                   "Failed to parse extra options '%s', ignoring", word);
+                        break;
+                }
+                if (r == 0)
+                        break;
+
+                if (streq(word, "fixate-volume-key"))
+                        fixate_volume_key = true;
+                else
+                        log_syntax(unit, LOG_WARNING, filename, line, 0, "Unknown extra option '%s', ignoring", word);
+        }
+
         *p->encrypted_volume = (PartitionEncryptedVolume) {
                 .name = TAKE_PTR(volume),
                 .keyfile = TAKE_PTR(keyfile),
                 .options = TAKE_PTR(options),
+                .fixate_volume_key = fixate_volume_key,
         };
 
         return 0;
@@ -2725,10 +2749,10 @@ static bool partition_needs_populate(const Partition *p) {
 static MakeFileSystemFlags partition_mkfs_flags(const Partition *p) {
         MakeFileSystemFlags flags = 0;
 
-        if (arg_discard)
+        if (arg_discard && !p->discarded)
                 flags |= MKFS_DISCARD;
 
-        if (streq(p->format, "erofs") && !DEBUG_LOGGING)
+        if (streq(p->format, "erofs") && !DEBUG_LOGGING && !isatty_safe(STDERR_FILENO))
                 flags |= MKFS_QUIET;
 
         FOREACH_ARRAY(cf, p->copy_files, p->n_copy_files)
@@ -2848,16 +2872,17 @@ static int partition_read_definition(
 
         dropin_dirname = strjoina(filename, ".d");
 
-        r = config_parse_many(
+        r = config_parse_many_full(
                         STRV_MAKE_CONST(path),
                         conf_file_dirs,
                         dropin_dirname,
                         c->definitions ? NULL : arg_root,
+                        /* root_fd= */ -EBADF,
                         "Partition\0",
                         config_item_table_lookup, table,
                         CONFIG_PARSE_WARN,
                         p,
-                        NULL,
+                        /* ret_stats_by_path= */ NULL,
                         &p->drop_in_files);
         if (r < 0)
                 return r;
@@ -3373,7 +3398,7 @@ static int context_read_definitions(Context *context) {
                         &files,
                         ".conf",
                         context->definitions ? NULL : arg_root,
-                        CONF_FILES_REGULAR|CONF_FILES_FILTER_MASKED,
+                        CONF_FILES_REGULAR|CONF_FILES_FILTER_MASKED|CONF_FILES_WARN|CONF_FILES_DONT_PREFIX_ROOT,
                         dirs);
         if (r < 0)
                 return log_error_errno(r, "Failed to enumerate *.conf files: %m");
@@ -4644,6 +4669,7 @@ static int context_discard_partition(Context *context, Partition *p) {
                 return log_error_errno(r, "Failed to discard data for future partition %" PRIu64 ".", p->partno);
 
         log_info("Successfully discarded data from future partition %" PRIu64 ".", p->partno);
+        p->discarded = true;
         return 1;
 }
 
@@ -5172,6 +5198,44 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
         if (r < 0)
                 return log_error_errno(r, "Failed to LUKS2 format future partition: %m");
 
+        if (p->encrypted_volume && p->encrypted_volume->fixate_volume_key) {
+                _cleanup_free_ char *key_id = NULL, *hash_option = NULL;
+
+                r = sym_crypt_get_volume_key_size(cd);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to determine volume key size: %m");
+                if (r == 0)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Volume key has zero size and 'fixate-volume-key' is used");
+
+                _cleanup_(iovec_done) struct iovec vk = {
+                        .iov_base = malloc(r),
+                        .iov_len = r,
+                };
+
+                if (!vk.iov_base)
+                        return log_oom();
+
+                r = sym_crypt_volume_key_get(cd, CRYPT_ANY_SLOT, (char *) vk.iov_base, &vk.iov_len, NULL, 0);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to get volume key: %m");
+
+                r = cryptsetup_get_volume_key_id(
+                                cd,
+                                /* volume_name= */ p->encrypted_volume->name,
+                                /* volume_key= */ vk.iov_base,
+                                /* volume_key_size= */ vk.iov_len,
+                                /* ret= */ &key_id);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to get volume key hash: %m");
+
+                hash_option = strjoin("fixate-volume-key=", key_id);
+                if (!hash_option)
+                        return log_oom();
+
+                if (!strextend_with_separator(&p->encrypted_volume->options, ",", hash_option))
+                        return log_oom();
+        }
+
         if (IN_SET(p->encrypt, ENCRYPT_KEY_FILE, ENCRYPT_KEY_FILE_TPM2)) {
                 /* Use partition-specific key if available, otherwise fall back to global key */
                 struct iovec *iovec_key = arg_key.iov_base ? &arg_key : &p->key;
@@ -5440,11 +5504,7 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
                 if (r < 0)
                         return log_error_errno(r, "Failed to load reencryption context: %m");
 
-#if HAVE_CRYPT_REENCRYPT_RUN
                 r = sym_crypt_reencrypt_run(cd, NULL, NULL);
-#else
-                r = sym_crypt_reencrypt(cd, NULL);
-#endif
                 if (r < 0)
                         return log_error_errno(r, "Failed to encrypt %s: %m", node);
         } else {
@@ -5505,7 +5565,7 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
         return 0;
 #else
         return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
-                               "libcryptsetup is not supported or is missing required symbols, cannot encrypt.");
+                               "libcryptsetup is not supported, cannot encrypt.");
 #endif
 }
 
@@ -6218,30 +6278,6 @@ static int make_subvolumes_by_source_inode_hashmap(
         return 0;
 }
 
-static usec_t epoch_or_infinity(void) {
-        static usec_t cache;
-        static bool cached = false;
-        uint64_t epoch;
-        int r;
-
-        if (cached)
-                return cache;
-
-        r = secure_getenv_uint64("SOURCE_DATE_EPOCH", &epoch);
-        if (r >= 0) {
-                if (epoch <= UINT64_MAX / USEC_PER_SEC) { /* Overflow check */
-                        cached = true;
-                        return (cache = epoch * USEC_PER_SEC);
-                }
-                r = -ERANGE;
-        }
-        if (r != -ENXIO)
-                log_debug_errno(r, "Failed to parse $SOURCE_DATE_EPOCH, ignoring: %m");
-
-        cached = true;
-        return (cache = USEC_INFINITY);
-}
-
 static int file_is_denylisted(const char *source, Hashmap *denylist) {
         _cleanup_close_ int pfd = -EBADF;
         struct stat st, rst;
@@ -6334,7 +6370,7 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                 _cleanup_hashmap_free_ Hashmap *denylist = NULL;
                 _cleanup_hashmap_free_ Hashmap *subvolumes_by_source_inode = NULL;
                 _cleanup_close_ int sfd = -EBADF, pfd = -EBADF, tfd = -EBADF;
-                usec_t ts = epoch_or_infinity();
+                usec_t ts = parse_source_date_epoch();
 
                 r = make_copy_files_denylist(context, p, line->source, line->target, &denylist);
                 if (r < 0)
@@ -6475,7 +6511,7 @@ static int do_make_directories(Partition *p, const char *root) {
         }
 
         STRV_FOREACH(d, override_dirs ?: p->make_directories) {
-                r = mkdir_p_root_full(root, *d, UID_INVALID, GID_INVALID, 0755, epoch_or_infinity(), subvolumes);
+                r = mkdir_p_root_full(root, *d, UID_INVALID, GID_INVALID, 0755, parse_source_date_epoch(), subvolumes);
                 if (r < 0)
                         return log_error_errno(r, "Failed to create directory '%s' in file system: %m", *d);
         }
@@ -6721,7 +6757,10 @@ static int partition_populate_filesystem(Context *context, Partition *p, const c
 
         (void) dlopen_libmount();
 
-        r = safe_fork("(sd-copy)", FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, NULL);
+        r = pidref_safe_fork(
+                        "(sd-copy)",
+                        FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE,
+                        /* ret= */ NULL);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -8464,7 +8503,7 @@ static bool need_crypttab(Context *context) {
         return false;
 }
 
-static int context_crypttab(Context *context) {
+static int context_crypttab(Context *context, bool late) {
         _cleanup_(unlink_and_freep) char *t = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *path = NULL;
@@ -8507,7 +8546,7 @@ static int context_crypttab(Context *context) {
                         strempty(p->encrypted_volume->options));
         }
 
-        r = flink_tmpfile(f, t, path, 0);
+        r = flink_tmpfile(f, t, path, late ? LINK_TMPFILE_REPLACE : 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to link temporary file to %s: %m", path);
 
@@ -8913,7 +8952,7 @@ static int context_load_keys(Context *context) {
                                         .hup_fd = -EBADF,
                                 },
                                 &context->private_key,
-                                /* ret_user_interface= */ NULL);
+                                &context->ui);
                 if (r < 0)
                         return log_error_errno(r, "Failed to load private key from %s: %m", arg_private_key);
         }
@@ -9898,7 +9937,7 @@ static int acquire_root_devno(
                 return -ENOTBLK;
 
         /* From dm-crypt to backing partition */
-        r = block_get_originating(devno, &devno);
+        r = block_get_originating(devno, &devno, /* recursive= */ false);
         if (r == -ENOENT)
                 log_debug_errno(r, "Device '%s' has no dm-crypt/dm-verity device, no need to look for underlying block device.", p);
         else if (r < 0)
@@ -10307,21 +10346,12 @@ static int vl_method_list_candidate_devices(
         if (r < 0)
                 return r;
 
-        if (n == 0)
-                return sd_varlink_error(link, "io.systemd.Repart.NoCandidateDevices", NULL);
+        r = varlink_set_sentinel(link, "io.systemd.Repart.NoCandidateDevices");
+        if (r < 0)
+                return r;
 
-        _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
         FOREACH_ARRAY(d, l, n) {
-                if (v) {
-                        r = sd_varlink_notify(link, v);
-                        if (r < 0)
-                                return r;
-
-                        v = sd_json_variant_unref(v);
-                }
-
-                r = sd_json_buildo(
-                                &v,
+                r = sd_varlink_replybo(link,
                                 SD_JSON_BUILD_PAIR_STRING("node", d->node),
                                 JSON_BUILD_PAIR_STRV_NON_EMPTY("symlinks", d->symlinks),
                                 JSON_BUILD_PAIR_UNSIGNED_NOT_EQUAL("diskseq", d->diskseq, UINT64_MAX),
@@ -10333,8 +10363,7 @@ static int vl_method_list_candidate_devices(
                         return r;
         }
 
-        assert(v);
-        return sd_varlink_reply(link, v);
+        return 0;
 }
 
 static JSON_DISPATCH_ENUM_DEFINE(json_dispatch_empty_mode, EmptyMode, empty_mode_from_string);
@@ -10722,7 +10751,7 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 return r;
 
-        r = context_crypttab(context);
+        r = context_crypttab(context, /* late= */ false);
         if (r < 0)
                 return r;
 
@@ -10778,6 +10807,10 @@ static int run(int argc, char *argv[]) {
                 return r;
 
         r = context_split(context);
+        if (r < 0)
+                return r;
+
+        r = context_crypttab(context, /* late= */ true);
         if (r < 0)
                 return r;
 

@@ -54,7 +54,11 @@ at_exit() {
 trap at_exit EXIT
 
 update_checksums() {
-    (cd "$WORKDIR/source" && sha256sum uki* part* dir-*.tar.gz >SHA256SUMS)
+    (cd "$WORKDIR/source" && rm -f BEST-BEFORE-* && sha256sum uki* part* dir-*.tar.gz >SHA256SUMS)
+}
+
+update_checksums_with_best_before() {
+    (cd "$WORKDIR/source" && rm -f BEST-BEFORE-* && touch "BEST-BEFORE-$1" && sha256sum uki* part* dir-*.tar.gz "BEST-BEFORE-$1" >SHA256SUMS)
 }
 
 new_version() {
@@ -88,11 +92,27 @@ new_version() {
 }
 
 update_now() {
+    local update_type="${1:?}"
+
     # Update to newest version. First there should be an update ready, then we
     # do the update, and then there should not be any ready anymore
+    #
+    # The update can either be done monolithically (by calling the `update`
+    # verb) or split (`acquire` then `update`). Both options are allowed for
+    # most updates in the test suite, so the test suite can be run to test both
+    # modes. Some updates in the test suite need to be monolithic (e.g. when
+    # repairing an installation), so that can be overridden via the local.
 
     "$SYSUPDATE" --verify=no check-new
-    "$SYSUPDATE" --verify=no update
+    if [[ "$update_type" == "monolithic" ]]; then
+        "$SYSUPDATE" --verify=no update
+    elif [[ "$update_type" == "split-offline" ]]; then
+        "$SYSUPDATE" --verify=no acquire
+        "$SYSUPDATE" --verify=no update --offline
+    elif [[ "$update_type" == "split" ]]; then
+        "$SYSUPDATE" --verify=no acquire
+        "$SYSUPDATE" --verify=no update
+    fi
     (! "$SYSUPDATE" --verify=no check-new)
 }
 
@@ -131,6 +151,7 @@ verify_version_current() {
 }
 
 for sector_size in "${SECTOR_SIZES[@]}"; do
+for update_type in monolithic split-offline split; do
     # Disk size of:
     # - 1MB for GPT
     # - 4 partitions of 2048 sectors each
@@ -263,18 +284,18 @@ EOF
 
     # Install initial version and verify
     new_version "$sector_size" v1
-    update_now
+    update_now "$update_type"
     verify_version_current "$blockdev" "$sector_size" v1 1
 
     # Create second version, update and verify that it is added
     new_version "$sector_size" v2
-    update_now
+    update_now "$update_type"
     verify_version "$blockdev" "$sector_size" v1 1
     verify_version_current "$blockdev" "$sector_size" v2 2
 
     # Create third version, update and verify it replaced the first version
     new_version "$sector_size" v3
-    update_now
+    update_now "$update_type"
     verify_version_current "$blockdev" "$sector_size" v3 1
     verify_version "$blockdev" "$sector_size" v2 2
     test ! -f "$WORKDIR/xbootldr/EFI/Linux/uki_v1+3-0.efi"
@@ -291,16 +312,17 @@ EOF
     # Create a fifth version, that's complete on the server side. We should
     # completely skip the incomplete v4 and install v5 instead.
     new_version "$sector_size" v5
-    update_now
+    update_now "$update_type"
     verify_version "$blockdev" "$sector_size" v3 1
     verify_version_current "$blockdev" "$sector_size" v5 2
 
     # Make the local installation of v5 incomplete by deleting a file, then make
     # sure that sysupdate still recognizes the installation and can complete it
     # in place
+    # Always do this as a monolithic update for the repair to work.
     rm -r "$WORKDIR/xbootldr/EFI/Linux/uki_v5.efi.extra.d"
     "$SYSUPDATE" --offline list v5 | grep "incomplete" >/dev/null
-    update_now
+    update_now "monolithic"
     "$SYSUPDATE" --offline list v5 | grep -v "incomplete" >/dev/null
     verify_version "$blockdev" "$sector_size" v3 1
     verify_version_current "$blockdev" "$sector_size" v5 2
@@ -312,7 +334,7 @@ EOF
     mkdir "$CONFIGDIR/optional.feature.d"
     echo -e "[Feature]\nEnabled=true" > "$CONFIGDIR/optional.feature.d/enable.conf"
     "$SYSUPDATE" --offline list v5 | grep "incomplete" >/dev/null
-    update_now
+    update_now "monolithic"
     "$SYSUPDATE" --offline list v5 | grep -v "incomplete" >/dev/null
     verify_version "$blockdev" "$sector_size" v3 1
     verify_version_current "$blockdev" "$sector_size" v5 2
@@ -336,7 +358,7 @@ EOF
         updatectl update
     else
         # If no updatectl, gracefully fall back to systemd-sysupdate
-        update_now
+        update_now "$update_type"
     fi
     # User-facing updatectl returns 0 if there's no updates, so use the low-level
     # utility to make sure we did upgrade
@@ -393,21 +415,37 @@ MatchPattern=dir-@v
 InstancesMax=3
 EOF
 
-    update_now
+    update_now "$update_type"
     verify_version "$blockdev" "$sector_size" v6 1
     verify_version_current "$blockdev" "$sector_size" v7 2
+
+    # Check with a best before in the past
+    update_checksums_with_best_before "$(date -u +'%Y-%m-%d' -d 'last month')"
+    (! "$SYSUPDATE" --verify=no update)
+
+    # Retry but force check off
+    SYSTEMD_SYSUPDATE_VERIFY_FRESHNESS=0 "$SYSUPDATE" --verify=no update
+
+    # Check with best before in the future
+    update_checksums_with_best_before "$(date -u +'%Y-%m-%d' -d 'next month')"
+    "$SYSUPDATE" --verify=no update
+
+    # Check again without a best before
+    update_checksums
+    "$SYSUPDATE" --verify=no update
 
     # Let's make sure that we don't break our backwards-compat for .conf files
     # (what .transfer files were called before v257)
     for i in "$CONFIGDIR/"*.conf; do echo mv "$i" "${i%.conf}.transfer"; done
     new_version "$sector_size" v8
-    update_now
+    update_now "$update_type"
     verify_version_current "$blockdev" "$sector_size" v8 1
     verify_version "$blockdev" "$sector_size" v7 2
 
     # Cleanup
     [[ -b "$blockdev" ]] && losetup --detach "$blockdev"
     rm "$BACKING_FILE"
+done
 done
 
 touch /testok
